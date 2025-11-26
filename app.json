@@ -1,0 +1,33 @@
+{
+  "expo": {
+    "name": "Bramp AI",
+    "slug": "bramp-ai",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/logo.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "image": "./assets/logo.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0b0b10"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.bramp.ai"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/logo.png",
+        "backgroundColor": "#0b0b10"
+      },
+      "package": "com.bramp.ai"
+    },
+    "web": {
+      "favicon": "./assets/logo.png",
+      "bundler": "metro"
+    }
+  }
+}
