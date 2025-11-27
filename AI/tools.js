@@ -19,7 +19,7 @@ const AVAILABLE_TOOLS = [
     type: 'function',
     function: {
       name: 'create_sell_transaction',
-      description: 'Initiate a sell transaction to convert crypto to NGN. Use when user wants to sell, cash out, withdraw, or convert crypto to naira. REQUIRES AUTHENTICATION. REQUIRES: token (BTC/ETH/SOL/USDT/USDC/BNB/MATIC/AVAX) and network (must match token). Network examples: BITCOIN for BTC, ETHEREUM/ERC20 for ETH/USDC, TRON/TRC20 for USDT, SOLANA for SOL, BNB SMART CHAIN/BEP20 for BNB, POLYGON for MATIC, AVALANCHE for AVAX. If user doesn\'t know their network, ask where they\'re sending from (exchange/wallet) to help them figure it out. Amount is optional - user can send any amount. Do NOT call this function if token or network is missing - ask the user first. Do NOT call if user is not authenticated.',
+      description: 'Initiate a sell transaction to convert crypto to NGN. Includes optional bank validation and save payout feature. Requires authentication.',
       parameters: {
         type: 'object',
         properties: {
@@ -31,17 +31,30 @@ const AVAILABLE_TOOLS = [
           network: {
             type: 'string',
             enum: ['BTC', 'BITCOIN', 'ETH', 'ETHEREUM', 'ERC20', 'SOL', 'SOLANA', 'TRX', 'TRON', 'TRC20', 'BSC', 'BNB SMART CHAIN', 'BEP20', 'BINANCE', 'POLYGON', 'AVALANCHE'],
-            description: 'The blockchain network for the token (must match token). Common values: BTC/BITCOIN for Bitcoin, ETH/ETHEREUM/ERC20 for Ethereum, SOL/SOLANA for Solana, TRX/TRON/TRC20 for Tron, BSC/BNB SMART CHAIN/BEP20 for BNB Smart Chain, POLYGON for Polygon, AVALANCHE for Avalanche'
+            description: 'The blockchain network for the token (must match token).'
           },
           amount: {
             type: 'number',
-            description: 'Amount to sell in token units (optional - user can send any amount)'
+            description: 'Amount to sell in token units (optional)'
           },
           currency: {
             type: 'string',
             enum: ['TOKEN', 'NGN'],
-            description: 'Currency of the amount - TOKEN for crypto amount, NGN for NGN amount',
+            description: 'Currency of the amount - TOKEN for crypto, NGN for fiat',
             default: 'TOKEN'
+          },
+          bankCode: {
+            type: 'string',
+            description: 'Bank code for payout (optional)'
+          },
+          accountNumber: {
+            type: 'string',
+            description: 'Bank account number for payout (optional)'
+          },
+          savePayout: {
+            type: 'boolean',
+            description: 'If true, save bank info for future transactions',
+            default: false
           }
         },
         required: ['token', 'network']
@@ -437,86 +450,92 @@ async function executeTool(toolName, parameters, authCtx = {}) {
 
     switch (toolName) {
       case 'create_sell_transaction':
-        if (!authenticated) {
-          return {
-            success: false,
-            error: 'Authentication required',
-            message: 'You need to sign in to initiate a sell transaction. Please sign in first.',
-            requiresAuth: true
-          };
-        }
-        try {
-          const sellUrl = `${API_BASE_URL}/sell/initiate`;
-          logger.info('Calling sell endpoint', {
-            url: sellUrl,
-            hasAuth: !!headers.Authorization,
-            userId
-          });
+  if (!authenticated) {
+    return {
+      success: false,
+      error: 'Authentication required',
+      message: 'You need to sign in to initiate a sell transaction.',
+      requiresAuth: true
+    };
+  }
 
-          const sellRes = await axios.post(
-            sellUrl,
-            parameters,
-            {
-              headers,
-              timeout: 15000,
-              validateStatus: (status) => status < 500
-            }
-          );
+  try {
+    // 1️⃣ Validate bank details if provided
+    if (parameters.bankCode && parameters.accountNumber) {
+      const bankValidation = await executeTool('get_bank_details', {
+        bankCode: parameters.bankCode,
+        accountNumber: parameters.accountNumber
+      }, authCtx);
 
-          // Check for HTML error responses
-          const responseData = sellRes.data;
-          const isHtmlResponse = typeof responseData === 'string' && (
-            responseData.includes('<!DOCTYPE html>') ||
-            responseData.includes('<html') ||
-            responseData.includes('Service Suspended')
-          );
+      if (!bankValidation.success) {
+        return {
+          success: false,
+          error: 'Invalid bank details',
+          message: 'Please check your bank code and account number.'
+        };
+      }
 
-          if (isHtmlResponse || sellRes.status >= 400) {
-            return {
-              success: false,
-              error: sellRes.status >= 400 ? `Transaction failed: ${sellRes.status}` : 'Service unavailable',
-              message: 'Unable to initiate sell transaction. Please try again later or contact support.',
-              status: sellRes.status || 500
-            };
-          }
+      if (parameters.savePayout) {
+        await saveUserPayout(authCtx.userId, parameters.bankCode, parameters.accountNumber);
+      }
+    }
 
-          // Validate response data
-          if (!responseData || (typeof responseData === 'object' && !responseData.paymentId && !responseData.depositAddress)) {
-            logger.warn('create_sell_transaction: Response missing expected data', { data: responseData });
-          }
+    // 2️⃣ Call the sell endpoint
+    const sellUrl = `${API_BASE_URL}/sell/initiate`;
+    logger.info('Calling sell endpoint', { url: sellUrl, userId });
 
-          // Format helpful message with transaction details
-          let displayMessage = 'Sell transaction initiated successfully! ';
-          if (responseData.paymentId) {
-            displayMessage += `Payment ID: ${responseData.paymentId}. `;
-          }
-          if (responseData.depositAddress) {
-            displayMessage += `Deposit address: ${responseData.depositAddress}. `;
-          }
-          if (responseData.quote) {
-            const quote = responseData.quote;
-            if (quote.amountNGN) {
-              displayMessage += `You will receive ₦${Number(quote.amountNGN).toLocaleString()} for ${quote.amount || 'your crypto'}. `;
-            }
-          }
-          displayMessage += 'Please display the deposit address and payment details clearly to the user.';
+    const sellRes = await axios.post(
+      sellUrl,
+      parameters,
+      {
+        headers,
+        timeout: 15000,
+        validateStatus: (status) => status < 500
+      }
+    );
 
-          return {
-            success: true,
-            data: responseData,
-            message: displayMessage
-          };
-        } catch (sellError) {
-          if (sellError.code === 'ECONNABORTED' || sellError.message.includes('timeout')) {
-            return {
-              success: false,
-              error: 'Request timeout',
-              message: 'The transaction request took too long. Please try again.',
-              status: 408
-            };
-          }
-          throw sellError;
-        }
+    const responseData = sellRes.data;
+    const isHtmlResponse = typeof responseData === 'string' && (
+      responseData.includes('<!DOCTYPE html>') ||
+      responseData.includes('<html') ||
+      responseData.includes('Service Suspended')
+    );
+
+    if (isHtmlResponse || sellRes.status >= 400) {
+      return {
+        success: false,
+        error: sellRes.status >= 400 ? `Transaction failed: ${sellRes.status}` : 'Service unavailable',
+        message: 'Unable to initiate sell transaction. Please try again later.',
+        status: sellRes.status || 500
+      };
+    }
+
+    // 3️⃣ Format success message
+    let displayMessage = 'Sell transaction initiated successfully! ';
+    if (responseData.paymentId) displayMessage += `Payment ID: ${responseData.paymentId}. `;
+    if (responseData.depositAddress) displayMessage += `Deposit address: ${responseData.depositAddress}. `;
+    if (responseData.quote?.amountNGN) {
+      displayMessage += `You will receive ₦${Number(responseData.quote.amountNGN).toLocaleString()} for ${responseData.quote.amount || 'your crypto'}. `;
+    }
+    displayMessage += 'Please display the deposit address and payment details clearly to the user.';
+
+    return {
+      success: true,
+      data: responseData,
+      message: displayMessage
+    };
+
+  } catch (error) {
+    if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
+      return {
+        success: false,
+        error: 'Request timeout',
+        message: 'The transaction request took too long. Please try again.',
+        status: 408
+      };
+    }
+    throw error;
+  }
 
       case 'get_sell_quote':
         if (!authenticated) {
