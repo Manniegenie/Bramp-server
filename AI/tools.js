@@ -437,86 +437,88 @@ async function executeTool(toolName, parameters, authCtx = {}) {
 
     switch (toolName) {
       case 'create_sell_transaction':
-        if (!authenticated) {
-          return {
-            success: false,
-            error: 'Authentication required',
-            message: 'You need to sign in to initiate a sell transaction. Please sign in first.',
-            requiresAuth: true
-          };
-        }
-        try {
-          const sellUrl = `${API_BASE_URL}/sell/initiate`;
-          logger.info('Calling sell endpoint', {
-            url: sellUrl,
-            hasAuth: !!headers.Authorization,
-            userId
-          });
+  if (!authenticated) {
+    return {
+      success: false,
+      error: 'Authentication required',
+      message: 'You need to sign in to initiate a sell transaction. Please sign in first.',
+      requiresAuth: true
+    };
+  }
 
-          const sellRes = await axios.post(
-            sellUrl,
-            parameters,
-            {
-              headers,
-              timeout: 15000,
-              validateStatus: (status) => status < 500
-            }
-          );
+  try {
+    const sellUrl = `${API_BASE_URL}/sell/initiate`;
+    logger.info('Calling sell endpoint', {
+      url: sellUrl,
+      hasAuth: !!headers.Authorization,
+      userId
+    });
 
-          // Check for HTML error responses
-          const responseData = sellRes.data;
-          const isHtmlResponse = typeof responseData === 'string' && (
-            responseData.includes('<!DOCTYPE html>') ||
-            responseData.includes('<html') ||
-            responseData.includes('Service Suspended')
-          );
+    const sellRes = await axios.post(
+      sellUrl,
+      parameters,
+      {
+        headers,
+        timeout: 15000,
+        validateStatus: (status) => status < 500
+      }
+    );
 
-          if (isHtmlResponse || sellRes.status >= 400) {
-            return {
-              success: false,
-              error: sellRes.status >= 400 ? `Transaction failed: ${sellRes.status}` : 'Service unavailable',
-              message: 'Unable to initiate sell transaction. Please try again later or contact support.',
-              status: sellRes.status || 500
-            };
-          }
+    // Check for HTML error responses
+    const responseData = sellRes.data;
+    const isHtmlResponse = typeof responseData === 'string' && (
+      responseData.includes('<!DOCTYPE html>') ||
+      responseData.includes('<html') ||
+      responseData.includes('Service Suspended')
+    );
 
-          // Validate response data
-          if (!responseData || (typeof responseData === 'object' && !responseData.paymentId && !responseData.depositAddress)) {
-            logger.warn('create_sell_transaction: Response missing expected data', { data: responseData });
-          }
+    if (isHtmlResponse || sellRes.status >= 400) {
+      return {
+        success: false,
+        error: sellRes.status >= 400 ? `Transaction failed: ${sellRes.status}` : 'Service unavailable',
+        message: 'Unable to initiate sell transaction. Please try again later or contact support.',
+        status: sellRes.status || 500
+      };
+    }
 
-          // Format helpful message with transaction details
-          let displayMessage = 'Sell transaction initiated successfully! ';
-          if (responseData.paymentId) {
-            displayMessage += `Payment ID: ${responseData.paymentId}. `;
-          }
-          if (responseData.depositAddress) {
-            displayMessage += `Deposit address: ${responseData.depositAddress}. `;
-          }
-          if (responseData.quote) {
-            const quote = responseData.quote;
-            if (quote.amountNGN) {
-              displayMessage += `You will receive ₦${Number(quote.amountNGN).toLocaleString()} for ${quote.amount || 'your crypto'}. `;
-            }
-          }
-          displayMessage += 'Please display the deposit address and payment details clearly to the user.';
+    // Validate response data
+    if (!responseData || (typeof responseData === 'object' && !responseData.paymentId && !responseData.depositAddress)) {
+      logger.warn('create_sell_transaction: Response missing expected data', { data: responseData });
+    }
 
-          return {
-            success: true,
-            data: responseData,
-            message: displayMessage
-          };
-        } catch (sellError) {
-          if (sellError.code === 'ECONNABORTED' || sellError.message.includes('timeout')) {
-            return {
-              success: false,
-              error: 'Request timeout',
-              message: 'The transaction request took too long. Please try again.',
-              status: 408
-            };
-          }
-          throw sellError;
-        }
+    // Format helpful message with transaction details
+    let displayMessage = 'Sell transaction initiated successfully! ';
+    if (responseData.paymentId) {
+      displayMessage += `Payment ID: ${responseData.paymentId}. `;
+    }
+    if (responseData.depositAddress) {
+      displayMessage += `Deposit address: ${responseData.depositAddress}. `;
+    }
+    if (responseData.quote) {
+      const quote = responseData.quote;
+      if (quote.amountNGN) {
+        displayMessage += `You will receive ₦${Number(quote.amountNGN).toLocaleString()} for ${quote.amount || 'your crypto'}. `;
+      }
+    }
+    displayMessage += 'Please display the deposit address and payment details clearly to the user.';
+
+    return {
+      success: true,
+      data: responseData,
+      message: displayMessage
+    };
+  } catch (sellError) {
+    if (sellError.code === 'ECONNABORTED' || sellError.message.includes('timeout')) {
+      return {
+        success: false,
+        error: 'Request timeout',
+        message: 'The transaction request took too long. Please try again.',
+        status: 408
+      };
+    }
+    throw sellError;
+  }
+
 
       case 'get_sell_quote':
         if (!authenticated) {
