@@ -6,6 +6,9 @@ const axios = require('axios');
 const API_BASE_URL = process.env.API_BASE_URL || 'https://priscaai.online';
 const logger = require('../utils/logger');
 const cache = require('./cache');
+require('dotenv').config();
+const OpenAI = require('openai');
+
 
 /**
  * All available tools (functions) for the LLM
@@ -45,6 +48,24 @@ const AVAILABLE_TOOLS = [
       }
     }
   },
+
+  {
+  type: 'function',
+  function: {
+    name: 'match_naira',
+    description: 'Fetches the list of Naira banks and exposes the user-provided name for matching using the AI model’s reasoning capabilities.',
+    parameters: {
+      type: 'object',
+      properties: {
+        providedName: {
+          type: 'string',
+          description: 'The bank name provided by the user to be matched against the available bank list.'
+        }
+      },
+      required: ['providedName']
+    }
+  }
+},
   {
     type: 'function',
     function: {
@@ -202,26 +223,27 @@ const AVAILABLE_TOOLS = [
     }
   },
   {
-    type: 'function',
-    function: {
-      name: 'get_bank_details',
-      description: 'Enquire bank details (validate account number and get account name)',
-      parameters: {
-        type: 'object',
-        properties: {
-          bankCode: {
-            type: 'string',
-            description: 'Bank code (e.g., "044" for Access Bank)'
-          },
-          accountNumber: {
-            type: 'string',
-            description: 'Account number to validate'
-          }
+  type: 'function',
+  function: {
+    name: 'get_bank_details',
+    description: 'Enquire bank details (validate account number and get account name)',
+    parameters: {
+      type: 'object',
+      properties: {
+        bankCode: {
+          type: 'string',
+          description: 'Bank code (e.g., "044" for Access Bank)'
         },
-        required: ['bankCode', 'accountNumber']
-      }
+        accountNumber: {
+          type: 'string',
+          description: 'Account number to validate'
+        }
+      },
+      required: ['bankCode', 'accountNumber']
     }
-  },
+  }
+},
+
   {
     type: 'function',
     function: {
@@ -1107,69 +1129,116 @@ async function executeTool(toolName, parameters, authCtx = {}) {
           throw historyError;
         }
 
-      case 'get_bank_details':
-        if (!authenticated) {
-          return {
-            success: false,
-            error: 'Authentication required',
-            message: 'You need to sign in to validate bank details. Please sign in first.',
-            requiresAuth: true
-          };
+
+       case 'match_naira':
+  try {
+    const { providedName } = JSON.parse(toolCall.function.arguments);
+
+    // 1. Fetch Bank List
+    const response = await fetch(`${BASE_URL}/naira-accounts`, { method: 'GET' });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch bank list: ${response.statusText}`);
+    }
+
+    const result = await response.json();
+    const banks = Array.isArray(result.banks) ? result.banks : [];
+
+    // 2. AI Matching (using existing openai + env model)
+    const aiMatchResponse = await openai.chat.completions.create({
+      model: MODEL_NAME,
+      messages: [
+        {
+          role: "system",
+          content: `
+You are a matcher.
+Given a user-provided bank name and a list of banks,
+return ONLY:
+{
+  "bankName": "<best_match>",
+  "confidence": <0-1>
+}
+If unsure (<0.4), bankName = null.
+`
+        },
+        {
+          role: "user",
+          content: JSON.stringify({ providedName, banks })
         }
-        try {
-          const bankRes = await axios.post(
-            `${API_BASE_URL}/bankenquiry`,
-            parameters,
-            {
-              headers,
-              timeout: 15000,
-              validateStatus: (status) => status < 500
-            }
-          );
+      ],
+      temperature: 0
+    });
 
-          // Check for HTML error responses
-          const responseData = bankRes.data;
-          const isHtmlResponse = typeof responseData === 'string' && (
-            responseData.includes('<!DOCTYPE html>') ||
-            responseData.includes('<html') ||
-            responseData.includes('Service Suspended')
-          );
+    let matchPayload = {};
+    try {
+      matchPayload = JSON.parse(aiMatchResponse.choices[0].message.content);
+    } catch (e) {
+      matchPayload = { bankName: null, confidence: 0 };
+    }
 
-          if (isHtmlResponse || bankRes.status >= 400) {
-            return {
-              success: false,
-              error: bankRes.status >= 400 ? `Bank validation failed: ${bankRes.status}` : 'Service unavailable',
-              message: 'Unable to validate bank details. Please check the account number and bank code, or try again later.',
-              status: bankRes.status || 500
-            };
-          }
+    // 3. Extract bankCode from the matched bank
+    let bankCode = null;
+    if (matchPayload.bankName) {
+      const match = banks.find(
+        b => b.bankName.toLowerCase() === matchPayload.bankName.toLowerCase()
+      );
+      bankCode = match ? match.bankCode : null;
+    }
 
-          // Format helpful message with bank details
-          let displayMessage = 'Bank details validated successfully. ';
-          if (responseData.accountName) {
-            displayMessage += `Account name: ${responseData.accountName}. `;
-          }
-          if (responseData.bankName) {
-            displayMessage += `Bank: ${responseData.bankName}. `;
-          }
-          displayMessage += 'Please display the validated bank account name clearly to the user.';
+    // 4. Return Final Payload
+    return JSON.stringify({
+      success: true,
+      data: {
+        providedName,
+        banks,
+        count: result.count || 0,
+        bankName: matchPayload.bankName,
+        bankCode: bankCode,              // <-- EXPOSED HERE
+        accountName: providedName,
+        confidence: matchPayload.confidence
+      }
+    });
 
-          return {
-            success: true,
-            data: responseData,
-            message: displayMessage
-          };
-        } catch (bankError) {
-          if (bankError.code === 'ECONNABORTED' || bankError.message.includes('timeout')) {
-            return {
-              success: false,
-              error: 'Request timeout',
-              message: 'The bank validation request took too long. Please try again.',
-              status: 408
-            };
-          }
-          throw bankError;
-        }
+  } catch (error) {
+    return JSON.stringify({
+      success: false,
+      error: error.message
+    });
+  }
+
+case 'get_bank_details':
+  try {
+    const { bankCode, accountNumber } = JSON.parse(toolCall.function.arguments);
+
+    // Call your API to validate account and get details
+    const response = await fetch(`${BASE_URL}/bank-details?bankCode=${bankCode}&accountNumber=${accountNumber}`, {
+      method: 'GET'
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch bank details: ${response.statusText}`);
+    }
+
+    const result = await response.json();
+
+    return JSON.stringify({
+      success: true,
+      data: {
+        bankCode,
+        accountNumber,
+        accountName: result.accountName || null,  // returned by API
+        valid: result.valid || false,             // true/false
+        message: result.message || 'Bank details retrieved successfully'
+      }
+    });
+
+  } catch (error) {
+    return JSON.stringify({
+      success: false,
+      error: error.message
+    });
+  }
+
 
       case 'initiate_swap':
         if (!authenticated) {
