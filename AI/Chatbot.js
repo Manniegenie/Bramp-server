@@ -770,25 +770,30 @@ async function processChat({ sessionId, message, history = [], authCtx }) {
 
   // Detect intent to guide function calling
   const detectedIntent = quickIntentCheck(msg);
-  const contextAnalysis = analyzeConversationContext(msg, history, authCtx);
-  const finalIntent = contextAnalysis.intent || detectedIntent;
+const contextAnalysis = analyzeConversationContext(msg, history, authCtx);
+const finalIntent = contextAnalysis.intent || detectedIntent;
 
-  // Get recommended functions and tool choice based on intent
-  const recommendedFunctions = getRecommendedFunctionsForIntent(finalIntent, authCtx);
-  const toolChoice = getToolChoiceForIntent(finalIntent, authCtx, msg);
+// Get recommended functions and tool choice based on intent
+const recommendedFunctions = getRecommendedFunctionsForIntent(finalIntent, authCtx);
+let toolChoice = getToolChoiceForIntent(finalIntent, authCtx, msg);
 
-  // Reduce logging overhead - only log in debug mode or for errors
-  if (process.env.DEBUG_LOGGING === 'true') {
-    logger.info('Intent detected for function calling', {
-      message: msg.substring(0, 100),
-      detectedIntent,
-      finalIntent,
-      recommendedFunctions,
-      toolChoice: typeof toolChoice === 'object' ? toolChoice.function?.name : toolChoice,
-      authenticated: authCtx.authenticated
-    });
-  }
+// Normalize tool_choice to prevent invalid values (fixes 400 error if 'tool_choice' is mistakenly returned)
+if (typeof toolChoice === 'string' && toolChoice === 'tool_choice') {
+  toolChoice = 'auto';
+  logger.warn('Normalized invalid tool_choice from "tool_choice" to "auto"', { finalIntent });
+}
 
+// Reduce logging overhead - only log in debug mode or for errors
+if (process.env.DEBUG_LOGGING === 'true') {
+  logger.info('Intent detected for function calling', {
+    message: msg.substring(0, 100),
+    detectedIntent,
+    finalIntent,
+    recommendedFunctions,
+    toolChoice: typeof toolChoice === 'object' ? toolChoice.function?.name : toolChoice,
+    authenticated: authCtx.authenticated
+  });
+}
   // If OpenAI not available, return helpful message
   if (!openai) {
     return {
@@ -817,13 +822,13 @@ async function processChat({ sessionId, message, history = [], authCtx }) {
 
     // Call OpenAI with function calling
     const completion = await openai.chat.completions.create({
-      model: AI_MODEL,
-      messages: messages,
-      tools: AVAILABLE_TOOLS,
-      tool_choice: toolChoice, // Use intent-based tool choice
-      max_completion_tokens: AI_OUTPUT_MAX_TOKENS,
-      temperature: 0.7
-    });
+  model: AI_MODEL,
+  messages: messages,
+  tools: AVAILABLE_TOOLS,
+  tool_choice: toolChoice, // Now safely normalized
+  max_completion_tokens: AI_OUTPUT_MAX_TOKENS,
+  temperature: 0.7
+});
 
     const assistantMessage = completion.choices[0].message;
     let finalMessages = [...messages, assistantMessage];
