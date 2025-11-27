@@ -176,7 +176,7 @@ Guidelines:
     - Format numbers with commas (e.g., ₦1,500.00 not ₦1500)
     - Explain what each rate means
     
-    For sell transactions (get_sell_quote):
+    For sell transactions (create_sell_transaction, get_sell_quote):
     - Display the deposit address clearly
     - Show the payment ID if available
     - Display the quote: amount of crypto → amount in NGN (e.g., "0.1 BTC → ₦15,000,000")
@@ -322,7 +322,7 @@ function validateFunctionParameters(functionName, parameters, authCtx, userExper
  */
 function getRequiredParamsForFunction(functionName) {
   const paramMap = {
-    'get_sell_quote': ['token', 'amount', 'network'],
+    'create_sell_transaction': ['token', 'network'],
     'create_buy_transaction': ['token', 'network', 'amount'],
     'get_buy_quote': ['token', 'amount'],
     'check_transaction_status': ['paymentId'],
@@ -379,7 +379,10 @@ function getToolChoiceForIntent(intent, authCtx, message) {
     if (hasToken && hasAmount) {
       return { type: 'function', function: { name: 'get_sell_quote' } };
     }
-  
+    // If we have token and network and amount, suggest create transaction
+    if (hasToken && hasNetwork && hasAmount) {
+      return { type: 'function', function: { name: 'create_sell_transaction' } };
+    }
     // Otherwise, let LLM ask for missing info conversationally
     return 'auto';
   }
@@ -442,32 +445,116 @@ async function handleFunctionCall(toolCall, authCtx) {
 
   try {
     // Special handling for sell transactions - create session
-    if (functionName === 'get_sell_quote') {
-      // Execute the tool first
-      const toolResult = await executeTool(functionName, functionArgs, authCtx);
+    // Special handling for sell transactions - create session
+// Special handling for sell transactions - create session
+if (functionName === 'create_sell_transaction') {
+  // Execute the tool first
+  const toolResult = await executeTool(functionName, functionArgs, authCtx);
 
-      // Log tool execution result
-      logger.info('Tool execution result', {
-        function: functionName,
-        toolCallId,
-        success: toolResult.success,
-        hasData: !!toolResult.data,
-        message: toolResult.message,
-        error: toolResult.error,
-        paymentId: toolResult.data?.paymentId,
-        dataPreview: toolResult.data ? (typeof toolResult.data === 'object' ?
-          Object.keys(toolResult.data).slice(0, 5).join(', ') :
-          String(toolResult.data).substring(0, 100)) : null
+  // Log tool execution result
+  logger.info('Tool execution result', {
+    function: functionName,
+    toolCallId,
+    success: toolResult.success,
+    hasData: !!toolResult.data,
+    message: toolResult.message,
+    error: toolResult.error,
+    paymentId: toolResult.data?.paymentId,
+    dataPreview: toolResult.data ? (typeof toolResult.data === 'object' ?
+      Object.keys(toolResult.data).slice(0, 5).join(', ') :
+      String(toolResult.data).substring(0, 100)) : null
+  });
+
+  // Call save_payout immediately after successful sell transaction
+  if (toolResult.success && toolResult.data?.paymentId && functionArgs.bankCode && functionArgs.accountNumber) {
+    try {
+      logger.info('Calling save_payout after successful sell transaction', {
+        userId: authCtx.userId,
+        paymentId: toolResult.data.paymentId,
+        bankCode: functionArgs.bankCode,
+        accountNumber: functionArgs.accountNumber
       });
 
-      // Session management removed - no longer creating sessions
-
-      return {
-        role: 'tool',
-        tool_call_id: toolCallId,
-        content: JSON.stringify(toolResult)
+      // Call the payout endpoint
+      const payoutUrl = `${API_BASE_URL}/sell/payout`;
+      const headers = {
+        'Content-Type': 'application/json'
       };
+      if (authCtx.token) {
+        headers['Authorization'] = `Bearer ${authCtx.token}`;
+      }
+
+      const payoutResponse = await axios.post(
+        payoutUrl,
+        {
+          paymentId: toolResult.data.paymentId,
+          bankName: functionArgs.bankName || '',
+          bankCode: functionArgs.bankCode,
+          accountNumber: functionArgs.accountNumber,
+          accountName: functionArgs.accountName || ''
+        },
+        {
+          headers,
+          timeout: 10000,
+          validateStatus: (status) => status < 500
+        }
+      );
+
+      const payoutData = payoutResponse.data;
+
+      logger.info('save_payout execution result', {
+        success: payoutData.success,
+        message: payoutData.message,
+        paymentId: toolResult.data.paymentId
+      });
+
+      // Optionally merge the payout save status into the main result
+      if (payoutData.success) {
+        toolResult.payoutSaved = true;
+        toolResult.payoutDetails = {
+          bankName: functionArgs.bankName,
+          accountNumber: functionArgs.accountNumber,
+          accountName: functionArgs.accountName
+        };
+        logger.info('Payout details saved successfully', {
+          paymentId: toolResult.data.paymentId
+        });
+      } else {
+        logger.warn('Payout save returned success=false', {
+          paymentId: toolResult.data.paymentId,
+          message: payoutData.message
+        });
+      }
+    } catch (savePayoutError) {
+      logger.error('Failed to save payout details', {
+        error: savePayoutError.message,
+        status: savePayoutError.response?.status,
+        userId: authCtx.userId,
+        paymentId: toolResult.data?.paymentId
+      });
+      // Don't fail the transaction if payout save fails
+      // Just log it for debugging
     }
+  } else {
+    // Log why payout wasn't saved
+    if (!toolResult.success) {
+      logger.info('Payout not saved: sell transaction failed');
+    } else if (!toolResult.data?.paymentId) {
+      logger.warn('Payout not saved: no paymentId in response');
+    } else if (!functionArgs.bankCode || !functionArgs.accountNumber) {
+      logger.info('Payout not saved: missing bank details', {
+        hasBankCode: !!functionArgs.bankCode,
+        hasAccountNumber: !!functionArgs.accountNumber
+      });
+    }
+  }
+
+  return {
+    role: 'tool',
+    tool_call_id: toolCallId,
+    content: JSON.stringify(toolResult)
+  };
+}
 
     // Execute other tools normally
     const toolResult = await executeTool(functionName, functionArgs, authCtx);

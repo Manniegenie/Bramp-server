@@ -16,38 +16,39 @@ const OpenAI = require('openai');
  */
 const AVAILABLE_TOOLS = [
   {
-    type: 'function',
-    function: {
-      name: 'create_sell_transaction',
-      description: 'Initiate a sell transaction to convert crypto to NGN. Use when user wants to sell, cash out, withdraw, or convert crypto to naira. REQUIRES AUTHENTICATION. REQUIRES: token (BTC/ETH/SOL/USDT/USDC/BNB/MATIC/AVAX) and network (must match token). Network examples: BITCOIN for BTC, ETHEREUM/ERC20 for ETH/USDC, TRON/TRC20 for USDT, SOLANA for SOL, BNB SMART CHAIN/BEP20 for BNB, POLYGON for MATIC, AVALANCHE for AVAX. If user doesn\'t know their network, ask where they\'re sending from (exchange/wallet) to help them figure it out. Amount is optional - user can send any amount. Do NOT call this function if token or network is missing - ask the user first. Do NOT call if user is not authenticated.',
-      parameters: {
-        type: 'object',
-        properties: {
-          token: {
-            type: 'string',
-            enum: ['BTC', 'ETH', 'SOL', 'USDT', 'USDC', 'BNB', 'MATIC', 'AVAX'],
-            description: 'The cryptocurrency token to sell'
-          },
-          network: {
-            type: 'string',
-            enum: ['BTC', 'BITCOIN', 'ETH', 'ETHEREUM', 'ERC20', 'SOL', 'SOLANA', 'TRX', 'TRON', 'TRC20', 'BSC', 'BNB SMART CHAIN', 'BEP20', 'BINANCE', 'POLYGON', 'AVALANCHE'],
-            description: 'The blockchain network for the token (must match token). Common values: BTC/BITCOIN for Bitcoin, ETH/ETHEREUM/ERC20 for Ethereum, SOL/SOLANA for Solana, TRX/TRON/TRC20 for Tron, BSC/BNB SMART CHAIN/BEP20 for BNB Smart Chain, POLYGON for Polygon, AVALANCHE for Avalanche'
-          },
-          amount: {
-            type: 'number',
-            description: 'Amount to sell in token units (optional - user can send any amount)'
-          },
-          currency: {
-            type: 'string',
-            enum: ['TOKEN', 'NGN'],
-            description: 'Currency of the amount - TOKEN for crypto amount, NGN for NGN amount',
-            default: 'TOKEN'
-          }
+  type: 'function',
+  function: {
+    name: 'create_sell_transaction',
+    description: '...',
+    parameters: {
+      type: 'object',
+      properties: {
+        token: { /* existing */ },
+        network: { /* existing */ },
+        amount: { /* existing */ },
+        currency: { /* existing */ },
+        // Add these:
+        bankCode: {
+          type: 'string',
+          description: 'Bank code for payout (optional)'
         },
-        required: ['token', 'network', 'amount', 'currency']
-      }
+        accountNumber: {
+          type: 'string',
+          description: 'Account number for payout (optional)'
+        },
+        bankName: {
+          type: 'string',
+          description: 'Bank name for payout (optional)'
+        },
+        accountName: {
+          type: 'string',
+          description: 'Account name for payout (optional)'
+        }
+      },
+      required: ['token', 'network']
     }
-  },
+  }
+},
 
   {
   type: 'function',
@@ -84,7 +85,7 @@ const AVAILABLE_TOOLS = [
             description: 'Amount to sell in token units'
           }
         },
-        required: ['token', 'amount', 'token']
+        required: ['token', 'amount']
       }
     }
   },
@@ -437,88 +438,86 @@ async function executeTool(toolName, parameters, authCtx = {}) {
 
     switch (toolName) {
       case 'create_sell_transaction':
-  if (!authenticated) {
-    return {
-      success: false,
-      error: 'Authentication required',
-      message: 'You need to sign in to initiate a sell transaction. Please sign in first.',
-      requiresAuth: true
-    };
-  }
+        if (!authenticated) {
+          return {
+            success: false,
+            error: 'Authentication required',
+            message: 'You need to sign in to initiate a sell transaction. Please sign in first.',
+            requiresAuth: true
+          };
+        }
+        try {
+          const sellUrl = `${API_BASE_URL}/sell/initiate`;
+          logger.info('Calling sell endpoint', {
+            url: sellUrl,
+            hasAuth: !!headers.Authorization,
+            userId
+          });
 
-  try {
-    const sellUrl = `${API_BASE_URL}/sell/initiate`;
-    logger.info('Calling sell endpoint', {
-      url: sellUrl,
-      hasAuth: !!headers.Authorization,
-      userId
-    });
+          const sellRes = await axios.post(
+            sellUrl,
+            parameters,
+            {
+              headers,
+              timeout: 15000,
+              validateStatus: (status) => status < 500
+            }
+          );
 
-    const sellRes = await axios.post(
-      sellUrl,
-      parameters,
-      {
-        headers,
-        timeout: 15000,
-        validateStatus: (status) => status < 500
-      }
-    );
+          // Check for HTML error responses
+          const responseData = sellRes.data;
+          const isHtmlResponse = typeof responseData === 'string' && (
+            responseData.includes('<!DOCTYPE html>') ||
+            responseData.includes('<html') ||
+            responseData.includes('Service Suspended')
+          );
 
-    // Check for HTML error responses
-    const responseData = sellRes.data;
-    const isHtmlResponse = typeof responseData === 'string' && (
-      responseData.includes('<!DOCTYPE html>') ||
-      responseData.includes('<html') ||
-      responseData.includes('Service Suspended')
-    );
+          if (isHtmlResponse || sellRes.status >= 400) {
+            return {
+              success: false,
+              error: sellRes.status >= 400 ? `Transaction failed: ${sellRes.status}` : 'Service unavailable',
+              message: 'Unable to initiate sell transaction. Please try again later or contact support.',
+              status: sellRes.status || 500
+            };
+          }
 
-    if (isHtmlResponse || sellRes.status >= 400) {
-      return {
-        success: false,
-        error: sellRes.status >= 400 ? `Transaction failed: ${sellRes.status}` : 'Service unavailable',
-        message: 'Unable to initiate sell transaction. Please try again later or contact support.',
-        status: sellRes.status || 500
-      };
-    }
+          // Validate response data
+          if (!responseData || (typeof responseData === 'object' && !responseData.paymentId && !responseData.depositAddress)) {
+            logger.warn('create_sell_transaction: Response missing expected data', { data: responseData });
+          }
 
-    // Validate response data
-    if (!responseData || (typeof responseData === 'object' && !responseData.paymentId && !responseData.depositAddress)) {
-      logger.warn('create_sell_transaction: Response missing expected data', { data: responseData });
-    }
+          // Format helpful message with transaction details
+          let displayMessage = 'Sell transaction initiated successfully! ';
+          if (responseData.paymentId) {
+            displayMessage += `Payment ID: ${responseData.paymentId}. `;
+          }
+          if (responseData.depositAddress) {
+            displayMessage += `Deposit address: ${responseData.depositAddress}. `;
+          }
+          if (responseData.quote) {
+            const quote = responseData.quote;
+            if (quote.amountNGN) {
+              displayMessage += `You will receive ₦${Number(quote.amountNGN).toLocaleString()} for ${quote.amount || 'your crypto'}. `;
+            }
+          }
+          displayMessage += 'Please display the deposit address and payment details clearly to the user.';
 
-    // Format helpful message with transaction details
-    let displayMessage = 'Sell transaction initiated successfully! ';
-    if (responseData.paymentId) {
-      displayMessage += `Payment ID: ${responseData.paymentId}. `;
-    }
-    if (responseData.depositAddress) {
-      displayMessage += `Deposit address: ${responseData.depositAddress}. `;
-    }
-    if (responseData.quote) {
-      const quote = responseData.quote;
-      if (quote.amountNGN) {
-        displayMessage += `You will receive ₦${Number(quote.amountNGN).toLocaleString()} for ${quote.amount || 'your crypto'}. `;
-      }
-    }
-    displayMessage += 'Please display the deposit address and payment details clearly to the user.';
-
-    return {
-      success: true,
-      data: responseData,
-      message: displayMessage
-    };
-  } catch (sellError) {
-    if (sellError.code === 'ECONNABORTED' || sellError.message.includes('timeout')) {
-      return {
-        success: false,
-        error: 'Request timeout',
-        message: 'The transaction request took too long. Please try again.',
-        status: 408
-      };
-    }
-    throw sellError;
-  }
-
+          return {
+            success: true,
+            data: responseData,
+            message: displayMessage
+          };
+        } catch (sellError) {
+          if (sellError.code === 'ECONNABORTED' || sellError.message.includes('timeout')) {
+            return {
+              success: false,
+              error: 'Request timeout',
+              message: 'The transaction request took too long. Please try again.',
+              status: 408
+            };
+          }
+          throw sellError;
+        }
 
       case 'get_sell_quote':
         if (!authenticated) {
@@ -1208,39 +1207,70 @@ If unsure (<0.4), bankName = null.
     });
   }
 
-case 'get_bank_details':
-  try {
-    const { bankCode, accountNumber } = JSON.parse(toolCall.function.arguments);
 
-    // Call your API to validate account and get details
-    const response = await fetch(`${BASE_URL}/bank-details?bankCode=${bankCode}&accountNumber=${accountNumber}`, {
-      method: 'GET'
-    });
+      case 'get_bank_details':
+        if (!authenticated) {
+          return {
+            success: false,
+            error: 'Authentication required',
+            message: 'You need to sign in to validate bank details. Please sign in first.',
+            requiresAuth: true
+          };
+        }
+        try {
+          const bankRes = await axios.post(
+            `${API_BASE_URL}/Accountname/resolve`,
+            parameters,
+            {
+              headers,
+              timeout: 15000,
+              validateStatus: (status) => status < 500
+            }
+          );
 
-    if (!response.ok) {
-      throw new Error(`Failed to fetch bank details: ${response.statusText}`);
-    }
+          // Check for HTML error responses
+          const responseData = bankRes.data;
+          const isHtmlResponse = typeof responseData === 'string' && (
+            responseData.includes('<!DOCTYPE html>') ||
+            responseData.includes('<html') ||
+            responseData.includes('Service Suspended')
+          );
 
-    const result = await response.json();
+          if (isHtmlResponse || bankRes.status >= 400) {
+            return {
+              success: false,
+              error: bankRes.status >= 400 ? `Bank validation failed: ${bankRes.status}` : 'Service unavailable',
+              message: 'Unable to validate bank details. Please check the account number and bank code, or try again later.',
+              status: bankRes.status || 500
+            };
+          }
 
-    return JSON.stringify({
-      success: true,
-      data: {
-        bankCode,
-        accountNumber,
-        accountName: result.accountName || null,  // returned by API
-        valid: result.valid || false,             // true/false
-        message: result.message || 'Bank details retrieved successfully'
-      }
-    });
+          // Format helpful message with bank details
+          let displayMessage = 'Bank details validated successfully. ';
+          if (responseData.accountName) {
+            displayMessage += `Account name: ${responseData.accountName}. `;
+          }
+          if (responseData.bankName) {
+            displayMessage += `Bank: ${responseData.bankName}. `;
+          }
+          displayMessage += 'Please display the validated bank account name clearly to the user.';
 
-  } catch (error) {
-    return JSON.stringify({
-      success: false,
-      error: error.message
-    });
-  }
-
+          return {
+            success: true,
+            data: responseData,
+            message: displayMessage
+          };
+        } catch (bankError) {
+          if (bankError.code === 'ECONNABORTED' || bankError.message.includes('timeout')) {
+            return {
+              success: false,
+              error: 'Request timeout',
+              message: 'The bank validation request took too long. Please try again.',
+              status: 408
+            };
+          }
+          throw bankError;
+        }
 
       case 'initiate_swap':
         if (!authenticated) {
