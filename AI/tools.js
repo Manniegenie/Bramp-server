@@ -1280,8 +1280,7 @@ case 'match_naira':
           throw bankError;
         }
 
-
-        case 'validate_account':
+case 'validate_account':
   if (!authenticated) {
     return {
       success: false,
@@ -1367,21 +1366,19 @@ case 'match_naira':
       });
     }
 
-    // Step 2: Validate account with bank code and account number
-    const validationParams = {
-      bankCode: bankCode,
+    // Step 2: Validate account with bank code (sortCode) and account number
+    // Updated to match endpoint: GET /Accountname/resolve?sortCode={bankCode}&accountNumber={accountNumber}
+    const queryParams = new URLSearchParams({
+      sortCode: bankCode,
       accountNumber: parameters.accountNumber
-    };
+    });
+    const resolveUrl = `${API_BASE_URL}/Accountname/resolve?${queryParams.toString()}`;
 
-    const bankRes = await axios.post(
-      `${API_BASE_URL}/Accountname/resolve`,
-      validationParams,
-      {
-        headers,
-        timeout: 15000,
-        validateStatus: (status) => status < 500
-      }
-    );
+    const bankRes = await axios.get(resolveUrl, {
+      headers,
+      timeout: 15000,
+      validateStatus: (status) => status < 500
+    });
 
     // Check for HTML error responses
     const responseData = bankRes.data;
@@ -1400,20 +1397,35 @@ case 'match_naira':
       };
     }
 
+    // Ensure success response structure matches endpoint expectation
+    if (!responseData.success) {
+      return {
+        success: false,
+        error: responseData.message || 'Validation failed',
+        message: responseData.message || 'Unable to validate account details. Please check the account number and bank code, or try again later.',
+        status: bankRes.status || 400
+      };
+    }
+
+    const validatedData = responseData.data; // Endpoint nests under 'data'
+
     // Step 3: Format final message with confirmation prompt
     let finalMessage = displayMessage || '';
-    if (responseData.accountName) {
-      finalMessage += `Validated account name: **${responseData.accountName}**. `;
+    if (validatedData.accountName) {
+      finalMessage += `Validated account name: **${validatedData.accountName}**. `;
     }
-    if (responseData.bankName && !bankName) {
-      finalMessage += `Bank: **${responseData.bankName}**. `;
+    // Note: Endpoint does not directly return 'bankName' in top-level data; access from raw if available
+    // Assuming Obiex raw response includes bankName; adjust if confirmed otherwise
+    const resolvedBankName = validatedData.raw?.bankName || bankName || validatedData.bankId ? `Bank ID: ${validatedData.bankId}` : '';
+    if (resolvedBankName && !bankName) {
+      finalMessage += `Bank: **${resolvedBankName}**. `;
     }
     finalMessage += `Does this name match the account you want to send to? Please double-check to avoid errors in transfers.`;
 
     return logAndReturnResult('validate_account', {
       success: true,
       data: {
-        ...responseData,
+        ...validatedData,
         matchedBankCode: bankCode,
         matchedBankName: bankName
       },
