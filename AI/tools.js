@@ -1159,7 +1159,7 @@ async function executeTool(toolName, parameters, authCtx = {}) {
           }
 
           // 1. Fetch the official list of banks
-          const bankListRes = await axios.get(`${API_BASE_URL}/banks/naira/list`, {
+          const bankListRes = await axios.get(`${API_BASE_URL}/fetchnaira/naira-accounts`, {
             timeout: 10000
           });
 
