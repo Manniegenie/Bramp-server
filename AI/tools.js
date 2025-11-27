@@ -15,72 +15,81 @@ const OpenAI = (() => { try { return require('openai'); } catch (e) { return nul
  * Each tool maps to a backend API endpoint or MCP tool
  */
 const AVAILABLE_TOOLS = [
-{
-  type: 'function',
-  function: {
-    name: 'create_sell_transaction',
-    description: 'Initiate a sell transaction to convert crypto to NGN. ONLY call this after user has provided bank details. The system will automatically validate the account details (including bank name matching and account name resolution) and save payout details upon success. This will return a deposit address for the user to send crypto to, and prompt the user to double-check the account name. REQUIRES: token, network, bankCode, accountNumber, bankName (optional if partial for matching). AccountName is fetched via validation. REQUIRES AUTHENTICATION.',
-    parameters: {
-      type: 'object',
-      properties: {
-        token: {
-          type: 'string',
-          enum: ['BTC', 'ETH', 'SOL', 'USDT', 'USDC', 'BNB', 'MATIC', 'AVAX'],
-          description: 'The cryptocurrency token to sell'
-        },
-        network: {
-          type: 'string',
-          enum: ['BTC', 'BITCOIN', 'ETH', 'ETHEREUM', 'ERC20', 'SOL', 'SOLANA', 'TRX', 'TRON', 'TRC20', 'BSC', 'BNB SMART CHAIN', 'BEP20', 'BINANCE', 'POLYGON', 'AVALANCHE'],
-          description: 'The blockchain network for the token (must match token). Common values: BTC/BITCOIN for Bitcoin, ETH/ETHEREUM/ERC20 for Ethereum, SOL/SOLANA for Solana, TRX/TRON/TRC20 for Tron, BSC/BNB SMART CHAIN/BEP20 for BNB Smart Chain, POLYGON for Polygon, AVALANCHE for Avalanche'
-        },
-        amount: {
-          type: 'number',
-          description: 'Amount to sell in token units (optional - user can send any amount)'
-        },
-        currency: {
-          type: 'string',
-          enum: ['TOKEN', 'NGN'],
-          description: 'Currency of the amount - TOKEN for crypto amount, NGN for NGN amount',
-          default: 'TOKEN'
-        },
-        bankCode: {
-          type: 'string',
-          description: 'Bank code for payout (REQUIRED)'
-        },
-        accountNumber: {
-          type: 'string',
-          description: 'Bank account number for payout (REQUIRED)'
-        },
-        bankName: {
-          type: 'string',
-          description: 'Full or partial bank name for payout (optional - will be matched/validated if provided)'
-        },
-        accountName: {
-          type: 'string',
-          description: 'Account holder name (optional - will be resolved via validation)'
-        }
-      },
-      required: ['token', 'network', 'bankCode', 'accountNumber']
-    }
-  }
-},
+// Update to AVAILABLE_TOOLS: Remove deprecated 'match_naira' and 'get_bank_details' tools
   {
-  type: 'function',
-  function: {
-    name: 'match_naira',
-    description: 'Fetches the list of Naira banks and exposes the user-provided name for matching using the AI model’s reasoning capabilities.',
-    parameters: {
-      type: 'object',
-      properties: {
-        providedName: {
-          type: 'string',
-          description: 'The bank name provided by the user to be matched against the available bank list.'
-        }
-      },
-      required: ['providedName']
+    type: 'function',
+    function: {
+      name: 'create_sell_transaction',
+      description: 'Initiate a sell transaction to convert crypto to NGN. ONLY call this after user has provided bank details. The system will automatically validate the account details (including bank name matching and account name resolution) and save payout details upon success. This will return a deposit address for the user to send crypto to, and prompt the user to double-check the account name. REQUIRES: token, network, bankCode, accountNumber, bankName (optional if partial for matching). AccountName is fetched via validation. REQUIRES AUTHENTICATION.',
+      parameters: {
+        type: 'object',
+        properties: {
+          token: {
+            type: 'string',
+            enum: ['BTC', 'ETH', 'SOL', 'USDT', 'USDC', 'BNB', 'MATIC', 'AVAX'],
+            description: 'The cryptocurrency token to sell'
+          },
+          network: {
+            type: 'string',
+            enum: ['BTC', 'BITCOIN', 'ETH', 'ETHEREUM', 'ERC20', 'SOL', 'SOLANA', 'TRX', 'TRON', 'TRC20', 'BSC', 'BNB SMART CHAIN', 'BEP20', 'BINANCE', 'POLYGON', 'AVALANCHE'],
+            description: 'The blockchain network for the token (must match token). Common values: BTC/BITCOIN for Bitcoin, ETH/ETHEREUM/ERC20 for Ethereum, SOL/SOLANA for Solana, TRX/TRON/TRC20 for Tron, BSC/BNB SMART CHAIN/BEP20 for BNB Smart Chain, POLYGON for Polygon, AVALANCHE for Avalanche'
+          },
+          amount: {
+            type: 'number',
+            description: 'Amount to sell in token units (optional - user can send any amount)'
+          },
+          currency: {
+            type: 'string',
+            enum: ['TOKEN', 'NGN'],
+            description: 'Currency of the amount - TOKEN for crypto amount, NGN for NGN amount',
+            default: 'TOKEN'
+          },
+          bankCode: {
+            type: 'string',
+            description: 'Bank code for payout (REQUIRED)'
+          },
+          accountNumber: {
+            type: 'string',
+            description: 'Bank account number for payout (REQUIRED)'
+          },
+          bankName: {
+            type: 'string',
+            description: 'Full or partial bank name for payout (optional - will be matched/validated if provided)'
+          },
+          accountName: {
+            type: 'string',
+            description: 'Account holder name (optional - will be resolved via validation)'
+          }
+        },
+        required: ['token', 'network', 'bankCode', 'accountNumber']
+      }
     }
-  }
-},
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'validate_account',
+      description: 'Validate bank account details by matching a provided bank name (if partial) to the official code/name, then resolving the account name via bank API. Use this standalone when user wants to check/validate their bank details before a transaction, or let create_sell_transaction handle it automatically. Returns matched bank details, validated account name, and a confirmation prompt. REQUIRES AUTHENTICATION.',
+      parameters: {
+        type: 'object',
+        properties: {
+          bankCode: {
+            type: 'string',
+            description: 'Bank code (e.g., "044" for Access Bank) - REQUIRED if no providedName'
+          },
+          accountNumber: {
+            type: 'string',
+            description: 'Account number to validate - REQUIRED'
+          },
+          providedName: {
+            type: 'string',
+            description: 'Full or partial bank name to match (e.g., "GTB", "Access") - optional, but triggers matching if provided'
+          }
+        },
+        required: ['accountNumber']
+      }
+    }
+  },
   {
     type: 'function',
     function: {
@@ -237,28 +246,6 @@ const AVAILABLE_TOOLS = [
       }
     }
   },
-  {
-  type: 'function',
-  function: {
-    name: 'get_bank_details',
-    description: 'Enquire bank details (validate account number and get account name)',
-    parameters: {
-      type: 'object',
-      properties: {
-        bankCode: {
-          type: 'string',
-          description: 'Bank code (e.g., "044" for Access Bank)'
-        },
-        accountNumber: {
-          type: 'string',
-          description: 'Account number to validate'
-        }
-      },
-      required: ['bankCode', 'accountNumber']
-    }
-  }
-},
-
   {
     type: 'function',
     function: {
