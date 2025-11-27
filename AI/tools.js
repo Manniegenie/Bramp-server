@@ -19,37 +19,51 @@ const AVAILABLE_TOOLS = [
   type: 'function',
   function: {
     name: 'create_sell_transaction',
-    description: '...',
+    description: 'Initiate a sell transaction to convert crypto to NGN. ONLY call this after bank details have been validated with get_bank_details and user has confirmed. REQUIRES: token, network, bankCode, accountNumber, bankName, accountName. Amount is optional. This function will automatically save the payout details and return a deposit address for the user to send crypto to. REQUIRES AUTHENTICATION.',
     parameters: {
       type: 'object',
       properties: {
-        token: { /* existing */ },
-        network: { /* existing */ },
-        amount: { /* existing */ },
-        currency: { /* existing */ },
-        // Add these:
+        token: {
+          type: 'string',
+          enum: ['BTC', 'ETH', 'SOL', 'USDT', 'USDC', 'BNB', 'MATIC', 'AVAX'],
+          description: 'The cryptocurrency token to sell'
+        },
+        network: {
+          type: 'string',
+          enum: ['BTC', 'BITCOIN', 'ETH', 'ETHEREUM', 'ERC20', 'SOL', 'SOLANA', 'TRX', 'TRON', 'TRC20', 'BSC', 'BNB SMART CHAIN', 'BEP20', 'BINANCE', 'POLYGON', 'AVALANCHE'],
+          description: 'The blockchain network for the token (must match token). Common values: BTC/BITCOIN for Bitcoin, ETH/ETHEREUM/ERC20 for Ethereum, SOL/SOLANA for Solana, TRX/TRON/TRC20 for Tron, BSC/BNB SMART CHAIN/BEP20 for BNB Smart Chain, POLYGON for Polygon, AVALANCHE for Avalanche'
+        },
+        amount: {
+          type: 'number',
+          description: 'Amount to sell in token units (optional - user can send any amount)'
+        },
+        currency: {
+          type: 'string',
+          enum: ['TOKEN', 'NGN'],
+          description: 'Currency of the amount - TOKEN for crypto amount, NGN for NGN amount',
+          default: 'TOKEN'
+        },
         bankCode: {
           type: 'string',
-          description: 'Bank code for payout (optional)'
+          description: 'Bank code from get_bank_details validation or match_naira (REQUIRED for payout)'
         },
         accountNumber: {
           type: 'string',
-          description: 'Account number for payout (optional)'
+          description: 'Bank account number validated with get_bank_details (REQUIRED for payout)'
         },
         bankName: {
           type: 'string',
-          description: 'Bank name for payout (optional)'
+          description: 'Full bank name from get_bank_details or match_naira (REQUIRED for payout)'
         },
         accountName: {
           type: 'string',
-          description: 'Account name for payout (optional)'
+          description: 'Account holder name returned from get_bank_details validation (REQUIRED for payout)'
         }
       },
-      required: ['token', 'network']
+      required: ['token', 'network', 'bankCode', 'accountNumber', 'bankName', 'accountName']
     }
   }
 },
-
   {
   type: 'function',
   function: {

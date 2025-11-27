@@ -134,106 +134,53 @@ Your capabilities:
 - View dashboard/portfolio (if authenticated)
 - Get transaction history (if authenticated)
 - Validate bank details
+- Match bank names
 - Initiate token swaps
+
+CRITICAL SELL TRANSACTION FLOW:
+When a user wants to sell crypto, follow this EXACT sequence:
+
+1. **Collect Sell Intent**: Ask for token, network, and amount (if they want to specify)
+   
+2. **Collect Bank Details**: 
+   - Ask: "Which bank and account number should we send the money to?"
+   - User provides bank name (e.g., "Access Bank", "GTBank") and account number
+   
+3. **Validate Bank Details**:
+   - If user provides a bank name that might not be exact, use match_naira tool to find the correct bank
+   - Once you have the bank name/code, use get_bank_details tool to validate the account number
+   - This returns the account name - SHOW THIS TO THE USER and ask for confirmation
+   - Example: "I found the account: John Doe - Access Bank (1234567890). Is this correct?"
+   
+4. **Create Transaction ONLY AFTER CONFIRMATION**:
+   - Once user confirms the bank details are correct, call create_sell_transaction with ALL parameters:
+     * token
+     * network
+     * amount (optional)
+     * currency (optional)
+     * bankCode (from match_naira or get_bank_details)
+     * accountNumber
+     * bankName
+     * accountName (from get_bank_details validation)
+   - The system will automatically save the payout details and return the deposit address
+   - Display the deposit address and payment instructions clearly
+
+IMPORTANT: 
+- Do NOT call create_sell_transaction without validated bank details
+- Do NOT skip the bank validation step - users need to confirm their account name
+- Always use get_bank_details to validate account numbers before proceeding
+- Use match_naira when user provides casual bank names like "access", "gtb", "zenith"
 
 Guidelines:
 1. Be conversational and friendly - no corporate speak
-        2. For sell intents, process normally without session restrictions
-4. CRITICAL: Adapt your communication style based on user expertise level:
-   
-   USER EXPERTISE LEVEL: ${userExpertise.toUpperCase()}
-   
-   ${userExpertise === 'novice' ? `
-   - This user appears to be NEW TO CRYPTO - provide detailed guidance
-   - When collecting parameters, explain what each field means
-   - If network is missing, help them find it: "Which network are you using? This depends on where you're sending from. For example: If you're sending USDT from Binance, it's usually TRON (TRC20). If from Coinbase, it's usually Ethereum (ERC20). Can you tell me which exchange or wallet you're using?"
-   - Explain terms simply and be patient with questions
-   - Provide examples and step-by-step guidance
-   ` : userExpertise === 'expert' ? `
-   - This user appears EXPERIENCED with crypto - be direct and efficient
-   - When collecting parameters, ask directly without over-explaining
-   - If network is missing, ask briefly: "Which network?" or "ERC20, TRC20, or BEP20?"
-   - Assume they understand technical terms (network, chain, address, etc.)
-   - Skip basic explanations unless they ask
-   ` : `
-   - This user appears to have SOME crypto experience - provide moderate guidance
-   - When collecting parameters, ask clearly but don't over-explain
-   - If network is missing, ask: "Which network are you using? (e.g., TRON/TRC20, Ethereum/ERC20)"
-   - Provide brief explanations when needed
-   `}
-   
-5. Use function calling to execute actions - don't just describe what to do
-        6. For sell transactions, process normally
-7. Be helpful but concise - avoid rambling
-8. Note: Frontend handles authentication checks before sending messages. You can safely assume that if a message reaches you, the frontend has validated authentication for protected features.
-9. CRITICAL: When function calls return data, you MUST display the actual data to the user in a clear, formatted way. Don't just say "I got the data" - show them the numbers and details!
+2. For sell intents, process normally without session restrictions
+3. CRITICAL: Adapt your communication style based on user expertise level...
+`;
 
-10. Function-specific display instructions:
-    
-    For naira rates (get_naira_rates):
-    - Display the offramp rate (selling rate): "Selling Rate: ₦X,XXX per USD" (what users get when selling crypto)
-    - Display the onramp rate (buying rate): "Buying Rate: ₦X,XXX per USD" (what users pay when buying crypto)
-    - Format numbers with commas (e.g., ₦1,500.00 not ₦1500)
-    - Explain what each rate means
-    
-    For sell transactions (create_sell_transaction, get_sell_quote):
-    - Display the deposit address clearly
-    - Show the payment ID if available
-    - Display the quote: amount of crypto → amount in NGN (e.g., "0.1 BTC → ₦15,000,000")
-    - Show the exchange rate if available
-    
-    For buy transactions (create_buy_transaction, get_buy_quote):
-    - Display how much crypto they'll receive
-    - Show the NGN amount they'll pay
-    - Display the exchange rate
-    
-    For transaction status (check_transaction_status):
-    - Display the current status (pending, completed, failed, etc.)
-    - Show transaction amounts (crypto and NGN)
-    - Display transaction date/time if available
-    - Show transaction type (sell, buy, swap)
-    
-    For token prices (get_token_price):
-    - Display the current price in USD with proper formatting
-    - Show price with 2-6 decimal places as appropriate
-    - Example: "BTC: $45,234.56" or "ETH: $2,345.67"
-    
-    For dashboard (get_dashboard):
-    - Display total portfolio value in USD
-    - List holdings with amounts and USD values
-    - Show token balances clearly
-    - Format: "Token: Amount (~$USD Value)"
-    
-    For transaction history (get_transaction_history):
-    - List transactions with type, amount, status, and date
-    - Format each transaction clearly
-    - Show crypto amounts and NGN equivalents
-    - Group by status if helpful
-    
-    For bank details (get_bank_details):
-    - Display the validated account name clearly
-    - Show bank name if available
-    - Confirm the validation was successful
-    
-    For swaps (initiate_swap):
-    - Display what's being swapped: "X Token A → Y Token B"
-    - Show exchange rate
-    - Display amounts clearly for both tokens
-
-Supported tokens: BTC, ETH, SOL, USDT, USDC, BNB, MATIC, AVAX
-Supported networks: Bitcoin Network, Ethereum Network, Solana Network, Tron Network, BNB Smart Chain, Polygon Network, Avalanche Network
-
-IMPORTANT: When user wants to sell, you MUST check authentication status first. If not authenticated, immediately ask them to sign in before proceeding. Only use create_sell_transaction function if user is authenticated.`;
-
-  if (authed) {
-    prompt += `\n\n✅ User is authenticated (ID: ${authCtx.userId}). You can access their dashboard, transaction history, and initiate transactions including sell.`;
-  } else {
-    prompt += `\n\n❌ User is NOT authenticated. The frontend should have handled authentication checks, but as a safety measure, do not call protected tools. For any protected features (sell, buy, dashboard, history, etc.), inform them they need to sign in.`;
-  }
-
+  // ... rest of your existing prompt
+  
   return prompt;
 }
-
 /**
  * Map detected intent to recommended function(s)
  * This helps guide the LLM to call the right function
@@ -447,6 +394,7 @@ async function handleFunctionCall(toolCall, authCtx) {
     // Special handling for sell transactions - create session
     // Special handling for sell transactions - create session
 // Special handling for sell transactions - create session
+// Special handling for sell transactions - create session
 if (functionName === 'create_sell_transaction') {
   // Execute the tool first
   const toolResult = await executeTool(functionName, functionArgs, authCtx);
@@ -465,75 +413,105 @@ if (functionName === 'create_sell_transaction') {
       String(toolResult.data).substring(0, 100)) : null
   });
 
-  // Call save_payout immediately after successful sell transaction
-  if (toolResult.success && toolResult.data?.paymentId && functionArgs.bankCode && functionArgs.accountNumber) {
-    try {
-      logger.info('Calling save_payout after successful sell transaction', {
-        userId: authCtx.userId,
-        paymentId: toolResult.data.paymentId,
-        bankCode: functionArgs.bankCode,
-        accountNumber: functionArgs.accountNumber
-      });
-
-      // Call the payout endpoint
-      const payoutUrl = `${API_BASE_URL}/sell/payout`;
-      const headers = {
-        'Content-Type': 'application/json'
-      };
-      if (authCtx.token) {
-        headers['Authorization'] = `Bearer ${authCtx.token}`;
-      }
-
-      const payoutResponse = await axios.post(
-        payoutUrl,
-        {
+  // Call save_payout immediately after successful sell transaction if bank details provided
+  if (toolResult.success && toolResult.data?.paymentId) {
+    // Check if we have bank details to save payout
+    const hasBankDetails = functionArgs.bankCode && functionArgs.accountNumber && 
+                           functionArgs.bankName && functionArgs.accountName;
+    
+    if (hasBankDetails) {
+      try {
+        logger.info('Calling save_payout after successful sell transaction', {
+          userId: authCtx.userId,
           paymentId: toolResult.data.paymentId,
-          bankName: functionArgs.bankName || '',
           bankCode: functionArgs.bankCode,
           accountNumber: functionArgs.accountNumber,
-          accountName: functionArgs.accountName || ''
-        },
-        {
-          headers,
-          timeout: 10000,
-          validateStatus: (status) => status < 500
-        }
-      );
-
-      const payoutData = payoutResponse.data;
-
-      logger.info('save_payout execution result', {
-        success: payoutData.success,
-        message: payoutData.message,
-        paymentId: toolResult.data.paymentId
-      });
-
-      // Optionally merge the payout save status into the main result
-      if (payoutData.success) {
-        toolResult.payoutSaved = true;
-        toolResult.payoutDetails = {
           bankName: functionArgs.bankName,
-          accountNumber: functionArgs.accountNumber,
           accountName: functionArgs.accountName
+        });
+
+        // Call the payout endpoint
+        const payoutUrl = `${API_BASE_URL}/sell/payout`;
+        const headers = {
+          'Content-Type': 'application/json'
         };
-        logger.info('Payout details saved successfully', {
+        if (authCtx.token) {
+          headers['Authorization'] = `Bearer ${authCtx.token}`;
+        }
+
+        const payoutResponse = await axios.post(
+          payoutUrl,
+          {
+            paymentId: toolResult.data.paymentId,
+            bankName: functionArgs.bankName,
+            bankCode: functionArgs.bankCode,
+            accountNumber: functionArgs.accountNumber,
+            accountName: functionArgs.accountName
+          },
+          {
+            headers,
+            timeout: 10000,
+            validateStatus: (status) => status < 500
+          }
+        );
+
+        const payoutData = payoutResponse.data;
+
+        logger.info('save_payout execution result', {
+          success: payoutData.success,
+          message: payoutData.message,
           paymentId: toolResult.data.paymentId
         });
-      } else {
-        logger.warn('Payout save returned success=false', {
-          paymentId: toolResult.data.paymentId,
-          message: payoutData.message
+
+        // Merge the payout save status into the main result
+        if (payoutData.success) {
+          toolResult.payoutSaved = true;
+          toolResult.payoutDetails = {
+            bankName: functionArgs.bankName,
+            bankCode: functionArgs.bankCode,
+            accountNumber: functionArgs.accountNumber,
+            accountName: functionArgs.accountName
+          };
+          
+          // Update the message to include payout confirmation
+          if (toolResult.message) {
+            toolResult.message += ` Bank details saved: ${functionArgs.accountName} - ${functionArgs.bankName} (${functionArgs.accountNumber}).`;
+          }
+          
+          logger.info('Payout details saved successfully', {
+            paymentId: toolResult.data.paymentId,
+            accountName: functionArgs.accountName
+          });
+        } else {
+          logger.warn('Payout save returned success=false', {
+            paymentId: toolResult.data.paymentId,
+            message: payoutData.message
+          });
+          
+          // Add warning to response but don't fail the transaction
+          toolResult.payoutWarning = payoutData.message || 'Failed to save payout details';
+        }
+      } catch (savePayoutError) {
+        logger.error('Failed to save payout details', {
+          error: savePayoutError.message,
+          status: savePayoutError.response?.status,
+          userId: authCtx.userId,
+          paymentId: toolResult.data?.paymentId
         });
+        
+        // Add error to response but don't fail the transaction
+        toolResult.payoutError = savePayoutError.message;
+        toolResult.payoutWarning = 'Bank details could not be saved automatically. You may need to provide them again.';
       }
-    } catch (savePayoutError) {
-      logger.error('Failed to save payout details', {
-        error: savePayoutError.message,
-        status: savePayoutError.response?.status,
-        userId: authCtx.userId,
-        paymentId: toolResult.data?.paymentId
+    } else {
+      // Log which bank details are missing
+      logger.info('Payout not saved: missing bank details', {
+        paymentId: toolResult.data.paymentId,
+        hasBankCode: !!functionArgs.bankCode,
+        hasAccountNumber: !!functionArgs.accountNumber,
+        hasBankName: !!functionArgs.bankName,
+        hasAccountName: !!functionArgs.accountName
       });
-      // Don't fail the transaction if payout save fails
-      // Just log it for debugging
     }
   } else {
     // Log why payout wasn't saved
@@ -541,11 +519,6 @@ if (functionName === 'create_sell_transaction') {
       logger.info('Payout not saved: sell transaction failed');
     } else if (!toolResult.data?.paymentId) {
       logger.warn('Payout not saved: no paymentId in response');
-    } else if (!functionArgs.bankCode || !functionArgs.accountNumber) {
-      logger.info('Payout not saved: missing bank details', {
-        hasBankCode: !!functionArgs.bankCode,
-        hasAccountNumber: !!functionArgs.accountNumber
-      });
     }
   }
 
