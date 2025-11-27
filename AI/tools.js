@@ -1150,7 +1150,7 @@ async function executeTool(toolName, parameters, authCtx = {}) {
     const { providedName } = JSON.parse(toolCall.function.arguments);
 
     // 1. Fetch Bank List
-    const response = await fetch(`${BASE_URL}/naira-accounts`, { method: 'GET' });
+    const response = await fetch(`${BASE_URL}/accountname/resolve`, { method: 'GET' });
 
     if (!response.ok) {
       throw new Error(`Failed to fetch bank list: ${response.statusText}`);
