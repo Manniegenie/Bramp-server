@@ -19,7 +19,7 @@ const AVAILABLE_TOOLS = [
     type: 'function',
     function: {
       name: 'create_sell_transaction',
-      description: 'Initiate a sell transaction to convert crypto to NGN. Includes optional bank validation and save payout feature. Requires authentication.',
+      description: 'Initiate a sell transaction to convert crypto to NGN. Use when user wants to sell, cash out, withdraw, or convert crypto to naira. REQUIRES AUTHENTICATION. REQUIRES: token (BTC/ETH/SOL/USDT/USDC/BNB/MATIC/AVAX) and network (must match token). Network examples: BITCOIN for BTC, ETHEREUM/ERC20 for ETH/USDC, TRON/TRC20 for USDT, SOLANA for SOL, BNB SMART CHAIN/BEP20 for BNB, POLYGON for MATIC, AVALANCHE for AVAX. If user doesn\'t know their network, ask where they\'re sending from (exchange/wallet) to help them figure it out. Amount is optional - user can send any amount. Do NOT call this function if token or network is missing - ask the user first. Do NOT call if user is not authenticated.',
       parameters: {
         type: 'object',
         properties: {
@@ -31,30 +31,17 @@ const AVAILABLE_TOOLS = [
           network: {
             type: 'string',
             enum: ['BTC', 'BITCOIN', 'ETH', 'ETHEREUM', 'ERC20', 'SOL', 'SOLANA', 'TRX', 'TRON', 'TRC20', 'BSC', 'BNB SMART CHAIN', 'BEP20', 'BINANCE', 'POLYGON', 'AVALANCHE'],
-            description: 'The blockchain network for the token (must match token).'
+            description: 'The blockchain network for the token (must match token). Common values: BTC/BITCOIN for Bitcoin, ETH/ETHEREUM/ERC20 for Ethereum, SOL/SOLANA for Solana, TRX/TRON/TRC20 for Tron, BSC/BNB SMART CHAIN/BEP20 for BNB Smart Chain, POLYGON for Polygon, AVALANCHE for Avalanche'
           },
           amount: {
             type: 'number',
-            description: 'Amount to sell in token units (optional)'
+            description: 'Amount to sell in token units (optional - user can send any amount)'
           },
           currency: {
             type: 'string',
             enum: ['TOKEN', 'NGN'],
-            description: 'Currency of the amount - TOKEN for crypto, NGN for fiat',
+            description: 'Currency of the amount - TOKEN for crypto amount, NGN for NGN amount',
             default: 'TOKEN'
-          },
-          bankCode: {
-            type: 'string',
-            description: 'Bank code for payout (optional)'
-          },
-          accountNumber: {
-            type: 'string',
-            description: 'Bank account number for payout (optional)'
-          },
-          savePayout: {
-            type: 'boolean',
-            description: 'If true, save bank info for future transactions',
-            default: false
           }
         },
         required: ['token', 'network']

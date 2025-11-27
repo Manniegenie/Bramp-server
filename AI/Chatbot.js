@@ -241,7 +241,7 @@ IMPORTANT: When user wants to sell, you MUST check authentication status first. 
 function getRecommendedFunctionsForIntent(intent, authCtx) {
   const { authenticated } = authCtx;
   const functionMap = {
-    'sell': authenticated ? ['create_sell_transaction'] : [],
+    'sell': authenticated ? ['get_sell_quote', 'create_sell_transaction'] : [],
     'deposit': authenticated ? [] : [], // Deposit handled differently
     'naira_rates': ['get_naira_rates'],
     'supported_token_price': ['get_token_price'],
@@ -323,6 +323,7 @@ function validateFunctionParameters(functionName, parameters, authCtx, userExper
 function getRequiredParamsForFunction(functionName) {
   const paramMap = {
     'create_sell_transaction': ['token', 'network'],
+    'get_sell_quote': ['token', 'amount'],
     'create_buy_transaction': ['token', 'network', 'amount'],
     'get_buy_quote': ['token', 'amount'],
     'check_transaction_status': ['paymentId'],
@@ -377,7 +378,7 @@ function getToolChoiceForIntent(intent, authCtx, message) {
 
     // If we have token and amount, suggest quote (network can be auto-detected for quote)
     if (hasToken && hasAmount) {
-      return { type: 'function', function: { name: 'create_sell_transaction' } };
+      return { type: 'function', function: { name: 'get_sell_quote' } };
     }
     // If we have token and network and amount, suggest create transaction
     if (hasToken && hasNetwork && hasAmount) {
