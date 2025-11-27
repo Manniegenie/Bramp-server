@@ -133,8 +133,7 @@ Your capabilities:
 - Get current rates and prices
 - View dashboard/portfolio (if authenticated)
 - Get transaction history (if authenticated)
-- Validate bank details
-- Match bank names
+- Validate bank account details (combines bank name matching and account name resolution)
 - Initiate token swaps
 
 CRITICAL SELL TRANSACTION FLOW:
@@ -146,30 +145,21 @@ When a user wants to sell crypto, follow this EXACT sequence:
    - Ask: "Which bank and account number should we send the money to?"
    - User provides bank name (e.g., "Access Bank", "GTBank") and account number
    
-3. **Validate Bank Details**:
-   - If user provides a bank name that might not be exact, use match_naira tool to find the correct bank
-   - Once you have the bank name/code, use get_bank_details tool to validate the account number
-   - This returns the account name - SHOW THIS TO THE USER and ask for confirmation
-   - Example: "I found the account: John Doe - Access Bank (1234567890). Is this correct?"
-   
-4. **Create Transaction ONLY AFTER CONFIRMATION**:
-   - Once user confirms the bank details are correct, call create_sell_transaction with ALL parameters:
-     * token
-     * network
-     * amount (optional)
-     * currency (optional)
-     * bankCode (from match_naira or get_bank_details)
-     * accountNumber
-     * bankName
-     * accountName (from get_bank_details validation)
-   - The system will automatically save the payout details and return the deposit address
-   - Display the deposit address and payment instructions clearly
+3. **Create Transaction with Validation**:
+   - Call create_sell_transaction with the provided details: token, network, bankCode (if known), accountNumber, bankName (optional/partial).
+   - The system will automatically:
+     - Match partial bank names to official code/name if needed.
+     - Validate the account number and resolve the account name.
+     - Save payout details.
+     - Return the deposit address and a double-check prompt like: "Validated account name: **John Doe**. Does this name match the account you want to send to? Please double-check to avoid errors in transfers."
+   - SHOW THIS VALIDATION PROMPT TO THE USER and wait for confirmation before proceeding further (e.g., if they need to adjust details).
+   - Example: After transaction init, display: "Sell initiated! Validated: John Doe - Access Bank (1234567890). Does this match? Deposit to: [address]."
 
 IMPORTANT: 
-- Do NOT call create_sell_transaction without validated bank details
-- Do NOT skip the bank validation step - users need to confirm their account name
-- Always use get_bank_details to validate account numbers before proceeding
-- Use match_naira when user provides casual bank names like "access", "gtb", "zenith"
+- Do NOT provide bankCode or accountName upfront - let the system validate automatically via create_sell_transaction.
+- If user wants to validate details standalone (before selling), call validate_account tool directly.
+- Always display the validated account name clearly and prompt for double-check.
+- Use validate_account when user specifically asks to "check my bank details" without selling.
 
 Guidelines:
 1. Be conversational and friendly - no corporate speak
@@ -177,10 +167,9 @@ Guidelines:
 3. CRITICAL: Adapt your communication style based on user expertise level...
 `;
 
-  // ... rest of your existing prompt
+  // ... rest of your existing prompt (e.g., expertise adaptation, etc.)
   
-  return prompt;
-}
+  return prompt;}
 /**
  * Map detected intent to recommended function(s)
  * This helps guide the LLM to call the right function
@@ -413,112 +402,149 @@ if (functionName === 'create_sell_transaction') {
       String(toolResult.data).substring(0, 100)) : null
   });
 
-  // Call save_payout immediately after successful sell transaction if bank details provided
+  // Call validate_account and then save_payout immediately after successful sell transaction if bank details provided
   if (toolResult.success && toolResult.data?.paymentId) {
-    // Check if we have bank details to save payout
-    const hasBankDetails = functionArgs.bankCode && functionArgs.accountNumber && 
-                           functionArgs.bankName && functionArgs.accountName;
+    // Check if we have basic bank details to validate and save payout
+    const hasBasicBankDetails = functionArgs.bankCode && functionArgs.accountNumber;
     
-    if (hasBankDetails) {
+    if (hasBasicBankDetails) {
       try {
-        logger.info('Calling save_payout after successful sell transaction', {
-          userId: authCtx.userId,
-          paymentId: toolResult.data.paymentId,
+        // Prepare parameters for validate_account
+        const validateArgs = {
           bankCode: functionArgs.bankCode,
           accountNumber: functionArgs.accountNumber,
-          bankName: functionArgs.bankName,
-          accountName: functionArgs.accountName
+          providedName: functionArgs.bankName // Pass provided bank name for matching if partial/incomplete
+        };
+
+        logger.info('Calling validate_account after successful sell transaction', {
+          userId: authCtx.userId,
+          paymentId: toolResult.data.paymentId,
+          validateArgs
         });
 
-        // Call the payout endpoint
-        const payoutUrl = `${API_BASE_URL}/sell/payout`;
-        const headers = {
-          'Content-Type': 'application/json'
-        };
-        if (authCtx.token) {
-          headers['Authorization'] = `Bearer ${authCtx.token}`;
-        }
+        // Call validate_account tool
+        const validateResult = await executeTool('validate_account', validateArgs, authCtx);
 
-        const payoutResponse = await axios.post(
-          payoutUrl,
-          {
-            paymentId: toolResult.data.paymentId,
-            bankName: functionArgs.bankName,
-            bankCode: functionArgs.bankCode,
-            accountNumber: functionArgs.accountNumber,
-            accountName: functionArgs.accountName
-          },
-          {
-            headers,
-            timeout: 10000,
-            validateStatus: (status) => status < 500
-          }
-        );
-
-        const payoutData = payoutResponse.data;
-
-        logger.info('save_payout execution result', {
-          success: payoutData.success,
-          message: payoutData.message,
+        logger.info('validate_account execution result', {
+          success: validateResult.success,
+          hasData: !!validateResult.data,
+          message: validateResult.message,
           paymentId: toolResult.data.paymentId
         });
 
-        // Merge the payout save status into the main result
-        if (payoutData.success) {
-          toolResult.payoutSaved = true;
-          toolResult.payoutDetails = {
-            bankName: functionArgs.bankName,
+        if (!validateResult.success) {
+          logger.warn('validate_account failed after sell transaction', {
+            paymentId: toolResult.data.paymentId,
+            error: validateResult.error,
+            message: validateResult.message
+          });
+          
+          // Add warning to response but proceed to save with provided details if available
+          toolResult.validationWarning = validateResult.message || 'Failed to validate bank details';
+        } else {
+          // Use validated details for payout
+          const validatedAccountName = validateResult.data?.accountName || functionArgs.accountName;
+          const validatedBankName = validateResult.data?.bankName || functionArgs.bankName;
+          
+          // Merge validation success into main result
+          toolResult.validationSuccess = true;
+          toolResult.validatedDetails = {
+            bankName: validatedBankName,
             bankCode: functionArgs.bankCode,
             accountNumber: functionArgs.accountNumber,
-            accountName: functionArgs.accountName
+            accountName: validatedAccountName
           };
-          
-          // Update the message to include payout confirmation
-          if (toolResult.message) {
-            toolResult.message += ` Bank details saved: ${functionArgs.accountName} - ${functionArgs.bankName} (${functionArgs.accountNumber}).`;
+
+          // Append validation message (includes double-check prompt)
+          if (toolResult.message && validateResult.message) {
+            toolResult.message += ` ${validateResult.message}`;
+          } else if (validateResult.message) {
+            toolResult.message = validateResult.message;
           }
-          
-          logger.info('Payout details saved successfully', {
+
+          logger.info('Account validated successfully', {
             paymentId: toolResult.data.paymentId,
-            accountName: functionArgs.accountName
+            accountName: validatedAccountName
           });
-        } else {
-          logger.warn('Payout save returned success=false', {
-            paymentId: toolResult.data.paymentId,
-            message: payoutData.message
+
+          // Proceed to save payout with validated details
+          const payoutUrl = `${API_BASE_URL}/sell/payout`;
+          const headers = {
+            'Content-Type': 'application/json'
+          };
+          if (authCtx.token) {
+            headers['Authorization'] = `Bearer ${authCtx.token}`;
+          }
+
+          const payoutResponse = await axios.post(
+            payoutUrl,
+            {
+              paymentId: toolResult.data.paymentId,
+              bankName: validatedBankName,
+              bankCode: functionArgs.bankCode,
+              accountNumber: functionArgs.accountNumber,
+              accountName: validatedAccountName
+            },
+            {
+              headers,
+              timeout: 10000,
+              validateStatus: (status) => status < 500
+            }
+          );
+
+          const payoutData = payoutResponse.data;
+
+          logger.info('save_payout execution result', {
+            success: payoutData.success,
+            message: payoutData.message,
+            paymentId: toolResult.data.paymentId
           });
-          
-          // Add warning to response but don't fail the transaction
-          toolResult.payoutWarning = payoutData.message || 'Failed to save payout details';
+
+          // Merge the payout save status into the main result
+          if (payoutData.success) {
+            toolResult.payoutSaved = true;
+            toolResult.payoutDetails = toolResult.validatedDetails;
+            
+            logger.info('Payout details saved successfully with validated info', {
+              paymentId: toolResult.data.paymentId,
+              accountName: validatedAccountName
+            });
+          } else {
+            logger.warn('Payout save returned success=false after validation', {
+              paymentId: toolResult.data.paymentId,
+              message: payoutData.message
+            });
+            
+            // Add warning to response but don't fail the transaction
+            toolResult.payoutWarning = payoutData.message || 'Failed to save payout details';
+          }
         }
-      } catch (savePayoutError) {
-        logger.error('Failed to save payout details', {
-          error: savePayoutError.message,
-          status: savePayoutError.response?.status,
+      } catch (validationError) {
+        logger.error('Failed to validate or save payout details', {
+          error: validationError.message,
+          status: validationError.response?.status,
           userId: authCtx.userId,
           paymentId: toolResult.data?.paymentId
         });
         
         // Add error to response but don't fail the transaction
-        toolResult.payoutError = savePayoutError.message;
-        toolResult.payoutWarning = 'Bank details could not be saved automatically. You may need to provide them again.';
+        toolResult.validationError = validationError.message;
+        toolResult.payoutWarning = 'Bank details could not be validated or saved automatically. Please provide them again if needed.';
       }
     } else {
-      // Log which bank details are missing
-      logger.info('Payout not saved: missing bank details', {
+      // Log which basic bank details are missing
+      logger.info('Validation/Payout not performed: missing basic bank details', {
         paymentId: toolResult.data.paymentId,
         hasBankCode: !!functionArgs.bankCode,
-        hasAccountNumber: !!functionArgs.accountNumber,
-        hasBankName: !!functionArgs.bankName,
-        hasAccountName: !!functionArgs.accountName
+        hasAccountNumber: !!functionArgs.accountNumber
       });
     }
   } else {
-    // Log why payout wasn't saved
+    // Log why validation/payout wasn't performed
     if (!toolResult.success) {
-      logger.info('Payout not saved: sell transaction failed');
+      logger.info('Validation/Payout not performed: sell transaction failed');
     } else if (!toolResult.data?.paymentId) {
-      logger.warn('Payout not saved: no paymentId in response');
+      logger.warn('Validation/Payout not performed: no paymentId in response');
     }
   }
 
