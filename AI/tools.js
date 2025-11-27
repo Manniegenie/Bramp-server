@@ -7,7 +7,7 @@ const API_BASE_URL = process.env.API_BASE_URL || 'https://priscaai.online';
 const logger = require('../utils/logger');
 const cache = require('./cache');
 require('dotenv').config();
-const OpenAI = require('openai');
+const OpenAI = (() => { try { return require('openai'); } catch (e) { return null; } })();
 
 
 /**
@@ -1145,82 +1145,74 @@ async function executeTool(toolName, parameters, authCtx = {}) {
         }
 
 
-       case 'match_naira':
-  try {
-    const { providedName } = JSON.parse(toolCall.function.arguments);
+       // ... inside executeTool(toolName, parameters, authCtx)
+// ... before the default case
 
-    // 1. Fetch Bank List
-    const response = await fetch(`${BASE_URL}/accountname/resolve`, { method: 'GET' });
+      case 'match_naira':
+        try {
+          if (!OpenAI) {
+            return {
+              success: false,
+              error: 'LLM dependency missing',
+              message: 'The AI matching service is currently unavailable.'
+            };
+          }
 
-    if (!response.ok) {
-      throw new Error(`Failed to fetch bank list: ${response.statusText}`);
-    }
+          // 1. Fetch the official list of banks
+          const bankListRes = await axios.get(`${API_BASE_URL}/banks/naira/list`, {
+            timeout: 10000
+          });
 
-    const result = await response.json();
-    const banks = Array.isArray(result.banks) ? result.banks : [];
+          const officialBanks = bankListRes.data.data || bankListRes.data;
 
-    // 2. AI Matching (using existing openai + env model)
-    const aiMatchResponse = await openai.chat.completions.create({
-      model: MODEL_NAME,
-      messages: [
-        {
-          role: "system",
-          content: `
-You are a matcher.
-Given a user-provided bank name and a list of banks,
-return ONLY:
-{
-  "bankName": "<best_match>",
-  "confidence": <0-1>
-}
-If unsure (<0.4), bankName = null.
-`
-        },
-        {
-          role: "user",
-          content: JSON.stringify({ providedName, banks })
+          if (!Array.isArray(officialBanks) || officialBanks.length === 0) {
+             return {
+              success: false,
+              error: 'Bank list unavailable',
+              message: 'Could not retrieve the official list of banks for matching.'
+            };
+          }
+
+          const bankNames = officialBanks.map(b => `${b.bankCode}: ${b.bankName}`).join('\n');
+
+          // 2. Use OpenAI/LLM to perform the matching logic
+          const openai = new OpenAI(); // Assuming it's the class instance
+
+          const prompt = `The user provided the bank name: "${parameters.providedName}".
+          Match this name against the official list of banks below and return the single best match in JSON format: {"bankCode": "...", "bankName": "..."}.
+          If no reasonable match is found, return: {"bankCode": null, "bankName": null}.
+
+          Official Bank List:\n${bankNames}`;
+
+          const completion = await openai.chat.completions.create({
+            model: "gpt-4o-mini", // Or another suitable model
+            messages: [{ role: "user", content: prompt }],
+            response_format: { type: "json_object" }
+          });
+
+          const matchResult = JSON.parse(completion.choices[0].message.content);
+
+          let displayMessage = '';
+          if (matchResult.bankCode && matchResult.bankName) {
+            displayMessage = `I found a match! The bank is **${matchResult.bankName}** with code **${matchResult.bankCode}**.`;
+          } else {
+            displayMessage = `I could not find a clear match for "${parameters.providedName}" in the official bank list. Please check the spelling or provide the full bank name.`;
+          }
+
+          return logAndReturnResult('match_naira', {
+            success: true,
+            data: matchResult,
+            message: displayMessage
+          });
+
+        } catch (matchError) {
+           logger.error('match_naira failed', { error: matchError.message });
+           return logAndReturnResult('match_naira', {
+             success: false,
+             error: matchError.message,
+             message: 'Failed to perform bank name matching due to an internal error.'
+           });
         }
-      ],
-      temperature: 0
-    });
-
-    let matchPayload = {};
-    try {
-      matchPayload = JSON.parse(aiMatchResponse.choices[0].message.content);
-    } catch (e) {
-      matchPayload = { bankName: null, confidence: 0 };
-    }
-
-    // 3. Extract bankCode from the matched bank
-    let bankCode = null;
-    if (matchPayload.bankName) {
-      const match = banks.find(
-        b => b.bankName.toLowerCase() === matchPayload.bankName.toLowerCase()
-      );
-      bankCode = match ? match.bankCode : null;
-    }
-
-    // 4. Return Final Payload
-    return JSON.stringify({
-      success: true,
-      data: {
-        providedName,
-        banks,
-        count: result.count || 0,
-        bankName: matchPayload.bankName,
-        bankCode: bankCode,              // <-- EXPOSED HERE
-        accountName: providedName,
-        confidence: matchPayload.confidence
-      }
-    });
-
-  } catch (error) {
-    return JSON.stringify({
-      success: false,
-      error: error.message
-    });
-  }
-
 
       case 'get_bank_details':
         if (!authenticated) {
