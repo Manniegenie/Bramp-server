@@ -18,6 +18,7 @@ const JWT_SECRET = process.env.JWT_SECRET || process.env.ACCESS_TOKEN_SECRET || 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || process.env.OPENAI_KEY;
 const AI_MODEL = process.env.OPENAI_MODEL_PRIMARY || 'gpt-4o'; // Use gpt-4o for function calling
 const AI_OUTPUT_MAX_TOKENS = parseInt(process.env.AI_OUTPUT_MAX_TOKENS || '500', 10);
+const API_BASE_URL = process.env.API_BASE_URL || 'https://priscaai.online';
 const OPENAI_SUPPORTS_RESPONSES = false; // Use chat completions with function calling
 
 // OpenAI client
