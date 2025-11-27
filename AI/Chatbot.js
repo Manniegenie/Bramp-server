@@ -176,7 +176,7 @@ Guidelines:
     - Format numbers with commas (e.g., ₦1,500.00 not ₦1500)
     - Explain what each rate means
     
-    For sell transactions (create_sell_transaction, get_sell_quote):
+    For sell transactions (get_sell_quote):
     - Display the deposit address clearly
     - Show the payment ID if available
     - Display the quote: amount of crypto → amount in NGN (e.g., "0.1 BTC → ₦15,000,000")
@@ -322,7 +322,7 @@ function validateFunctionParameters(functionName, parameters, authCtx, userExper
  */
 function getRequiredParamsForFunction(functionName) {
   const paramMap = {
-    'create_sell_transaction': ['token', 'network'],
+    'get_sell_quote': ['token', 'amount', 'network'],
     'create_buy_transaction': ['token', 'network', 'amount'],
     'get_buy_quote': ['token', 'amount'],
     'check_transaction_status': ['paymentId'],
@@ -379,10 +379,7 @@ function getToolChoiceForIntent(intent, authCtx, message) {
     if (hasToken && hasAmount) {
       return { type: 'function', function: { name: 'get_sell_quote' } };
     }
-    // If we have token and network and amount, suggest create transaction
-    if (hasToken && hasNetwork && hasAmount) {
-      return { type: 'function', function: { name: 'create_sell_transaction' } };
-    }
+  
     // Otherwise, let LLM ask for missing info conversationally
     return 'auto';
   }
@@ -445,7 +442,7 @@ async function handleFunctionCall(toolCall, authCtx) {
 
   try {
     // Special handling for sell transactions - create session
-    if (functionName === 'create_sell_transaction') {
+    if (functionName === 'get_sell_quote') {
       // Execute the tool first
       const toolResult = await executeTool(functionName, functionArgs, authCtx);
 

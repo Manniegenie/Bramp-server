@@ -84,7 +84,7 @@ const AVAILABLE_TOOLS = [
             description: 'Amount to sell in token units'
           }
         },
-        required: ['token', 'amount']
+        required: ['token', 'amount', 'token']
       }
     }
   },
