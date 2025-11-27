@@ -12,6 +12,7 @@ const { quickIntentCheck, analyzeConversationContext } = require('./aiIntents');
 // Session management removed - no longer using 2-minute session windows
 const cache = require('./cache');
 const logger = require('../utils/logger');
+const axios = require('axios');
 
 // Config
 const JWT_SECRET = process.env.JWT_SECRET || process.env.ACCESS_TOKEN_SECRET || '';
