@@ -44,7 +44,7 @@ const AVAILABLE_TOOLS = [
             default: 'TOKEN'
           }
         },
-        required: ['token', 'network']
+        required: ['token', 'network', 'amount', 'currency']
       }
     }
   },
