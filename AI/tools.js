@@ -1147,8 +1147,7 @@ async function executeTool(toolName, parameters, authCtx = {}) {
 
        // ... inside executeTool(toolName, parameters, authCtx)
 // ... before the default case
-
-      case 'match_naira':
+case 'match_naira':
         try {
           if (!OpenAI) {
             return {
@@ -1158,45 +1157,58 @@ async function executeTool(toolName, parameters, authCtx = {}) {
             };
           }
 
-          // 1. Fetch the official list of banks
-          const bankListRes = await axios.get(`${API_BASE_URL}/fetchnaira/naira-accounts`, {
+          // 1. Fetch the official list of banks using the new endpoint route
+          const banksUrl = `${API_BASE_URL}/fetchnaira/naira-accounts`;
+          logger.info('Fetching official bank list for matching', { url: banksUrl });
+
+          const bankListRes = await axios.get(banksUrl, {
             timeout: 10000
           });
 
-          const officialBanks = bankListRes.data.data || bankListRes.data;
+          // 🔴 FIX: Access the banks array directly from the 'banks' key
+          const officialBanks = bankListRes.data.banks; 
 
           if (!Array.isArray(officialBanks) || officialBanks.length === 0) {
-             return {
+             logger.warn('match_naira: Fetched bank list is not an array or is empty', { data: bankListRes.data });
+             return logAndReturnResult('match_naira', {
               success: false,
               error: 'Bank list unavailable',
-              message: 'Could not retrieve the official list of banks for matching.'
-            };
+              // Use a more specific message based on the status code if possible, 
+              // but this is the correct message based on the log you provided.
+              message: 'Could not retrieve the official list of banks for matching.' 
+            });
           }
 
-          const bankNames = officialBanks.map(b => `${b.bankCode}: ${b.bankName}`).join('\n');
+          // Format the list for the LLM
+          const bankNames = officialBanks
+            .map(b => `${b.code}: ${b.name}`) // Use b.code and b.name as defined in routes/fetchnaira.js
+            .join('\n');
 
           // 2. Use OpenAI/LLM to perform the matching logic
-          const openai = new OpenAI(); // Assuming it's the class instance
+          const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY }); // Initialize the client
 
           const prompt = `The user provided the bank name: "${parameters.providedName}".
-          Match this name against the official list of banks below and return the single best match in JSON format: {"bankCode": "...", "bankName": "..."}.
+          Match this name against the official list of banks below. The format is 'CODE: Full Bank Name'.
+          Return the single best match in JSON format: {"bankCode": "...", "bankName": "..."}.
+          The bankCode must be one of the codes from the list.
           If no reasonable match is found, return: {"bankCode": null, "bankName": null}.
 
-          Official Bank List:\n${bankNames}`;
+          Official Bank List (CODE: Name):\n${bankNames}`;
 
           const completion = await openai.chat.completions.create({
-            model: "gpt-4o-mini", // Or another suitable model
+            model: "gpt-4o-mini", // Using a fast, reliable model
             messages: [{ role: "user", content: prompt }],
             response_format: { type: "json_object" }
           });
 
           const matchResult = JSON.parse(completion.choices[0].message.content);
 
+          // 3. Process and return the result
           let displayMessage = '';
           if (matchResult.bankCode && matchResult.bankName) {
-            displayMessage = `I found a match! The bank is **${matchResult.bankName}** with code **${matchResult.bankCode}**.`;
+            displayMessage = `I found a match! The bank you meant is **${matchResult.bankName}** with code **${matchResult.bankCode}**.`;
           } else {
-            displayMessage = `I could not find a clear match for "${parameters.providedName}" in the official bank list. Please check the spelling or provide the full bank name.`;
+            displayMessage = `I could not find a clear match for "${parameters.providedName}". Please provide the full official bank name.`;
           }
 
           return logAndReturnResult('match_naira', {
@@ -1206,11 +1218,14 @@ async function executeTool(toolName, parameters, authCtx = {}) {
           });
 
         } catch (matchError) {
-           logger.error('match_naira failed', { error: matchError.message });
+           logger.error('match_naira failed', { 
+             error: matchError.message, 
+             status: matchError.response?.status 
+           });
            return logAndReturnResult('match_naira', {
              success: false,
              error: matchError.message,
-             message: 'Failed to perform bank name matching due to an internal error.'
+             message: 'Failed to perform bank name matching due to an internal server or API error.'
            });
         }
 
