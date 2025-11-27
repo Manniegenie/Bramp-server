@@ -159,6 +159,7 @@ When a user wants to sell crypto, follow this EXACT sequence:
 
 IMPORTANT: 
 - Do NOT provide bankCode or accountName upfront - let the system validate automatically via create_sell_transaction.
+- make sure account numbers, names and bank details are copiable and bolded for clarity.
 - If user wants to validate details standalone (before selling), call validate_account tool directly.
 - Always display the validated account name clearly and prompt for double-check.
 - Use validate_account when user specifically asks to "check my bank details" without selling.
