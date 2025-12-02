@@ -423,6 +423,7 @@ const analyticsRoutes = require("./adminRoutes/analytics");
 const financialAnalysisRoutes = require("./routes/financialAnalysis");
 const financialAnalysisWebhookRoutes = require("./routes/financialAnalysisWebhook");
 const liskWalletRoutes = require("./routes/liskWallet");
+const newsRoutes = require("./routes/news");
 
 // Public routes (with auth rate limiting)
 app.use("/signin", signinRoutes);
@@ -478,6 +479,7 @@ app.use("/resend-otp", resendOtpRoutes);
 app.use("/fetchnaira", fetchnairaRoutes);
 app.use("/rates", ratesRoutes);
 app.use("/accountname", AccountnameRoutes);
+app.use("/news", newsRoutes);
 
 // Protected user routes
 app.use("/avatar-update", authenticateToken, avatarsRoutes);
