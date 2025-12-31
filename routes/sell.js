@@ -227,7 +227,7 @@ async function initiateSell(userId, payload, log = logger) {
     userId,
     kind: 'SELL',
     createdAt: { $gte: today, $lt: tomorrow },
-    status: 'COMPLETED'
+    status: { $in: ['CONFIRMED', 'COMPLETED'] }
   }).lean();
 
   let totalUsdToday = 0;
