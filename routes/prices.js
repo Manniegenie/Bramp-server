@@ -26,8 +26,8 @@ function parseSymbolsParam(symbolsParam) {
   return valid.length ? valid : [];
 }
 
-// GET /api/prices?symbols=BTC,ETH&original=true&changes=true&limit=10
-router.get('/prices', async (req, res) => {
+// GET /prices?symbols=BTC,ETH&original=true&changes=true&limit=10
+router.get('/', async (req, res) => {
   const start = Date.now();
   try {
     // parse query params
