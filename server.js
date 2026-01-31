@@ -424,6 +424,7 @@ const financialAnalysisRoutes = require("./routes/financialAnalysis");
 const financialAnalysisWebhookRoutes = require("./routes/financialAnalysisWebhook");
 const liskWalletRoutes = require("./routes/liskWallet");
 const newsRoutes = require("./routes/news");
+const notificationsRoutes = require("./routes/notifications");
 
 // Public routes (with auth rate limiting)
 app.use("/signin", signinRoutes);
@@ -529,6 +530,7 @@ app.use("/game", authenticateToken, GameRoutes);
 app.use("/scan", authenticateToken, ScanRoutes);
 app.use("/voice", authenticateToken, VoiceRoutes);
 app.use("/lisk", authenticateToken, liskWalletRoutes);
+app.use("/notifications", authenticateToken, notificationsRoutes);
 // Financial analysis routes (health is public, process requires auth)
 // Webhook endpoint is public (validated by signature), other endpoints require auth
 app.use("/financial-analysis", financialAnalysisRoutes);
