@@ -91,10 +91,10 @@ priceChangeSchema.statics.getHistoricalPrice = async function(symbol, hoursAgo =
   }
 };
 
-// Price changes (ignores stables/NGNZ)
+// Price changes (ignores stables/NGNZ/NGNB)
 priceChangeSchema.statics.getPriceChanges = async function(currentPrices, hoursAgo = 12) {
   try {
-    const skip = new Set(['USDT', 'USDC', 'NGNZ']);
+    const skip = new Set(['USDT', 'USDC', 'NGNZ', 'NGNB']);
     const out = {};
 
     for (const token of Object.keys(currentPrices)) {

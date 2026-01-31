@@ -650,6 +650,17 @@ const startServer = async () => {
       console.log("🏠 Localhost and 127.0.0.1 (all ports) automatically allowed for development");
       console.log("⏰ Crypto price update job scheduled every 15 minutes");
 
+      // Schedule crypto price updates every 15 minutes
+      cron.schedule('*/15 * * * *', async () => {
+        console.log("⏰ Running scheduled crypto price update...");
+        try {
+          const result = await updateCryptoPrices();
+          console.log("Scheduled price update result:", result);
+        } catch (err) {
+          console.error("Scheduled price update failed:", err.message);
+        }
+      });
+
       // Run initial price update manually
       setTimeout(() => {
         console.log("Running initial crypto price update...");

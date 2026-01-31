@@ -7,14 +7,10 @@ const User = require('../models/user');
 const Transaction = require('../models/transaction');
 const ChatbotTx = require('../models/ChatbotTransaction');
 const webhookAuth = require('../auth/webhookauth');
-const { debitNaira } = require('../services/nairaWithdrawal');
 const { getPricesWithCache } = require('../services/portfolio');
 const logger = require('../utils/logger');
 
-// NEW: swap service
-const { swapCryptoToNGNX } = require('../services/ObiexSwap');
-
-// NEW: Email service import
+// Email service import
 const { sendChatbotDepositEmail } = require('../services/EmailService');
 
 // Import rate calculation directly from sell route
@@ -141,8 +137,6 @@ async function checkTolerance(expectedAmount, observedAmount, token, log = logge
     toleranceThreshold: TOLERANCE_THRESHOLD_USD
   };
 }
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * Webhook to process transactions for the single-address SELL flow.
@@ -477,113 +471,20 @@ router.post('/transaction', webhookAuth, async (req, res) => {
     }
 
     // ===========================
-    // Swap crypto → NGNX
-    // Use the EXACT observed token amount
+    // SELL COMPLETE - NGNB credited to wallet
+    // User can manually withdraw via /withdrawal/ngnb endpoint
     // ===========================
-    try {
-      const sourceCode = sell.token;      // e.g., 'USDT', 'BTC', ...
-      const swapAmount = Number(observed); // exact deposit amount in token units
+    logger.info(`SELL ${sell.paymentId} completed - NGNB credited to wallet`, {
+      userId: sell.userId,
+      ngnbCredited: actualReceiveAmount,
+      token: sell.token,
+      observedAmount: observed,
+      message: 'User can withdraw NGNB to bank via /withdrawal/ngnb endpoint'
+    });
 
-      logger.info('Preparing swap crypto → NGNX', {
-        paymentId: sell.paymentId,
-        sourceCode,
-        amountCrypto: swapAmount
-      });
-
-      const swapRes = await swapCryptoToNGNX({ sourceCode, amount: swapAmount });
-
-      if (!swapRes.success) {
-        logger.error('Swap to NGNX failed', {
-          paymentId: sell.paymentId,
-          statusCode: swapRes.statusCode,
-          providerError: swapRes.error || null
-        });
-        return res.status(502).json({
-          success: false,
-          message: 'Swap to NGNX failed',
-          swapError: swapRes.error || null
-        });
-      }
-
-      logger.info('Swap accepted, waiting 5s before fiat payout', {
-        paymentId: sell.paymentId
-      });
-      await sleep(5000);
-    } catch (swapErr) {
-      logger.error('Swap flow failed with exception', {
-        paymentId: sell.paymentId,
-        error: swapErr.message
-      });
-      return res.status(502).json({ success: false, message: 'Swap step failed' });
-    }
-
-    // ===========================
-    // NGNX Bank Payout (after swap) - Use ACTUAL receive amount
-    // ===========================
-    if (sell.payout?.accountNumber && sell.payout?.bankCode && sell.payout?.accountName && sell.payout?.bankName) {
-      try {
-        // Use actualReceiveAmount instead of sell.receiveAmount
-        const payoutAmountNgnx = Math.round(Number(actualReceiveAmount) || 0); // NGNX amount (1:1 with NGN)
-        if (!(payoutAmountNgnx > 0)) {
-          logger.error(`Invalid payout NGNX amount for SELL ${sell.paymentId}`, {
-            actualReceiveAmount: actualReceiveAmount,
-            originalReceiveAmount: sell.receiveAmount
-          });
-        } else {
-          logger.info(`Initiating payout (NGNX) for SELL ${sell.paymentId}`, {
-            amountNGNX: payoutAmountNgnx,
-            bankName: sell.payout.bankName,
-            accountNumber: sell.payout.accountNumber,
-            originalQuoted: sell.receiveAmount,
-            actualAmount: actualReceiveAmount
-          });
-
-          const payoutResult = await debitNaira(
-            {
-              destination: {
-                accountNumber: sell.payout.accountNumber,
-                accountName: sell.payout.accountName,
-                bankName: sell.payout.bankName,
-                bankCode: sell.payout.bankCode,
-              },
-              amount: payoutAmountNgnx,   // ACTUAL NGNX amount based on observed deposit
-              currency: 'NGNX',           // IMPORTANT: ensure service sends NGNX to Obiex
-              narration: `Sell ${sell.paymentId}`,
-            },
-            { chatbotPaymentId: sell.paymentId, userId: sell.userId.toString() }
-          );
-
-          if (payoutResult?.success) {
-            logger.info(`Payout (NGNX) initiated successfully for SELL ${sell.paymentId}`, {
-              providerId: payoutResult.data?.id,
-              reference: payoutResult.data?.reference,
-              status: payoutResult.data?.status,
-              actualAmount: payoutAmountNgnx
-            });
-          } else {
-            logger.error(`Payout (NGNX) initiation failed for SELL ${sell.paymentId}`, {
-              message: payoutResult?.message,
-              statusCode: payoutResult?.statusCode
-            });
-          }
-        }
-      } catch (payoutErr) {
-        logger.error('Payout initiation failed', {
-          error: payoutErr.message,
-          paymentId: sell.paymentId,
-          stack: payoutErr.stack
-        });
-        // Wallet credited; user can retry payout later.
-      }
-    } else {
-      logger.info(`SELL ${sell.paymentId} confirmed but no payout details available`, {
-        hasPayout: !!sell.payout,
-        hasAccountNumber: !!sell.payout?.accountNumber,
-        hasBankCode: !!sell.payout?.bankCode,
-        hasAccountName: !!sell.payout?.accountName,
-        hasBankName: !!sell.payout?.bankName
-      });
-    }
+    // Update sell status to completed
+    sell.status = 'COMPLETED';
+    await sell.save();
 
     return res.status(200).json({
       success: true,

@@ -170,9 +170,10 @@ async function initiateSell(userId, payload, log = logger) {
 
     // Raw token amount from NGN
     const rawTokenAmount = usdAmount / usdPerToken;
-    // Round token amount to a cleaner figure for user instructions (avoid long decimals)
-    // Using 2dp for clarity across wallets; adjust if token precision requires otherwise
-    actualTokenAmount = Number(rawTokenAmount.toFixed(2));
+    // Round token amount based on token type - BTC needs 8 decimals, ETH/SOL need 6, stables need 2
+    const decimalPlaces = tokenU === 'BTC' ? 8 :
+                          ['ETH', 'SOL', 'BNB', 'AVAX'].includes(tokenU) ? 6 : 2;
+    actualTokenAmount = Number(rawTokenAmount.toFixed(decimalPlaces));
     // Recompute usdAmount using the rounded token amount to keep downstream checks coherent
     usdAmount = actualTokenAmount * usdPerToken;
 
