@@ -197,7 +197,8 @@ router.post('/withdrawal/ngnb', async (req, res) => {
   
   // Generate unique reference
   const reference = `NGNB_WD_${Date.now()}_${uuidv4().substring(0, 8)}`;
-  
+  let reservedAmount = null; // used in catch to release balance if error occurs after reserve
+
   try {
     logger.info(`NGNB withdrawal request from user ${userId}:`, {
       ...req.body,
@@ -216,7 +217,8 @@ router.post('/withdrawal/ngnb', async (req, res) => {
     }
     
     const { amount, bank_code, account_number, narration, twoFactorCode, passwordpin } = validation.sanitized;
-    
+    reservedAmount = amount;
+
     // Step 2: Validate user
     const user = await User.findById(userId);
     if (!user) {
@@ -561,12 +563,9 @@ router.post('/withdrawal/ngnb', async (req, res) => {
   } catch (error) {
     // Release any reserved balance in case of unexpected error
     try {
-      if (validation?.sanitized?.amount) {
-        await releaseReservedBalance(userId, 'NGNB', validation.sanitized.amount);
-        logger.info('🔄 Released reserved balance due to unexpected error', { 
-          userId, 
-          amount: validation.sanitized.amount 
-        });
+      if (reservedAmount != null) {
+        await releaseReservedBalance(userId, 'NGNB', reservedAmount);
+        logger.info('🔄 Released reserved balance due to unexpected error', { userId, amount: reservedAmount });
       }
     } catch (releaseError) {
       logger.error('❌ Failed to release reserved balance during error handling:', releaseError);

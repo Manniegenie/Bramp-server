@@ -214,6 +214,7 @@ userSchema.pre('save', async function (next) {
 // Authentication Methods
 userSchema.methods.comparePassword = async function (candidate) { return this.password && bcrypt.compare(candidate, this.password); };
 userSchema.methods.comparePasswordPin = async function (candidate) { return this.passwordpin && bcrypt.compare(candidate, this.passwordpin); };
+userSchema.methods.isBvnVerified = function () { return !!this.bvnVerified; };
 userSchema.methods.compareTransactionPin = async function (candidate) { return this.transactionpin && bcrypt.compare(candidate, this.transactionpin); };
 userSchema.methods.compareSecurityPin = async function (candidate) { return this.securitypin && bcrypt.compare(candidate, this.securitypin); };
 
