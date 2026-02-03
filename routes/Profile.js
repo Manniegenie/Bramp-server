@@ -15,7 +15,7 @@ router.get('/profile', async (req, res) => {
 
     // Fetch user from database with only required fields
     const user = await User.findById(userId).select(
-      'username firstname lastname email phonenumber avatarUrl avatarLastUpdated assistantName'
+      'username firstname lastname email phonenumber avatarUrl avatarLastUpdated assistantName emailVerified'
     );
 
     if (!user) {
@@ -37,6 +37,7 @@ router.get('/profile', async (req, res) => {
         username: user.username || null,
         fullName: user.fullName, // This uses the virtual from the schema
         email: user.email,
+        emailVerified: !!user.emailVerified,
         phoneNumber: user.phonenumber || null,
         assistantName: user.assistantName || null,
         avatar: {
