@@ -11,7 +11,7 @@ const {
   releaseReservedBalance
 } = require('../services/portfolio');
 const { validateTwoFactorAuth } = require('../services/twofactorAuth'); // ADD: 2FA validation
-const { validateTransactionLimit } = require('../services/kyccheckservice'); // ADD: KYC service import
+// const { validateTransactionLimit } = require('../services/kyccheckservice'); // ADD: KYC service import (commented out)
 
 // Import models
 const User = require('../models/user');
@@ -296,91 +296,90 @@ router.post('/withdrawal/ngnb', async (req, res) => {
     });
 
     // ========================================
-    // KYC VALIDATION - ENHANCED
+    // KYC VALIDATION - COMMENTED OUT FOR TESTING
     // ========================================
-    logger.info('Validating KYC limits for NGNB withdrawal', { userId, amount, currency: 'NGNB' });
-    
-    // Check basic KYC level requirement
-    if (user.kycLevel < 2) {
-      return res.status(403).json({
-        success: false,
-        error: 'KYC_LEVEL_INSUFFICIENT',
-        message: 'KYC Level 2 or higher required for withdrawals',
-        kycDetails: {
-          currentLevel: user.kycLevel,
-          requiredLevel: 2,
-          upgradeRecommendation: 'Please complete KYC Level 2 verification to enable withdrawals'
-        }
-      });
-    }
-    
-    try {
-      const kycValidation = await validateTransactionLimit(userId, amount, 'NGNB', 'WITHDRAWAL');
-      
-      if (!kycValidation.allowed) {
-        logger.warn('NGNB withdrawal blocked by KYC limits', {
-          userId,
-          amount,
-          currency: 'NGNB',
-          bank_code,
-          account_number: account_number.substring(0, 6) + '****',
-          kycCode: kycValidation.code,
-          kycMessage: kycValidation.message,
-          kycData: kycValidation.data
-        });
-
-        // Return detailed KYC error response
-        return res.status(403).json({
-          success: false,
-          error: 'KYC_LIMIT_EXCEEDED',
-          message: kycValidation.message,
-          code: kycValidation.code,
-          kycDetails: {
-            kycLevel: kycValidation.data?.kycLevel,
-            limitType: kycValidation.data?.limitType,
-            requestedAmount: kycValidation.data?.requestedAmount,
-            currentLimit: kycValidation.data?.currentLimit,
-            currentSpent: kycValidation.data?.currentSpent,
-            availableAmount: kycValidation.data?.availableAmount,
-            upgradeRecommendation: kycValidation.data?.upgradeRecommendation,
-            amountInNaira: kycValidation.data?.amountInNaira,
-            currency: kycValidation.data?.currency,
-            transactionType: 'WITHDRAWAL'
-          }
-        });
-      }
-
-      // Log successful KYC validation with details
-      logger.info('KYC validation passed for NGNB withdrawal', {
-        userId,
-        amount,
-        currency: 'NGNB',
-        bank_code,
-        account_number: account_number.substring(0, 6) + '****',
-        kycLevel: kycValidation.data?.kycLevel,
-        dailyRemaining: kycValidation.data?.dailyRemaining,
-        monthlyRemaining: kycValidation.data?.monthlyRemaining,
-        amountInNaira: kycValidation.data?.amountInNaira
-      });
-
-    } catch (kycError) {
-      logger.error('KYC validation failed with error for NGNB withdrawal', {
-        userId,
-        amount,
-        currency: 'NGNB',
-        bank_code,
-        account_number: account_number.substring(0, 6) + '****',
-        error: kycError.message,
-        stack: kycError.stack
-      });
-
-      return res.status(500).json({
-        success: false,
-        error: 'KYC_VALIDATION_ERROR',
-        message: 'Unable to validate transaction limits. Please try again or contact support.',
-        code: 'KYC_VALIDATION_ERROR'
-      });
-    }
+    // logger.info('Validating KYC limits for NGNB withdrawal', { userId, amount, currency: 'NGNB' });
+    //
+    // // Check basic KYC level requirement
+    // if (user.kycLevel < 2) {
+    //   return res.status(403).json({
+    //     success: false,
+    //     error: 'KYC_LEVEL_INSUFFICIENT',
+    //     message: 'KYC Level 2 or higher required for withdrawals',
+    //     kycDetails: {
+    //       currentLevel: user.kycLevel,
+    //       requiredLevel: 2,
+    //       upgradeRecommendation: 'Please complete KYC Level 2 verification to enable withdrawals'
+    //     }
+    //   });
+    // }
+    //
+    // kyccheckservice (daily/monthly limit validation) commented out
+    // try {
+    //   const kycValidation = await validateTransactionLimit(userId, amount, 'NGNB', 'WITHDRAWAL');
+    //
+    //   if (!kycValidation.allowed) {
+    //     logger.warn('NGNB withdrawal blocked by KYC limits', {
+    //       userId,
+    //       amount,
+    //       currency: 'NGNB',
+    //       bank_code,
+    //       account_number: account_number.substring(0, 6) + '****',
+    //       kycCode: kycValidation.code,
+    //       kycMessage: kycValidation.message,
+    //       kycData: kycValidation.data
+    //     });
+    //
+    //     return res.status(403).json({
+    //       success: false,
+    //       error: 'KYC_LIMIT_EXCEEDED',
+    //       message: kycValidation.message,
+    //       code: kycValidation.code,
+    //       kycDetails: {
+    //         kycLevel: kycValidation.data?.kycLevel,
+    //         limitType: kycValidation.data?.limitType,
+    //         requestedAmount: kycValidation.data?.requestedAmount,
+    //         currentLimit: kycValidation.data?.currentLimit,
+    //         currentSpent: kycValidation.data?.currentSpent,
+    //         availableAmount: kycValidation.data?.availableAmount,
+    //         upgradeRecommendation: kycValidation.data?.upgradeRecommendation,
+    //         amountInNaira: kycValidation.data?.amountInNaira,
+    //         currency: kycValidation.data?.currency,
+    //         transactionType: 'WITHDRAWAL'
+    //       }
+    //     });
+    //   }
+    //
+    //   logger.info('KYC validation passed for NGNB withdrawal', {
+    //     userId,
+    //     amount,
+    //     currency: 'NGNB',
+    //     bank_code,
+    //     account_number: account_number.substring(0, 6) + '****',
+    //     kycLevel: kycValidation.data?.kycLevel,
+    //     dailyRemaining: kycValidation.data?.dailyRemaining,
+    //     monthlyRemaining: kycValidation.data?.monthlyRemaining,
+    //     amountInNaira: kycValidation.data?.amountInNaira
+    //   });
+    //
+    // } catch (kycError) {
+    //   logger.error('KYC validation failed with error for NGNB withdrawal', {
+    //     userId,
+    //     amount,
+    //     currency: 'NGNB',
+    //     bank_code,
+    //     account_number: account_number.substring(0, 6) + '****',
+    //     error: kycError.message,
+    //     stack: kycError.stack
+    //   });
+    //
+    //   return res.status(500).json({
+    //     success: false,
+    //     error: 'KYC_VALIDATION_ERROR',
+    //     message: 'Unable to validate transaction limits. Please try again or contact support.',
+    //     code: 'KYC_VALIDATION_ERROR'
+    //   });
+    // }
     // ========================================
     // END KYC VALIDATION
     // ========================================

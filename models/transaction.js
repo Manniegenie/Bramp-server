@@ -79,6 +79,7 @@ const transactionSchema = new mongoose.Schema({
 
 // Indexes
 transactionSchema.index({ userId: 1, type: 1, status: 1 });
+transactionSchema.index({ obiexTransactionId: 1 }); // Webhook lookups (chatbot, obiex)
 transactionSchema.index({ giftCardId: 1 });
 transactionSchema.index({ cardType: 1, country: 1 });
 
