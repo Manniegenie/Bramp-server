@@ -228,25 +228,28 @@ router.post('/withdrawal/ngnb', async (req, res) => {
       });
     }
 
-    // ADD: Step 2.1: Check BVN verification before allowing withdrawal
-    if (!user.isBvnVerified()) {
-      logger.warn('NGNB withdrawal blocked - BVN not verified', { 
-        userId,
-        reference,
-        bvnStatus: user.bvnVerification?.status || 'not_verified'
-      });
-      
-      return res.status(403).json({
-        success: false,
-        error: 'BVN_NOT_VERIFIED',
-        message: 'Verify your BVN',
-        details: {
-          bvnRequired: true,
-          currentStatus: user.bvnVerification?.status || 'not_verified',
-          nextSteps: 'Please complete BVN verification before making withdrawals'
-        }
-      });
-    }
+    // BVN VALIDATION - COMMENTED OUT FOR DEVELOPMENT
+    // ========================================
+    // if (!user.isBvnVerified()) {
+    //   logger.warn('NGNB withdrawal blocked - BVN not verified', {
+    //     userId,
+    //     reference,
+    //     bvnStatus: user.bvnVerification?.status || 'not_verified'
+    //   });
+    //
+    //   return res.status(403).json({
+    //     success: false,
+    //     error: 'BVN_NOT_VERIFIED',
+    //     message: 'Verify your BVN',
+    //     details: {
+    //       bvnRequired: true,
+    //       currentStatus: user.bvnVerification?.status || 'not_verified',
+    //       nextSteps: 'Please complete BVN verification before making withdrawals'
+    //     }
+    //   });
+    // }
+    // END BVN VALIDATION
+    // ========================================
 
     // Step 2.2: Validate 2FA
     if (!user.twoFASecret || !user.is2FAEnabled) {
