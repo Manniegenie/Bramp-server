@@ -11,6 +11,11 @@ apiInstance.setApiKey(brevo.TransactionalEmailsApiApiKeys.apiKey, process.env.BR
  */
 async function sendEmail({ to, name, templateId, params = {}, options = {} }) {
   try {
+    // Validate template ID
+    if (!templateId || isNaN(templateId) || templateId <= 0) {
+      throw new Error(`Invalid template ID: ${templateId}. Please check your BREVO_TEMPLATE_* environment variables.`);
+    }
+
     const email = new brevo.SendSmtpEmail();
 
     // Set recipient
@@ -159,10 +164,23 @@ async function sendOtpEmail(to, name, otpCode, expirationMinutes = 10) {
 
   console.log('OTP email params:', params);
 
+  // Get template ID with fallback to SIGNUP template if OTP template not configured
+  const otpTemplateId = parseInt(process.env.BREVO_TEMPLATE_OTP);
+  const fallbackTemplateId = parseInt(process.env.BREVO_TEMPLATE_SIGNUP);
+  const templateId = (!isNaN(otpTemplateId) && otpTemplateId > 0) 
+    ? otpTemplateId 
+    : (!isNaN(fallbackTemplateId) && fallbackTemplateId > 0) 
+      ? fallbackTemplateId 
+      : null;
+
+  if (!templateId) {
+    throw new Error('BREVO_TEMPLATE_OTP or BREVO_TEMPLATE_SIGNUP environment variable must be set with a valid template ID');
+  }
+
   return sendEmail({
     to,
     name,
-    templateId: parseInt(process.env.BREVO_TEMPLATE_OTP),
+    templateId,
     params
   });
 }
