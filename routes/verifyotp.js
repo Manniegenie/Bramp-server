@@ -3,43 +3,42 @@ const router = express.Router();
 const PendingUser = require("../models/pendinguser");
 const logger = require("../utils/logger");
 
+// Normalize Nigerian phone - SAME as signup.js so PendingUser is found
+function normalizeNigerianPhone(phone) {
+  let cleaned = phone.replace(/[^\d+]/g, '');
+
+  if (cleaned.startsWith('+2340')) {
+    cleaned = '+234' + cleaned.slice(5);
+  }
+  if (cleaned.startsWith('2340') && !cleaned.startsWith('+')) {
+    cleaned = '234' + cleaned.slice(4);
+  }
+  if (cleaned.startsWith('0') && cleaned.length === 11) {
+    cleaned = '+234' + cleaned.slice(1);
+  }
+  if (cleaned.startsWith('234') && !cleaned.startsWith('+')) {
+    cleaned = '+' + cleaned;
+  }
+
+  return cleaned;
+}
+
 router.post("/verify-otp", async (req, res) => {
-  const { phonenumber, code } = req.body;
+  let { phonenumber, code } = req.body;
 
   if (!phonenumber || !code) {
     logger.warn("Missing phone number or code in verify-otp request");
     return res.status(400).json({ message: "Phone number and code are required." });
   }
 
-  // Normalize phone number (using same logic as frontend)
-  function normalizePhone(input) {
-    const d = input.replace(/[^\d+]/g, '');
-    
-    // Handle Nigerian phone numbers specifically
-    if (/^0\d{10}$/.test(d)) return '+234' + d.slice(1); // 08123456789 -> +2348123456789
-    if (/^234\d{10}$/.test(d)) return '+' + d; // 2348123456789 -> +2348123456789
-    if (/^\+234\d{10}$/.test(d)) return d; // +2348123456789 -> +2348123456789
-    
-    // Handle 10-digit numbers that could be Nigerian (starting with 7, 8, or 9)
-    if (/^[789]\d{9}$/.test(d)) return '+234' + d; // 8123456789 -> +2348123456789
-    
-    // Handle other international formats
-    if (/^\+?\d{10,15}$/.test(d)) return d.startsWith('+') ? d : '+' + d;
-    
-    return d;
-  }
-
-  // Normalize the phone number before searching
-  const normalizedPhone = normalizePhone(phonenumber);
+  phonenumber = normalizeNigerianPhone(phonenumber);
 
   try {
-    const pendingUser = await PendingUser.findOne({ phonenumber: normalizedPhone });
+    const pendingUser = await PendingUser.findOne({ phonenumber });
 
     if (!pendingUser) {
       logger.warn('Pending user not found', {
-        phone: normalizedPhone.slice(0, 5) + '****',
-        rawPhone: phonenumber.slice(0, 5) + '****',
-        normalizedPhone: normalizedPhone,
+        phone: phonenumber.slice(0, 5) + '****',
         timestamp: new Date().toISOString()
       });
       return res.status(404).json({ 
@@ -52,7 +51,7 @@ router.post("/verify-otp", async (req, res) => {
     // Validate OTP match
     if (pendingUser.verificationCode !== code) {
       logger.warn('Invalid OTP provided', {
-        phone: normalizedPhone.slice(0, 5) + '****',
+        phone: phonenumber.slice(0, 5) + '****',
         attempts: (pendingUser.otpAttempts || 0) + 1,
         timestamp: new Date().toISOString()
       });
@@ -73,7 +72,7 @@ router.post("/verify-otp", async (req, res) => {
     const now = new Date();
     if (pendingUser.verificationCodeExpiresAt < now) {
       logger.warn('Expired OTP attempt', {
-        phone: normalizedPhone.slice(0, 5) + '****',
+        phone: phonenumber.slice(0, 5) + '****',
         expiredAt: pendingUser.verificationCodeExpiresAt,
         timestamp: now.toISOString()
       });
@@ -87,7 +86,7 @@ router.post("/verify-otp", async (req, res) => {
     // Check max attempts
     if (pendingUser.otpAttempts >= 5) {
       logger.warn('Max OTP attempts exceeded', {
-        phone: normalizedPhone.slice(0, 5) + '****',
+        phone: phonenumber.slice(0, 5) + '****',
         attempts: pendingUser.otpAttempts,
         timestamp: now.toISOString()
       });
@@ -111,6 +110,7 @@ router.post("/verify-otp", async (req, res) => {
       pendingUserId: pendingUser._id,
       email: pendingUser.email,
       firstname: pendingUser.firstname,
+      middlename: pendingUser.middlename || '',
       lastname: pendingUser.lastname,
       phonenumber: pendingUser.phonenumber
     });
@@ -120,8 +120,7 @@ router.post("/verify-otp", async (req, res) => {
     logger.error("Error during OTP verification", {
       error: errorMessage,
       stack: error.stack,
-      phone: normalizedPhone ? normalizedPhone.slice(0, 5) + "****" : "N/A",
-      rawPhone: phonenumber ? phonenumber.slice(0, 5) + "****" : "N/A",
+      phone: phonenumber ? phonenumber.slice(0, 5) + "****" : "N/A",
       timestamp: new Date().toISOString()
     });
     res.status(500).json({ 

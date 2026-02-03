@@ -104,22 +104,21 @@ router.post('/password-pin', async (req, res) => {
     }
 
     const now = new Date();
-    
-    // Create user document with KYC Level 1
-    // Only use fields that exist in pendingUser model
-    const { 
-      email, 
-      firstname, 
-      lastname, 
-      phonenumber 
+
+    const {
+      email,
+      firstname,
+      middlename,
+      lastname,
+      phonenumber
     } = pendingUser;
 
-    // Generate unique username from first name
     const generatedUsername = await generateUniqueUsername(firstname);
 
     const userFields = {
       email,
       firstname,
+      middlename: middlename || '',
       lastname,
       phonenumber,
       username: generatedUsername, // Set the generated username
@@ -148,12 +147,13 @@ router.post('/password-pin', async (req, res) => {
           walletReferenceId: null,
         }
       },
-      // Set KYC Level 1 upon successful phone verification
       kycLevel: 1,
       kycStatus: 'approved',
       kyc: {
         level1: {
           status: 'approved',
+          phoneVerified: true,
+          verifiedAt: now,
           submittedAt: now,
           approvedAt: now,
           rejectedAt: null,
@@ -161,12 +161,14 @@ router.post('/password-pin', async (req, res) => {
         },
         level2: {
           status: 'not_submitted',
+          emailVerified: false,
+          documentSubmitted: false,
+          documentType: null,
+          documentNumber: null,
           submittedAt: null,
           approvedAt: null,
           rejectedAt: null,
-          rejectionReason: null,
-          documentType: null,
-          documentNumber: null
+          rejectionReason: null
         },
         level3: {
           status: 'not_submitted',
@@ -229,36 +231,56 @@ router.post('/password-pin', async (req, res) => {
     // Add refresh token to user before saving
     newUser.refreshTokens.push({ token: refreshToken, createdAt: new Date() });
     
-    // Save user first
     try {
       await newUser.save();
     } catch (saveError) {
-      logger.error('Error saving new user', { 
-        error: saveError.message, 
+      logger.error('Error saving new user', {
+        error: saveError.message,
         stack: saveError.stack,
         pendingUserId,
+        username: generatedUsername,
         validationErrors: saveError.errors ? Object.keys(saveError.errors) : null,
-        source: 'password-pin' 
+        source: 'password-pin'
       });
-      
-      // Handle specific validation errors
+
       if (saveError.name === 'ValidationError') {
         const errorMessages = Object.values(saveError.errors).map(err => err.message);
-        return res.status(400).json({ 
-          message: 'Validation failed', 
-          errors: errorMessages 
+        return res.status(400).json({
+          message: 'Validation failed',
+          errors: errorMessages
         });
       }
-      
-      // Handle duplicate key errors
+
       if (saveError.code === 11000) {
         const duplicateField = Object.keys(saveError.keyPattern || {})[0];
-        return res.status(400).json({ 
-          message: `${duplicateField} already exists` 
-        });
+        if (duplicateField === 'username') {
+          const fallbackUsername = await generateUniqueUsername(firstname);
+          newUser.username = fallbackUsername;
+          newUser.isUsernameCustom = false;
+          try {
+            await newUser.save();
+            logger.info('User saved with fallback username after collision', {
+              userId: newUser._id,
+              fallbackUsername,
+              pendingUserId
+            });
+          } catch (retryError) {
+            logger.error('Failed to save user even with fallback username', {
+              error: retryError.message,
+              pendingUserId
+            });
+            return res.status(500).json({
+              message: 'Failed to create account. Please try again.'
+            });
+          }
+        } else {
+          return res.status(400).json({
+            message: `${duplicateField} already exists`
+          });
+        }
+      } else {
+        throw saveError;
       }
-      
-      throw saveError; // Re-throw if not handled
     }
 
     logger.info('User created successfully with password PIN and generated username', {
@@ -326,8 +348,9 @@ router.post('/password-pin', async (req, res) => {
         email: newUser.email,
         phonenumber: newUser.phonenumber,
         firstname: newUser.firstname,
+        middlename: newUser.middlename,
         lastname: newUser.lastname,
-        username: newUser.username, // Now includes generated username
+        username: newUser.username,
         kycLevel: newUser.kycLevel,
         kycStatus: newUser.kycStatus,
       },

@@ -22,6 +22,7 @@ const userSchema = new mongoose.Schema({
 
   // Personal Info
   firstname: { type: String },
+  middlename: { type: String, default: '' },
   lastname: { type: String },
   phonenumber: { type: String },
   bvn: { type: String },
@@ -62,6 +63,8 @@ const userSchema = new mongoose.Schema({
   kyc: {
     level1: {
       status: { type: String, default: 'not_submitted', enum: ['not_submitted', 'pending', 'approved', 'rejected'] },
+      phoneVerified: { type: Boolean, default: false },
+      verifiedAt: { type: Date, default: null },
       submittedAt: { type: Date, default: null },
       approvedAt: { type: Date, default: null },
       rejectedAt: { type: Date, default: null },
@@ -69,12 +72,14 @@ const userSchema = new mongoose.Schema({
     },
     level2: {
       status: { type: String, default: 'not_submitted', enum: ['not_submitted', 'pending', 'approved', 'rejected'] },
+      emailVerified: { type: Boolean, default: false },
+      documentSubmitted: { type: Boolean, default: false },
+      documentType: { type: String, default: null },
+      documentNumber: { type: String, default: null },
       submittedAt: { type: Date, default: null },
       approvedAt: { type: Date, default: null },
       rejectedAt: { type: Date, default: null },
-      rejectionReason: { type: String, default: null },
-      documentType: { type: String, default: null },
-      documentNumber: { type: String, default: null }
+      rejectionReason: { type: String, default: null }
     },
     level3: {
       status: { type: String, default: 'not_submitted', enum: ['not_submitted', 'pending', 'approved', 'rejected'] },

@@ -42,6 +42,13 @@ router.post('/resend-otp', otpResendLimiter, async (req, res) => {
   }
 
   phonenumber = sanitizeInput(phonenumber);
+  // Same normalize as signup/verifyotp so PendingUser is found
+  let cleaned = phonenumber.replace(/[^\d+]/g, '');
+  if (cleaned.startsWith('+2340')) cleaned = '+234' + cleaned.slice(5);
+  if (cleaned.startsWith('2340') && !cleaned.startsWith('+')) cleaned = '234' + cleaned.slice(4);
+  if (cleaned.startsWith('0') && cleaned.length === 11) cleaned = '+234' + cleaned.slice(1);
+  if (cleaned.startsWith('234') && !cleaned.startsWith('+')) cleaned = '+' + cleaned;
+  phonenumber = cleaned;
   const normalizedPhone = phonenumber.startsWith('+') ? phonenumber.slice(1) : phonenumber;
 
   try {

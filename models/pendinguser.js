@@ -7,6 +7,7 @@ const pendingUserSchema = new mongoose.Schema(
   {
     email:        { type: String, required: true, unique: true },
     firstname:    { type: String, required: true },
+    middlename:   { type: String, default: '' },
     lastname:     { type: String, required: true },
     phonenumber:  { type: String, required: true, unique: true },
 
@@ -21,7 +22,8 @@ const pendingUserSchema = new mongoose.Schema(
       index: { expires: 0 } // TTL index
     },
     otpVerified:   { type: Boolean, default: false },
-    otpVerifiedAt: { type: Date,    default: null }
+    otpVerifiedAt: { type: Date,    default: null },
+    otpAttempts:   { type: Number,  default: 0 }
   },
   { timestamps: true }
 );
