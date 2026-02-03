@@ -27,6 +27,9 @@ const userSchema = new mongoose.Schema({
   bvn: { type: String },
   bvnVerified: { type: Boolean, default: false },
 
+  // Chat assistant display name (max 10 chars, no spaces)
+  assistantName: { type: String, default: null, trim: true, maxlength: 10 },
+
   // Chatbot Transaction Verification
   chatbotTransactionVerified: { type: Boolean, default: false },
 

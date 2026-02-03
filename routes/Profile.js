@@ -15,7 +15,7 @@ router.get('/profile', async (req, res) => {
 
     // Fetch user from database with only required fields
     const user = await User.findById(userId).select(
-      'username firstname lastname email phonenumber avatarUrl avatarLastUpdated'
+      'username firstname lastname email phonenumber avatarUrl avatarLastUpdated assistantName'
     );
 
     if (!user) {
@@ -38,6 +38,7 @@ router.get('/profile', async (req, res) => {
         fullName: user.fullName, // This uses the virtual from the schema
         email: user.email,
         phoneNumber: user.phonenumber || null,
+        assistantName: user.assistantName || null,
         avatar: {
           url: user.avatarUrl || null,
           lastUpdated: user.avatarLastUpdated || null
@@ -53,6 +54,63 @@ router.get('/profile', async (req, res) => {
       source: 'get-profile' 
     });
     res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// PUT: /profile - Update user profile (e.g. assistant name)
+router.put('/profile', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    if (!userId) {
+      return res.status(400).json({ success: false, message: 'Invalid token payload' });
+    }
+
+    const { assistantName } = req.body || {};
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    if (assistantName !== undefined) {
+      const trimmed = typeof assistantName === 'string' ? assistantName.trim() : '';
+      if (trimmed.length > 10) {
+        return res.status(400).json({ success: false, message: 'Assistant name cannot be more than 10 characters' });
+      }
+      if (/\s/.test(trimmed)) {
+        return res.status(400).json({ success: false, message: 'Assistant name cannot contain spaces' });
+      }
+      user.assistantName = trimmed || null;
+    }
+
+    await user.save();
+
+    const updated = await User.findById(userId).select(
+      'username firstname lastname email phonenumber avatarUrl avatarLastUpdated assistantName'
+    );
+
+    res.json({
+      success: true,
+      profile: {
+        username: updated.username || null,
+        fullName: updated.fullName,
+        email: updated.email,
+        phoneNumber: updated.phonenumber || null,
+        assistantName: updated.assistantName || null,
+        avatar: {
+          url: updated.avatarUrl || null,
+          lastUpdated: updated.avatarLastUpdated || null
+        }
+      }
+    });
+  } catch (error) {
+    logger.error('Error updating user profile', {
+      error: error.message,
+      stack: error.stack,
+      userId: req.user?.id,
+      source: 'put-profile'
+    });
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 

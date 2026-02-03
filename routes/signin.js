@@ -162,7 +162,8 @@ router.post(
           kycLevel: user.kycLevel,
           kycStatus: user.kycStatus,
           walletGenerationStatus: user.walletGenerationStatus,
-          avatarUrl: user.avatarUrl
+          avatarUrl: user.avatarUrl,
+          assistantName: user.assistantName || null
         }
       });
     } catch (error) {
