@@ -1,10 +1,10 @@
 const express = require('express');
-const mongoose = require('mongoose');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 
 const { validateUserBalance } = require('../services/balance');
+const { updateUserBalance } = require('../services/portfolio');
 const { debitNaira } = require('../services/nairaWithdrawal');
 const { validateTwoFactorAuth } = require('../services/twofactorAuth');
 
@@ -122,68 +122,63 @@ function generateWithdrawalReference() {
 }
 
 /**
- * Stage 1: Deduct balance and create transaction in a DB transaction (mirror ZeusODX)
+ * Stage 1: Deduct balance and create transaction (no MongoDB session - works on standalone)
  */
 async function executeNGNBWithdrawal(userId, withdrawalData, reference) {
-  const session = await mongoose.startSession();
-  session.startTransaction();
+  const { amount, bank_code, account_number, account_name, narration } = withdrawalData;
+  const totalDeducted = amount;
+  const amountToObiex = amount - NGNB_WITHDRAWAL_FEE_OPERATIONAL;
+  const feeAmountRecorded = NGNB_WITHDRAWAL_FEE_RECORDED;
+  const bankName = NIGERIAN_BANK_CODES[bank_code] || 'Unknown';
+
+  const updatedUser = await User.findOneAndUpdate(
+    { _id: userId, ngnbBalance: { $gte: totalDeducted } },
+    { $inc: { ngnbBalance: -totalDeducted }, $set: { lastBalanceUpdate: new Date() } },
+    { new: true, runValidators: true }
+  );
+
+  if (!updatedUser) throw new Error('Insufficient NGNB balance');
+
+  const withdrawalTransaction = new Transaction({
+    userId,
+    type: 'WITHDRAWAL',
+    currency: 'NGNB',
+    amount: -totalDeducted,
+    status: 'PENDING',
+    source: 'BANK',
+    reference,
+    obiexTransactionId: reference,
+    narration: narration || `NGNB withdrawal to ${bankName}`,
+    fee: feeAmountRecorded,
+    metadata: {
+      provider: 'OBIEX',
+      bank_code,
+      bank_name,
+      account_number,
+      account_name,
+      amountSentToBank: amountToObiex,
+      withdrawalFee: feeAmountRecorded,
+      requestedAmount: totalDeducted,
+      initiated_at: new Date()
+    }
+  });
 
   try {
-    const { amount, bank_code, account_number, account_name, narration } = withdrawalData;
-    const totalDeducted = amount;
-    const amountToObiex = amount - NGNB_WITHDRAWAL_FEE_OPERATIONAL;
-    const feeAmountRecorded = NGNB_WITHDRAWAL_FEE_RECORDED;
-    const bankName = NIGERIAN_BANK_CODES[bank_code] || 'Unknown';
-
-    const updatedUser = await User.findOneAndUpdate(
-      { _id: userId, ngnbBalance: { $gte: totalDeducted } },
-      { $inc: { ngnbBalance: -totalDeducted }, $set: { lastBalanceUpdate: new Date() } },
-      { new: true, runValidators: true, session }
-    );
-
-    if (!updatedUser) throw new Error('Insufficient NGNB balance');
-
-    const withdrawalTransaction = new Transaction({
-      userId,
-      type: 'WITHDRAWAL',
-      currency: 'NGNB',
-      amount: -totalDeducted,
-      status: 'PENDING',
-      source: 'BANK',
-      reference,
-      obiexTransactionId: reference,
-      narration: narration || `NGNB withdrawal to ${bankName}`,
-      fee: feeAmountRecorded,
-      metadata: {
-        provider: 'OBIEX',
-        bank_code,
-        bank_name,
-        account_number,
-        account_name,
-        amountSentToBank: amountToObiex,
-        withdrawalFee: feeAmountRecorded,
-        requestedAmount: totalDeducted,
-        initiated_at: new Date()
-      }
-    });
-
-    await withdrawalTransaction.save({ session });
-    await session.commitTransaction();
-    session.endSession();
-
-    return {
-      user: updatedUser,
-      transaction: withdrawalTransaction,
-      reference,
-      amountToObiex,
-      feeAmountRecorded,
-      bankName
-    };
-  } catch (err) {
-    await session.abortTransaction();
-    session.endSession();
-    throw err;
+    await withdrawalTransaction.save();
+  } catch (txErr) {
+    await updateUserBalance(userId, 'NGNB', totalDeducted);
+    logger.error('Failed to create withdrawal transaction record, refunded user', { userId, reference, error: txErr.message });
+    throw txErr;
   }
+
+  return {
+    user: updatedUser,
+    transaction: withdrawalTransaction,
+    reference,
+    amountToObiex,
+    feeAmountRecorded,
+    bankName
+  };
 }
 
 /**
@@ -355,7 +350,7 @@ router.post('/withdrawal/ngnb', async (req, res) => {
         }
       });
     } else {
-      await require('../services/portfolio').updateUserBalance(userId, 'NGNB', amount);
+      await updateUserBalance(userId, 'NGNB', amount);
       logger.error('NGNB withdrawal failed at Obiex', {
         reference,
         error: obiexResult.error,
