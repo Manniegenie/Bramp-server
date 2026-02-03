@@ -25,8 +25,8 @@ const generateRefreshToken = (userId) => {
   );
 };
 
-// POST: /refresh-token - Refresh access and refresh tokens
-router.post('/refresh-token', async (req, res) => {
+// POST /refresh-token (mounted at /refresh-token in server.js) - Refresh access and refresh tokens
+router.post('/', async (req, res) => {
   const { refreshToken } = req.body;
 
   if (!refreshToken) {
