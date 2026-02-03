@@ -141,10 +141,11 @@ router.post('/password-pin', async (req, res) => {
         BNB_BSC: { address: null, network: null, walletReferenceId: null },
         MATIC_ETH: { address: null, network: null, walletReferenceId: null },
         AVAX_BSC: { address: null, network: null, walletReferenceId: null },
+        // NGNB has no deposit address; use null so no webhook can match multiple users (critical: shared placeholder caused wrong-user credits)
         NGNB: {
-          address: "PLACEHOLDER_FOR_NGNB_WALLET_ADDRESS",
-          network: "PLACEHOLDER_FOR_NGNB_NETWORK",
-          walletReferenceId: "PLACEHOLDER_FOR_NGNB_REFERENCE",
+          address: null,
+          network: null,
+          walletReferenceId: null,
         }
       },
       // Set KYC Level 1 upon successful phone verification

@@ -183,7 +183,7 @@ router.post('/transaction', webhookAuth, async (req, res) => {
       return res.status(400).json({ error: `Invalid token/network: ${normalizedCurrency}/${normalizedNetwork}` });
     }
 
-    // Find user by wallet address (same pattern as obiexwebhooktrx DEPOSIT)
+    // Find user by wallet address (crypto tokens only; NGNB is naira balance, no address)
     logger.info(`Looking for user with address ${address} in wallets.${walletKey}.address`);
     const user = await User.findOne({ [`wallets.${walletKey}.address`]: address })
       .select('_id email username firstname')
