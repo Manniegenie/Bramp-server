@@ -3,7 +3,7 @@ const router = express.Router();
 const crypto = require('crypto');
 const User = require('../models/user');
 const Transaction = require('../models/transaction');
-const { updateUserPortfolioBalance, releaseReservedBalance } = require('../services/portfolio');
+const { updateUserBalance } = require('../services/portfolio');
 const logger = require('../utils/logger');
 
 /**
@@ -158,15 +158,6 @@ router.post('/glyde', validateGlydeSignature, async (req, res) => {
     transaction.updatedAt = new Date();
     await transaction.save();
 
-    // Update user portfolio balance
-    try {
-      await updateUserPortfolioBalance(user._id);
-      logger.info(`Portfolio balance updated for user: ${user._id}`);
-    } catch (portfolioError) {
-      logger.error(`Portfolio update failed for user: ${user._id}`, portfolioError);
-      // Don't fail the webhook for portfolio update errors
-    }
-
     logger.info(`Glyde NGNB webhook processed successfully`, {
       event,
       transactionId: transaction._id,
@@ -194,7 +185,8 @@ router.post('/glyde', validateGlydeSignature, async (req, res) => {
 });
 
 /**
- * Handle successful transfer webhook
+ * Handle successful transfer webhook.
+ * Balance was already deducted at withdrawal initiation (no reserve); just confirm.
  */
 async function handleSuccessfulTransfer(transaction, user, amount, fee) {
   try {
@@ -204,35 +196,15 @@ async function handleSuccessfulTransfer(transaction, user, amount, fee) {
       previousStatus: transaction.status
     });
 
-    // Update transaction status and metadata
+    // Update transaction status and metadata (balance already deducted at initiation)
     transaction.status = 'CONFIRMED';
     transaction.metadata.confirmed_at = new Date();
     transaction.metadata.final_amount = amount;
     transaction.metadata.final_fee = fee || 0;
 
-    // Release reserved balance first
-    await releaseReservedBalance(user._id, 'NGNB', transaction.amount);
-    logger.info(`Released reserved balance: ${transaction.amount} NGNB for user: ${user._id}`);
-
-    // Deduct from actual NGNB balance
-    const balanceUpdate = {
-      $inc: { 
-        ngnbBalance: -transaction.amount,
-        ngnbBalanceUSD: -transaction.amount * 0.00064 // Approximate USD value for NGNB (1 NGN ≈ 0.00064 USD)
-      },
-      $set: { 
-        lastBalanceUpdate: new Date() 
-      }
-    };
-
-    const updatedUser = await User.findByIdAndUpdate(user._id, balanceUpdate, { new: true });
-    
-    logger.info(`Successfully deducted ${transaction.amount} NGNB from user balance`, {
-      userId: user._id,
+    logger.info(`NGNB transfer confirmed for user: ${user._id}`, {
       transactionId: transaction._id,
-      deductedAmount: transaction.amount,
-      newBalance: updatedUser.ngnbBalance,
-      newBalanceUSD: updatedUser.ngnbBalanceUSD
+      amount: transaction.amount
     });
 
   } catch (error) {
@@ -247,7 +219,8 @@ async function handleSuccessfulTransfer(transaction, user, amount, fee) {
 }
 
 /**
- * Handle failed transfer webhook
+ * Handle failed transfer webhook.
+ * Balance was already deducted at withdrawal initiation; refund the user.
  */
 async function handleFailedTransfer(transaction, user, amount, fee) {
   try {
@@ -267,11 +240,11 @@ async function handleFailedTransfer(transaction, user, amount, fee) {
       timestamp: new Date()
     };
 
-    // Release reserved balance (return to user - no deduction)
-    await releaseReservedBalance(user._id, 'NGNB', transaction.amount);
-    logger.info(`Released reserved balance back to user: ${transaction.amount} NGNB for user: ${user._id}`, {
+    // Refund: balance was deducted at initiation
+    await updateUserBalance(user._id, 'NGNB', transaction.amount);
+    logger.info(`Refunded ${transaction.amount} NGNB to user: ${user._id}`, {
       transactionId: transaction._id,
-      releasedAmount: transaction.amount
+      refundedAmount: transaction.amount
     });
 
   } catch (error) {

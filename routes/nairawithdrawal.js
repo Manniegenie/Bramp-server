@@ -6,10 +6,7 @@ const { v4: uuidv4 } = require('uuid');
 
 // Import your services
 const { validateUserBalance } = require('../services/balance');
-const { 
-  reserveUserBalance, 
-  releaseReservedBalance
-} = require('../services/portfolio');
+const { updateUserBalance } = require('../services/portfolio');
 const { validateTwoFactorAuth } = require('../services/twofactorAuth'); // ADD: 2FA validation
 // const { validateTransactionLimit } = require('../services/kyccheckservice'); // ADD: KYC service import (commented out)
 
@@ -197,7 +194,7 @@ router.post('/withdrawal/ngnb', async (req, res) => {
   
   // Generate unique reference
   const reference = `NGNB_WD_${Date.now()}_${uuidv4().substring(0, 8)}`;
-  let reservedAmount = null; // used in catch to release balance if error occurs after reserve
+  let balanceDeducted = false;
 
   try {
     logger.info(`NGNB withdrawal request from user ${userId}:`, {
@@ -217,7 +214,6 @@ router.post('/withdrawal/ngnb', async (req, res) => {
     }
     
     const { amount, bank_code, account_number, narration, twoFactorCode, passwordpin } = validation.sanitized;
-    reservedAmount = amount;
 
     // Step 2: Validate user
     const user = await User.findById(userId);
@@ -421,20 +417,21 @@ router.post('/withdrawal/ngnb', async (req, res) => {
       passwordpin_validated: true,
       kyc_validated: true
     });
-    
-    // Step 4: Reserve the NGNB amount
+
+    // Step 4: Deduct NGNB immediately (mirror ZeusODX - no reserve)
     try {
-      await reserveUserBalance(userId, 'NGNB', amount);
-      logger.info(`✅ Reserved ${amount} NGNB for withdrawal`, { userId, reference });
-    } catch (reserveError) {
-      logger.error('❌ Failed to reserve balance:', reserveError);
+      await updateUserBalance(userId, 'NGNB', -amount);
+      balanceDeducted = true;
+      logger.info(`✅ Deducted ${amount} NGNB for withdrawal`, { userId, reference });
+    } catch (deductError) {
+      logger.error('❌ Failed to deduct balance:', deductError);
       return res.status(500).json({
         success: false,
-        error: 'BALANCE_RESERVATION_FAILED',
-        message: 'Failed to reserve balance for withdrawal'
+        error: 'BALANCE_DEDUCTION_FAILED',
+        message: 'Failed to deduct balance for withdrawal'
       });
     }
-    
+
     // Step 5: NGNB is pegged 1:1 with Naira - simple conversion
     const nairaAmount = Math.floor(amount);
     
@@ -464,8 +461,7 @@ router.post('/withdrawal/ngnb', async (req, res) => {
           bvn: true,
           twofa: true,
           passwordpin: true,
-          kyc: true,
-          balance_reserved: true
+          kyc: true
         }
       }
     });
@@ -478,8 +474,9 @@ router.post('/withdrawal/ngnb', async (req, res) => {
         security_status: 'BVN + 2FA + PIN + KYC validated'
       });
     } catch (txError) {
-      // Release reserved balance if transaction creation fails
-      await releaseReservedBalance(userId, 'NGNB', amount);
+      // Refund: balance was already deducted
+      await updateUserBalance(userId, 'NGNB', amount);
+      balanceDeducted = false;
       logger.error('❌ Failed to create transaction record:', txError);
       return res.status(500).json({
         success: false,
@@ -501,15 +498,15 @@ router.post('/withdrawal/ngnb', async (req, res) => {
     const payoutResult = await initiateGlydeTransfer(payoutRequest);
     
     if (!payoutResult.success) {
-      // Update transaction status to failed
+      // Update transaction status to failed and refund user
       transaction.status = 'FAILED';
       transaction.metadata.failure_reason = `Glyde API error: ${payoutResult.error}`;
       transaction.metadata.failed_at = new Date();
       await transaction.save();
-      
-      // Release reserved balance
-      await releaseReservedBalance(userId, 'NGNB', amount);
-      
+
+      await updateUserBalance(userId, 'NGNB', amount);
+      balanceDeducted = false;
+
       logger.error('❌ Glyde transfer failed', {
         reference,
         error: payoutResult.error,
@@ -564,16 +561,16 @@ router.post('/withdrawal/ngnb', async (req, res) => {
     });
     
   } catch (error) {
-    // Release any reserved balance in case of unexpected error
-    try {
-      if (reservedAmount != null) {
-        await releaseReservedBalance(userId, 'NGNB', reservedAmount);
-        logger.info('🔄 Released reserved balance due to unexpected error', { userId, amount: reservedAmount });
+    // Refund if balance was already deducted
+    if (balanceDeducted) {
+      try {
+        await updateUserBalance(userId, 'NGNB', amount);
+        logger.info('🔄 Refunded balance due to unexpected error', { userId, amount });
+      } catch (refundError) {
+        logger.error('❌ Failed to refund balance during error handling:', refundError);
       }
-    } catch (releaseError) {
-      logger.error('❌ Failed to release reserved balance during error handling:', releaseError);
     }
-    
+
     logger.error('❌ NGNB withdrawal endpoint error:', {
       userId,
       reference,
