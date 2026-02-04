@@ -73,23 +73,46 @@ router.get('/', async (req, res) => {
     ]);
 
     // unwrap results
-    const pricesVal = pricesSettled.status === 'fulfilled' ? pricesSettled.value : {};
+    const pricesUSD = pricesSettled.status === 'fulfilled' ? pricesSettled.value : {};
     const originalVal = originalSettled.status === 'fulfilled' ? originalSettled.value : {};
     const changesVal = changesSettled.status === 'fulfilled' ? changesSettled.value : {};
     const markdownVal = markdownSettled.status === 'fulfilled' ? markdownSettled.value : { hasMarkdown: false, percentage: 0 };
     const ngnbVal = ngnbSettled.status === 'fulfilled' ? ngnbSettled.value : null;
 
+    // Get offramp rate for naira conversion (NGN per USD)
+    const offrampRate = ngnbVal && typeof ngnbVal.finalPrice === 'number' ? ngnbVal.finalPrice : null;
+    if (!offrampRate) {
+      logger.warn('Offramp rate unavailable; cannot convert prices to naira');
+    }
+
+    // Convert USD prices to Naira using offramp rate
+    // For tokens: price in NGN = price in USD * offrampRate
+    // For NGNB: price is already in NGN (it's the offramp rate itself)
+    const pricesNaira = {};
+    Object.entries(pricesUSD).forEach(([symbol, usdPrice]) => {
+      if (symbol === 'NGNB') {
+        // NGNB price is already in NGN (it's the offramp rate)
+        pricesNaira[symbol] = offrampRate || usdPrice;
+      } else if (offrampRate && typeof usdPrice === 'number' && usdPrice > 0) {
+        // Convert USD to NGN using offramp rate
+        pricesNaira[symbol] = usdPrice * offrampRate;
+      } else {
+        // Fallback to USD price if offramp rate unavailable
+        pricesNaira[symbol] = usdPrice;
+      }
+    });
+
     // Attach NGNB price if we have an offramp rate and the client requested NGNB (or asked for all tokens)
     // Ensure we always include NGNB in the returned prices object if supported in requested symbols OR if symbols param was omitted.
     const shouldIncludeNGNB = symbols.includes('NGNB') || (!req.query.symbols);
-    if (shouldIncludeNGNB && ngnbVal && typeof ngnbVal.finalPrice === 'number') {
+    if (shouldIncludeNGNB && offrampRate) {
       // Add NGNB to both prices and originalPrices where applicable
-      pricesVal.NGNB = ngnbVal.finalPrice;
-      if (wantOriginal) originalVal.NGNB = ngnbVal.finalPrice;
-      logger.info('Attached NGNB offramp price to response', { ngnb: ngnbVal.finalPrice, source: ngnbVal.source });
+      pricesNaira.NGNB = offrampRate;
+      if (wantOriginal && originalVal) originalVal.NGNB = offrampRate;
+      logger.info('Attached NGNB offramp price to response', { ngnb: offrampRate, source: ngnbVal.source });
     } else {
       // If NGNB requested but offramp rate unavailable, log a warning
-      if (symbols.includes('NGNB') && (!ngnbVal || typeof ngnbVal.finalPrice !== 'number')) {
+      if (symbols.includes('NGNB') && !offrampRate) {
         logger.warn('NGNB requested but offramp rate unavailable; NGNB omitted from prices');
       }
     }
@@ -97,7 +120,8 @@ router.get('/', async (req, res) => {
     const response = {
       success: true,
       data: {
-        prices: pricesVal,
+        prices: pricesNaira, // Return naira prices as main prices object
+        pricesUSD: pricesUSD, // Keep USD prices for backward compatibility
         ...(wantOriginal ? { originalPrices: originalVal } : {}),
         ...(wantChanges ? { hourlyChanges: changesVal } : {}),
         markdown: {

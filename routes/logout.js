@@ -4,8 +4,8 @@ const router = express.Router();
 const User = require('../models/user'); // ✅ Your model path
 const logger = require('../utils/logger'); // ✅ Import your logger
 
-// POST: /logout - Logs out a user by removing a refresh token
-router.post('/logout', async (req, res) => {
+// POST: /logout - Logs out a user by removing a refresh token (mounted at /logout in server.js)
+router.post('/', async (req, res) => {
   const { userId, refreshToken } = req.body;
 
   if (!userId || !refreshToken) {

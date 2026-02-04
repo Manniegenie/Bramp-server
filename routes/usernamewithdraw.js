@@ -537,6 +537,7 @@ router.post('/internal', async (req, res) => {
     if (!senderUser.twoFASecret || !senderUser.is2FAEnabled) {
       return res.status(400).json({
         success: false,
+        error: '2FA_NOT_ENABLED',
         message: 'Two-factor authentication is not set up or not enabled. Please enable 2FA first.'
       });
     }
@@ -545,6 +546,7 @@ router.post('/internal', async (req, res) => {
       logger.warn('Invalid 2FA attempt for internal transfer', { senderUserId });
       return res.status(401).json({
         success: false,
+        error: 'INVALID_2FA',
         message: 'Invalid two-factor authentication code'
       });
     }
@@ -558,6 +560,7 @@ router.post('/internal', async (req, res) => {
     if (!senderUser.passwordpin) {
       return res.status(400).json({
         success: false,
+        error: 'PIN_NOT_SET_UP',
         message: 'Password PIN is not set up for your account. Please set up your password PIN first.'
       });
     }
@@ -571,6 +574,7 @@ router.post('/internal', async (req, res) => {
       });
       return res.status(401).json({
         success: false,
+        error: 'INVALID_PIN',
         message: 'Invalid password PIN'
       });
     }
