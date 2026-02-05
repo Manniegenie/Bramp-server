@@ -2,22 +2,224 @@
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
+const Decimal = require('decimal.js');
+
 const User = require('../models/user');
-const ChatbotTransaction = require('../models/ChatbotTransaction');
+const Transaction = require('../models/transaction');
+const NairaMarkdown = require('../models/offramp');
+const { getPricesWithCache, SUPPORTED_TOKENS } = require('../services/portfolio');
+const GiftCard = require('../models/giftcard'); // Add this if not already present
+
+/**
+ * Optional base unit map for tokens stored in smallest units.
+ */
+const BASE_UNIT_DIVISOR = {
+  // Example: 'ETH': new Decimal('1e18'),
+  // 'BTC': new Decimal('1e8'),
+};
+
+/**
+ * Calculate total transaction volume in USD (robust & efficient)
+ * FIXED: Only counts OUT side of swap pairs to avoid double-counting
+ */
+async function calculateTransactionVolume() {
+  try {
+    console.log('=== Starting Transaction Volume Calculation (optimized) ===');
+
+    const nairaMarkdown = await NairaMarkdown.findOne();
+    let offrampRate = nairaMarkdown?.offrampRate || 1554.42;
+
+    if (!offrampRate || isNaN(offrampRate) || Number(offrampRate) === 0) {
+      console.warn('Invalid or missing offrampRate from DB; falling back to default 1554.42');
+      offrampRate = 1554.42;
+    }
+
+    let agg = await Transaction.aggregate([
+      {
+        $match: {
+          type: { $in: ['SWAP', 'OBIEX_SWAP', 'GIFTCARD'] },
+          status: { $in: ['SUCCESSFUL', 'COMPLETED', 'CONFIRMED'] },
+          currency: { $exists: true, $ne: null },
+          // FIXED: Only count OUT side of swaps to avoid double-counting
+          // Include: GIFTCARD (all), SWAP/OBIEX_SWAP where swapDirection is OUT, missing, or null
+          // Exclude: SWAP/OBIEX_SWAP where swapDirection is IN
+          $or: [
+            { type: 'GIFTCARD' },
+            { type: { $in: ['SWAP', 'OBIEX_SWAP'] }, swapDirection: 'OUT' },
+            { type: { $in: ['SWAP', 'OBIEX_SWAP'] }, swapDirection: { $exists: false } },
+            { type: { $in: ['SWAP', 'OBIEX_SWAP'] }, swapDirection: null }
+          ]
+        }
+      },
+      {
+        $group: {
+          _id: { $toUpper: '$currency' },
+          totalAmount: { $sum: { $abs: '$amount' } },
+          count: { $sum: 1 }
+        }
+      }
+    ]).exec();
+
+    if (!Array.isArray(agg) && agg && typeof agg.toArray === 'function') {
+      try {
+        agg = await agg.toArray();
+      } catch (e) {
+        console.warn('Unable to convert aggregation cursor to array:', e.message);
+      }
+    }
+
+    if (!agg || agg.length === 0) {
+      console.log('No matching transactions found. Returning 0.');
+      return {
+        totalVolumeUSD: 0,
+        breakdown: {},
+        counts: { totalCurrencies: 0, processedCurrencies: 0, skippedCurrencies: 0 },
+        totalSkippedUSD: '0'
+      };
+    }
+
+    // NOTE:
+    // - Keep NGNZ (priced via offramp rate)
+    // - Keep USD (giftcards often use USD as currency; USD/USD = 1)
+    // - Keep supported crypto tokens (priced via getPricesWithCache)
+    const currencies = agg
+      .map(r => (r?._id ? String(r._id).toUpperCase() : null))
+      .filter((c) => {
+        if (!c) return false;
+        if (c === 'NGNZ') return true;
+        if (c === 'USD') return true;
+        return !!SUPPORTED_TOKENS[c];
+      });
+
+    console.log('Currencies to fetch prices for:', currencies);
+
+    let prices = {};
+    try {
+      prices = await getPricesWithCache(currencies) || {};
+    } catch (e) {
+      console.warn('getPricesWithCache threw an error, proceeding with empty prices:', e.message);
+      prices = {};
+    }
+
+    console.log('Prices received for currencies:', Object.keys(prices));
+
+    let totalVolumeUSD = new Decimal(0);
+    let totalSkippedUSD = new Decimal(0);
+    const breakdown = {};
+    let processedCurrencies = 0;
+    let skippedCurrencies = 0;
+
+    for (const row of agg) {
+      const currency = row._id;
+      const divisor = BASE_UNIT_DIVISOR[currency] || new Decimal(1);
+      const totalAmountDecimal = new Decimal(row.totalAmount || 0).div(divisor);
+
+      // Giftcards are often stored as USD face value; USD/USD = 1
+      if (currency === 'USD') {
+        const usdValue = totalAmountDecimal;
+        totalVolumeUSD = totalVolumeUSD.plus(usdValue);
+        breakdown[currency] = {
+          totalAmount: totalAmountDecimal.toString(),
+          usdValue: usdValue.toString(),
+          price: 1
+        };
+        processedCurrencies++;
+        continue;
+      }
+
+      if (currency === 'NGNZ') {
+        if (!offrampRate || isNaN(offrampRate) || Number(offrampRate) === 0) {
+          console.warn('Invalid offrampRate, skipping NGNZ conversion');
+          breakdown[currency] = {
+            totalAmount: totalAmountDecimal.toString(),
+            usdValue: '0',
+            note: 'invalid offrampRate'
+          };
+          skippedCurrencies++;
+          continue;
+        }
+
+        const usdValue = totalAmountDecimal.div(new Decimal(offrampRate));
+        totalVolumeUSD = totalVolumeUSD.plus(usdValue);
+        breakdown[currency] = {
+          totalAmount: totalAmountDecimal.toString(),
+          usdValue: usdValue.toString(),
+          price: (1 / Number(offrampRate))
+        };
+        processedCurrencies++;
+
+      } else {
+        const price = prices?.[currency];
+
+        if (typeof price === 'number' || typeof price === 'string') {
+          const usdValue = totalAmountDecimal.times(new Decimal(price));
+          totalVolumeUSD = totalVolumeUSD.plus(usdValue);
+          breakdown[currency] = {
+            totalAmount: totalAmountDecimal.toString(),
+            usdValue: usdValue.toString(),
+            price: Number(price)
+          };
+          processedCurrencies++;
+        } else {
+          console.warn(`Missing price for ${currency}. Skipping conversion for ${totalAmountDecimal.toString()} ${currency}`);
+          breakdown[currency] = {
+            totalAmount: totalAmountDecimal.toString(),
+            usdValue: '0',
+            note: 'price missing'
+          };
+          skippedCurrencies++;
+        }
+      }
+    }
+
+    const result = {
+      totalVolumeUSD: Number(totalVolumeUSD.toFixed(2)),
+      breakdown,
+      counts: {
+        totalCurrencies: agg.length,
+        processedCurrencies,
+        skippedCurrencies
+      },
+      totalSkippedUSD: totalSkippedUSD.toString()
+    };
+
+    console.log('Transaction Volume Calculation Complete. Summary:');
+    console.log('Total USD:', result.totalVolumeUSD);
+    console.log('Counts:', result.counts);
+
+    return result;
+  } catch (error) {
+    console.error('Error calculating transaction volume:', error);
+    console.error('Stack trace:', error.stack);
+    return {
+      totalVolumeUSD: 0,
+      breakdown: {},
+      counts: { totalCurrencies: 0, processedCurrencies: 0, skippedCurrencies: 0 },
+      totalSkippedUSD: '0'
+    };
+  }
+}
 
 /**
  * GET /analytics/dashboard
- * Fetch essential dashboard statistics
  */
 router.get('/dashboard', async (req, res) => {
   try {
+    console.log('=== Dashboard Analytics Request Started ===');
+
     const [
       userStats,
-      chatbotTransactionStats,
-      recentChatbotTrades,
-      tokenStats
+      transactionStats,
+      swapStats,
+      withdrawalStats,
+      recentActivity,
+      tokenStats,
+      transactionVolumeResult,
+      pendingTradesStats,
+      approvedGiftCardsCount,
+      rejectedGiftCardsCount,
+      paidGiftCardsCount
     ] = await Promise.all([
-      // Basic user statistics
       User.aggregate([
         {
           $group: {
@@ -30,27 +232,78 @@ router.get('/dashboard', async (req, res) => {
         }
       ]),
 
-      // Chatbot transaction statistics (all transactions)
-      ChatbotTransaction.aggregate([
+      Transaction.aggregate([
         {
           $group: {
             _id: null,
-            totalChatbotTransactions: { $sum: 1 },
-            sellTransactions: { $sum: { $cond: [{ $eq: ['$kind', 'SELL'] }, 1, 0] } },
-            buyTransactions: { $sum: { $cond: [{ $eq: ['$kind', 'BUY'] }, 1, 0] } },
-            completedChatbot: { $sum: { $cond: [{ $in: ['$status', ['CONFIRMED', 'COMPLETED']] }, 1, 0] } },
-            pendingChatbot: { $sum: { $cond: [{ $eq: ['$status', 'PENDING'] }, 1, 0] } },
-            expiredChatbot: { $sum: { $cond: [{ $eq: ['$status', 'EXPIRED'] }, 1, 0] } },
-            // Volume calculations for chatbot transactions (exclude expired)
-            totalSellVolume: { $sum: { $cond: [{ $and: [{ $eq: ['$kind', 'SELL'] }, { $ne: ['$status', 'EXPIRED'] }] }, '$sellAmount', 0] } },
-            totalReceiveVolume: { $sum: { $cond: [{ $and: [{ $eq: ['$kind', 'SELL'] }, { $ne: ['$status', 'EXPIRED'] }] }, '$receiveAmount', 0] } },
-            totalActualReceiveVolume: { $sum: { $cond: [{ $and: [{ $eq: ['$kind', 'SELL'] }, { $ne: ['$status', 'EXPIRED'] }] }, '$actualReceiveAmount', 0] } }
+            totalTransactions: { $sum: 1 },
+            deposits: { $sum: { $cond: [{ $eq: ['$type', 'DEPOSIT'] }, 1, 0] } },
+            withdrawals: { $sum: { $cond: [{ $eq: ['$type', 'WITHDRAWAL'] }, 1, 0] } },
+            swaps: { $sum: { $cond: [{ $in: ['$type', ['SWAP', 'OBIEX_SWAP']] }, 1, 0] } },
+            giftcards: { $sum: { $cond: [{ $eq: ['$type', 'GIFTCARD'] }, 1, 0] } },
+            completed: { $sum: { $cond: [{ $in: ['$status', ['SUCCESSFUL', 'COMPLETED', 'CONFIRMED']] }, 1, 0] } },
+            pending: { $sum: { $cond: [{ $eq: ['$status', 'PENDING'] }, 1, 0] } },
+            failed: { $sum: { $cond: [{ $eq: ['$status', 'FAILED'] }, 1, 0] } }
           }
         }
       ]),
 
-      // Recent chatbot transactions (last 24 hours) - exclude expired from volume
-      ChatbotTransaction.aggregate([
+      // FIXED: Only count OUT side of swaps for completed trades calculation
+      // Include legacy swaps without swapDirection, exclude IN swaps
+      Transaction.aggregate([
+        {
+          $match: {
+            type: { $in: ['SWAP', 'OBIEX_SWAP'] },
+            // Include OUT, missing, or null swapDirection (exclude IN)
+            $or: [
+              { swapDirection: 'OUT' },
+              { swapDirection: { $exists: false } },
+              { swapDirection: null }
+            ]
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            totalSwaps: { $sum: 1 },
+            onramps: { $sum: { $cond: [{ $in: ['$swapType', ['onramp', 'ONRAMP']] }, 1, 0] } },
+            offramps: { $sum: { $cond: [{ $in: ['$swapType', ['offramp', 'OFFRAMP']] }, 1, 0] } },
+            cryptoToCrypto: { $sum: { $cond: [{ $in: ['$swapType', ['crypto_to_crypto', 'CRYPTO_TO_CRYPTO']] }, 1, 0] } },
+            ngnzSwaps: { $sum: { $cond: [{ $or: [
+              { $in: ['$swapType', ['NGNX_TO_CRYPTO', 'CRYPTO_TO_NGNX']] },
+              { $in: ['$swapCategory', ['NGNZ_EXCHANGE']] }
+            ]}, 1, 0] } },
+            // FIXED: Only count successful OUT swaps for completed trades
+            successfulSwaps: { $sum: { $cond: [{ $eq: ['$status', 'SUCCESSFUL'] }, 1, 0] } },
+            // FIXED: Only count pending OUT swaps for pending trades
+            pendingSwaps: { $sum: { $cond: [{ $eq: ['$status', 'PENDING'] }, 1, 0] } },
+            totalVolume: { $sum: { $abs: '$amount' } },
+            totalFees: { $sum: '$fee' }
+          }
+        }
+      ]),
+
+      Transaction.aggregate([
+        {
+          $match: {
+            isNGNZWithdrawal: true
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            totalWithdrawals: { $sum: 1 },
+            completedWithdrawals: { $sum: { $cond: [{ $in: ['$status', ['SUCCESSFUL', 'COMPLETED']] }, 1, 0] } },
+            pendingWithdrawals: { $sum: { $cond: [{ $eq: ['$status', 'PENDING'] }, 1, 0] } },
+            failedWithdrawals: { $sum: { $cond: [{ $eq: ['$status', 'FAILED'] }, 1, 0] } },
+            totalAmount: { $sum: { $abs: '$amount' } },
+            totalBankAmount: { $sum: '$bankAmount' },
+            totalFees: { $sum: '$withdrawalFee' }
+          }
+        }
+      ]),
+
+      Transaction.aggregate([
         {
           $match: {
             createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
@@ -60,115 +313,157 @@ router.get('/dashboard', async (req, res) => {
           $group: {
             _id: null,
             transactions24h: { $sum: 1 },
-            sellTransactions24h: { $sum: { $cond: [{ $eq: ['$kind', 'SELL'] }, 1, 0] } },
-            buyTransactions24h: { $sum: { $cond: [{ $eq: ['$kind', 'BUY'] }, 1, 0] } },
-            volume24h: { $sum: { $cond: [{ $ne: ['$status', 'EXPIRED'] }, { $abs: '$sellAmount' }, 0] } }
+            deposits24h: { $sum: { $cond: [{ $eq: ['$type', 'DEPOSIT'] }, 1, 0] } },
+            withdrawals24h: { $sum: { $cond: [{ $eq: ['$type', 'WITHDRAWAL'] }, 1, 0] } },
+            swaps24h: { $sum: { $cond: [{ $in: ['$type', ['SWAP', 'OBIEX_SWAP']] }, 1, 0] } },
+            volume24h: { $sum: { $abs: '$amount' } }
           }
         }
       ]),
 
-      // Token distribution in chatbot transactions
-      ChatbotTransaction.aggregate([
+      Transaction.aggregate([
         {
           $match: {
-            status: { $in: ['CONFIRMED', 'COMPLETED', 'PENDING'] }
+            type: { $in: ['DEPOSIT', 'WITHDRAWAL', 'SWAP'] },
+            status: { $in: ['SUCCESSFUL', 'COMPLETED', 'CONFIRMED'] }
           }
         },
         {
           $group: {
-            _id: '$token',
+            _id: '$currency',
             transactionCount: { $sum: 1 },
-            sellCount: { $sum: { $cond: [{ $eq: ['$kind', 'SELL'] }, 1, 0] } },
-            buyCount: { $sum: { $cond: [{ $eq: ['$kind', 'BUY'] }, 1, 0] } },
-            totalVolume: { $sum: { $cond: [{ $ne: ['$status', 'EXPIRED'] }, { $abs: '$sellAmount' }, 0] } }
+            deposits: { $sum: { $cond: [{ $eq: ['$type', 'DEPOSIT'] }, 1, 0] } },
+            withdrawals: { $sum: { $cond: [{ $eq: ['$type', 'WITHDRAWAL'] }, 1, 0] } },
+            swaps: { $sum: { $cond: [{ $in: ['$type', ['SWAP', 'OBIEX_SWAP']] }, 1, 0] } },
+            totalVolume: { $sum: { $abs: '$amount' } }
           }
         },
         { $sort: { totalVolume: -1 } },
         { $limit: 10 }
-      ])
+      ]),
+
+      calculateTransactionVolume(),
+
+      // FIXED: Pending trades calculation - includes swaps (OUT only) and giftcards
+      // Include legacy swaps without swapDirection, exclude IN swaps
+      Transaction.aggregate([
+        {
+          $match: {
+            status: 'PENDING',
+            $or: [
+              { type: 'GIFTCARD' },
+              { type: { $in: ['SWAP', 'OBIEX_SWAP'] }, swapDirection: 'OUT' },
+              { type: { $in: ['SWAP', 'OBIEX_SWAP'] }, swapDirection: { $exists: false } },
+              { type: { $in: ['SWAP', 'OBIEX_SWAP'] }, swapDirection: null }
+            ]
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            totalPendingTrades: { $sum: 1 },
+            pendingSwaps: { $sum: { $cond: [{ $in: ['$type', ['SWAP', 'OBIEX_SWAP']] }, 1, 0] } },
+            pendingGiftcards: { $sum: { $cond: [{ $eq: ['$type', 'GIFTCARD'] }, 1, 0] } }
+          }
+        }
+      ]),
+
+      GiftCard.countDocuments({ status: 'APPROVED' }),
+      GiftCard.countDocuments({ status: 'REJECTED' }),
+      GiftCard.countDocuments({ status: 'PAID' })
     ]);
 
     const response = {
       success: true,
       timestamp: new Date().toISOString(),
       data: {
-        // User Overview
         users: {
           total: userStats[0]?.totalUsers || 0,
           emailVerified: userStats[0]?.verifiedEmails || 0,
           bvnVerified: userStats[0]?.verifiedBVNs || 0,
           chatbotVerified: userStats[0]?.chatbotVerified || 0
         },
-
-        // Transaction Statistics (only chatbot transactions)
         transactions: {
-          total: chatbotTransactionStats[0]?.totalChatbotTransactions || 0,
-          sell: chatbotTransactionStats[0]?.sellTransactions || 0,
-          buy: chatbotTransactionStats[0]?.buyTransactions || 0,
-          completed: chatbotTransactionStats[0]?.completedChatbot || 0,
-          pending: chatbotTransactionStats[0]?.pendingChatbot || 0,
-          expired: chatbotTransactionStats[0]?.expiredChatbot || 0
+          total: transactionStats[0]?.totalTransactions || 0,
+          deposits: transactionStats[0]?.deposits || 0,
+          withdrawals: transactionStats[0]?.withdrawals || 0,
+          swaps: transactionStats[0]?.swaps || 0,
+          giftcards: transactionStats[0]?.giftcards || 0,
+          completed: transactionStats[0]?.completed || 0,
+          pending: transactionStats[0]?.pending || 0,
+          failed: transactionStats[0]?.failed || 0
         },
-
-        // Chatbot Transaction Statistics
-        chatbotTransactions: {
-          total: chatbotTransactionStats[0]?.totalChatbotTransactions || 0,
-          sell: chatbotTransactionStats[0]?.sellTransactions || 0,
-          buy: chatbotTransactionStats[0]?.buyTransactions || 0,
-          completed: chatbotTransactionStats[0]?.completedChatbot || 0,
-          pending: chatbotTransactionStats[0]?.pendingChatbot || 0,
-          expired: chatbotTransactionStats[0]?.expiredChatbot || 0,
-          volume: {
-            totalSellVolume: chatbotTransactionStats[0]?.totalSellVolume || 0,
-            totalReceiveVolume: chatbotTransactionStats[0]?.totalReceiveVolume || 0,
-            totalActualReceiveVolume: chatbotTransactionStats[0]?.totalActualReceiveVolume || 0
-          }
+        swapStats: {
+          total: swapStats[0]?.totalSwaps || 0,
+          onramps: swapStats[0]?.onramps || 0,
+          offramps: swapStats[0]?.offramps || 0,
+          cryptoToCrypto: swapStats[0]?.cryptoToCrypto || 0,
+          ngnzSwaps: swapStats[0]?.ngnzSwaps || 0,
+          successful: swapStats[0]?.successfulSwaps || 0,
+          pending: swapStats[0]?.pendingSwaps || 0, // FIXED: Now shows pending swaps correctly
+          totalVolume: swapStats[0]?.totalVolume || 0,
+          totalFees: swapStats[0]?.totalFees || 0
         },
-
-        // Chatbot Trading Statistics (for backward compatibility)
+        pendingTrades: {
+          total: pendingTradesStats[0]?.totalPendingTrades || 0,
+          swaps: pendingTradesStats[0]?.pendingSwaps || 0,
+          giftcards: pendingTradesStats[0]?.pendingGiftcards || 0
+        },
+        ngnzWithdrawals: {
+          total: withdrawalStats[0]?.totalWithdrawals || 0,
+          completed: withdrawalStats[0]?.completedWithdrawals || 0,
+          pending: withdrawalStats[0]?.pendingWithdrawals || 0,
+          failed: withdrawalStats[0]?.failedWithdrawals || 0,
+          totalAmount: withdrawalStats[0]?.totalAmount || 0,
+          totalBankAmount: withdrawalStats[0]?.totalBankAmount || 0,
+          totalFees: withdrawalStats[0]?.totalFees || 0
+        },
         chatbotTrades: {
           overview: {
-            total: chatbotTransactionStats[0]?.totalChatbotTransactions || 0,
-            sell: chatbotTransactionStats[0]?.sellTransactions || 0,
-            buy: chatbotTransactionStats[0]?.buyTransactions || 0,
-            completed: chatbotTransactionStats[0]?.completedChatbot || 0,
-            pending: chatbotTransactionStats[0]?.pendingChatbot || 0,
-            expired: chatbotTransactionStats[0]?.expiredChatbot || 0,
+            total: swapStats[0]?.totalSwaps || 0, // FIXED: Now accurate
+            sell: swapStats[0]?.offramps || 0,
+            buy: swapStats[0]?.onramps || 0,
+            completed: swapStats[0]?.successfulSwaps || 0, // FIXED: Now accurate
+            pending: pendingTradesStats[0]?.totalPendingTrades || 0, // FIXED: Includes swaps + giftcards
+            expired: 0,
             cancelled: 0
           },
           volume: {
-            totalSellVolume: chatbotTransactionStats[0]?.totalSellVolume || 0,
-            totalBuyVolumeNGN: chatbotTransactionStats[0]?.totalReceiveVolume || 0,
-            totalReceiveAmount: chatbotTransactionStats[0]?.totalActualReceiveVolume || 0
+            totalSellVolume: swapStats[0]?.totalVolume || 0,
+            totalBuyVolumeNGN: swapStats[0]?.totalVolume || 0,
+            totalReceiveAmount: swapStats[0]?.totalVolume || 0
           },
           success: {
-            successfulPayouts: chatbotTransactionStats[0]?.completedChatbot || 0,
-            successfulCollections: chatbotTransactionStats[0]?.completedChatbot || 0
+            successfulPayouts: withdrawalStats[0]?.completedWithdrawals || 0,
+            successfulCollections: transactionStats[0]?.completed || 0
           },
           recent24h: {
-            trades: recentChatbotTrades[0]?.transactions24h || 0,
-            sellTrades: recentChatbotTrades[0]?.sellTransactions24h || 0,
-            buyTrades: recentChatbotTrades[0]?.buyTransactions24h || 0,
-            volume: recentChatbotTrades[0]?.volume24h || 0
+            trades: recentActivity[0]?.swaps24h || 0,
+            sellTrades: recentActivity[0]?.swaps24h || 0,
+            buyTrades: recentActivity[0]?.swaps24h || 0,
+            volume: recentActivity[0]?.volume24h || 0
           }
         },
-
-        // Recent Activity
         recentActivity: {
-          transactions: recentChatbotTrades[0]?.transactions24h || 0,
-          sellTransactions: recentChatbotTrades[0]?.sellTransactions24h || 0,
-          buyTransactions: recentChatbotTrades[0]?.buyTransactions24h || 0,
-          volume: recentChatbotTrades[0]?.volume24h || 0
+          transactions: recentActivity[0]?.transactions24h || 0,
+          deposits: recentActivity[0]?.deposits24h || 0,
+          withdrawals: recentActivity[0]?.withdrawals24h || 0,
+          swaps: recentActivity[0]?.swaps24h || 0,
+          volume: recentActivity[0]?.volume24h || 0
         },
-
-        // Transaction Volume
-        transactionVolume: chatbotTransactionStats[0]?.totalSellVolume || 0,
-
-        // Token Statistics
-        tokenStats: tokenStats
+        tokenStats: tokenStats,
+        transactionVolume: transactionVolumeResult?.totalVolumeUSD ?? 0,
+        transactionVolumeBreakdown: transactionVolumeResult?.breakdown ?? {},
+        transactionVolumeCounts: transactionVolumeResult?.counts ?? { totalCurrencies: 0, processedCurrencies: 0, skippedCurrencies: 0 },
+        giftCardStats: {
+          approved: (Number(approvedGiftCardsCount) || 0) + (Number(paidGiftCardsCount) || 0),
+          rejected: Number(rejectedGiftCardsCount) || 0,
+          paid: Number(paidGiftCardsCount) || 0
+        }
       }
     };
 
+    console.log('=== Dashboard Analytics Request Complete ===');
     res.json(response);
 
   } catch (error) {
@@ -256,55 +551,60 @@ router.get('/recent-transactions', async (req, res) => {
       if (Object.keys(range).length) filter.createdAt = range;
     }
 
-    if (type) filter.kind = type;
+    if (type) filter.type = type;
     if (status) filter.status = status;
 
-    // Fetch all chatbot transactions (including expired)
-    const [chatbotTransactions, totalCount] = await Promise.all([
-      ChatbotTransaction.find(filter)
+    const [transactions, totalCount] = await Promise.all([
+      Transaction.find(filter)
         .sort({ createdAt: -1 })
         .limit(limit)
         .skip(skip)
         .populate('userId', 'username email firstname lastname')
+        .populate('recipientUserId', 'username')
+        .populate('senderUserId', 'username')
         .lean(),
-      ChatbotTransaction.countDocuments(filter)
+      Transaction.countDocuments(filter)
     ]);
 
-    const formattedTransactions = chatbotTransactions.map(tx => ({
+    const formattedTransactions = transactions.map(tx => ({
       id: tx._id.toString(),
       userId: tx.userId?._id?.toString(),
       username: tx.userId?.username || tx.userId?.firstname || 'Unknown',
       userEmail: tx.userId?.email,
-      type: tx.kind, // SELL or BUY
+      type: tx.type,
       status: tx.status,
-      currency: tx.token,
-      amount: tx.sellAmount,
-      narration: `${tx.kind} ${tx.token} - ${tx.paymentId}`,
-      reference: tx.paymentId,
+      currency: tx.currency,
+      amount: tx.amount,
+      fee: tx.fee || 0,
+      narration: tx.narration,
+      reference: tx.reference,
+      source: tx.source,
       createdAt: tx.createdAt,
       updatedAt: tx.updatedAt,
-      completedAt: (tx.status === 'CONFIRMED' || tx.status === 'COMPLETED') ? tx.updatedAt : null,
-      // Chatbot-specific fields
-      paymentId: tx.paymentId,
-      webhookRef: tx.webhookRef,
-      token: tx.token,
-      network: tx.network,
-      sellAmount: tx.sellAmount,
-      originalAmount: tx.originalAmount,
-      originalCurrency: tx.originalCurrency,
-      quoteRate: tx.quoteRate,
-      receiveCurrency: tx.receiveCurrency,
-      receiveAmount: tx.receiveAmount,
-      actualReceiveAmount: tx.actualReceiveAmount,
-      actualRate: tx.actualRate,
-      depositAddress: tx.depositAddress,
-      depositMemo: tx.depositMemo,
-      observedAmount: tx.observedAmount,
-      observedTxHash: tx.observedTxHash,
-      observedAt: tx.observedAt,
-      payout: tx.payout || null,
-      payoutStatus: tx.payoutStatus,
-      expiresAt: tx.expiresAt
+      completedAt: tx.completedAt,
+      ...(tx.type === 'SWAP' || tx.type === 'OBIEX_SWAP' ? {
+        fromCurrency: tx.fromCurrency,
+        toCurrency: tx.toCurrency,
+        fromAmount: tx.fromAmount,
+        toAmount: tx.toAmount,
+        swapType: tx.swapType,
+        exchangeRate: tx.exchangeRate
+      } : {}),
+      ...(tx.isNGNZWithdrawal ? {
+        bankName: tx.ngnzWithdrawal?.destination?.bankName,
+        accountName: tx.ngnzWithdrawal?.destination?.accountName,
+        accountNumber: tx.ngnzWithdrawal?.destination?.accountNumber, // Show full account number for admin
+        withdrawalFee: tx.withdrawalFee
+      } : {}),
+      ...(tx.type === 'INTERNAL_TRANSFER_SENT' || tx.type === 'INTERNAL_TRANSFER_RECEIVED' ? {
+        recipientUsername: tx.recipientUsername,
+        senderUsername: tx.senderUsername
+      } : {}),
+      ...(tx.type === 'GIFTCARD' ? {
+        cardType: tx.cardType,
+        country: tx.country,
+        expectedRate: tx.expectedRate
+      } : {})
     }));
 
     const totalPages = Math.ceil(totalCount / limit);
@@ -335,7 +635,7 @@ router.get('/recent-transactions', async (req, res) => {
 
 /**
  * GET /analytics/filter
- * Universal filter endpoint
+ * Universal filter endpoint - FIXED search logic
  */
 router.get('/filter', async (req, res) => {
   try {
@@ -378,18 +678,18 @@ router.get('/filter', async (req, res) => {
       transactionFilter.createdAt = dateFilter;
     }
     if (transactionType) {
-      transactionFilter.kind = transactionType;
+      transactionFilter.type = transactionType;
     }
     if (transactionStatus) {
       transactionFilter.status = transactionStatus;
     }
     if (currency) {
-      transactionFilter.token = currency.toUpperCase();
+      transactionFilter.currency = currency.toUpperCase();
     }
     if (minAmount || maxAmount) {
-      transactionFilter.sellAmount = {};
-      if (minAmount) transactionFilter.sellAmount.$gte = parseFloat(minAmount);
-      if (maxAmount) transactionFilter.sellAmount.$lte = parseFloat(maxAmount);
+      transactionFilter.amount = {};
+      if (minAmount) transactionFilter.amount.$gte = parseFloat(minAmount);
+      if (maxAmount) transactionFilter.amount.$lte = parseFloat(maxAmount);
     }
 
     // Build user filter
@@ -405,7 +705,7 @@ router.get('/filter', async (req, res) => {
       userFilter.bvnVerified = false;
     }
 
-    // Search logic - build $or array for EITHER user match OR transaction field match
+    // FIXED: Search logic - build $or array for EITHER user match OR transaction field match
     let userIds = [];
     if (searchTerm) {
       const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -427,38 +727,42 @@ router.get('/filter', async (req, res) => {
 
       // Build $or array for EITHER user match OR transaction field match
       const searchOrClauses = [];
-
+      
       // Add user ID matches
       if (userIds.length > 0) {
         searchOrClauses.push({ userId: { $in: userIds } });
       }
-
+      
       // Add transaction field matches
       if (mongoose.Types.ObjectId.isValid(searchTerm)) {
         searchOrClauses.push({ _id: mongoose.Types.ObjectId(searchTerm) });
       }
-      searchOrClauses.push({ paymentId: regex });
-
+      searchOrClauses.push({ transactionId: regex });
+      searchOrClauses.push({ reference: regex });
+      searchOrClauses.push({ narration: regex });
+      
       // Set as $or so ANY condition matches
       if (searchOrClauses.length > 0) {
         transactionFilter.$or = searchOrClauses;
       }
     }
 
-    // Execute queries in parallel - all chatbot transactions (including expired)
-    const [chatbotTransactions, chatbotCount, users, userCount] = await Promise.all([
-      ChatbotTransaction.find(transactionFilter)
+    console.log('Filter query:', JSON.stringify(transactionFilter, null, 2));
+
+    // Execute queries in parallel
+    const [transactions, transactionCount, users, userCount] = await Promise.all([
+      Transaction.find(transactionFilter)
         .sort({ createdAt: -1 })
         .limit(limitNum)
         .skip(skip)
         .populate('userId', 'username email firstname lastname')
         .lean(),
-      ChatbotTransaction.countDocuments(transactionFilter),
+      Transaction.countDocuments(transactionFilter),
       searchTerm || Object.keys(userFilter).length > 0
         ? User.find({
-          ...(searchTerm && userIds.length > 0 ? { _id: { $in: userIds } } : {}),
-          ...userFilter
-        })
+            ...(searchTerm && userIds.length > 0 ? { _id: { $in: userIds } } : {}),
+            ...userFilter
+          })
           .sort({ createdAt: -1 })
           .limit(limitNum)
           .select('username email firstname lastname emailVerified bvnVerified chatbotTransactionVerified createdAt')
@@ -466,50 +770,42 @@ router.get('/filter', async (req, res) => {
         : [],
       searchTerm || Object.keys(userFilter).length > 0
         ? User.countDocuments({
-          ...(searchTerm && userIds.length > 0 ? { _id: { $in: userIds } } : {}),
-          ...userFilter
-        })
+            ...(searchTerm && userIds.length > 0 ? { _id: { $in: userIds } } : {}),
+            ...userFilter
+          })
         : 0
     ]);
 
-    const totalTransactionCount = chatbotCount;
+    console.log(`Found ${transactions.length} transactions, ${users.length} users`);
 
-    // Format transactions - only chatbot transactions
-    const formattedTransactions = chatbotTransactions.map(tx => ({
+    // Format transactions
+    const formattedTransactions = transactions.map(tx => ({
       id: tx._id.toString(),
       userId: tx.userId?._id?.toString(),
       username: tx.userId?.username || tx.userId?.firstname || 'Unknown',
       userEmail: tx.userId?.email,
-      type: tx.kind, // SELL or BUY
+      type: tx.type,
       status: tx.status,
-      currency: tx.token,
-      amount: tx.sellAmount,
-      narration: `${tx.kind} ${tx.token} - ${tx.paymentId}`,
-      reference: tx.paymentId,
+      currency: tx.currency,
+      amount: tx.amount,
+      fee: tx.fee || 0,
+      narration: tx.narration,
+      reference: tx.reference,
       createdAt: tx.createdAt,
       updatedAt: tx.updatedAt,
-      completedAt: (tx.status === 'CONFIRMED' || tx.status === 'COMPLETED') ? tx.updatedAt : null,
-      // Chatbot-specific fields
-      paymentId: tx.paymentId,
-      // webhookRef removed in new system
-      token: tx.token,
-      network: tx.network,
-      sellAmount: tx.sellAmount,
-      originalAmount: tx.originalAmount,
-      originalCurrency: tx.originalCurrency,
-      quoteRate: tx.quoteRate,
-      receiveCurrency: tx.receiveCurrency,
-      receiveAmount: tx.receiveAmount,
-      actualReceiveAmount: tx.actualReceiveAmount,
-      actualRate: tx.actualRate,
-      depositAddress: tx.depositAddress,
-      depositMemo: tx.depositMemo,
-      observedAmount: tx.observedAmount,
-      observedTxHash: tx.observedTxHash,
-      observedAt: tx.observedAt,
-      payout: tx.payout || null,
-      payoutStatus: tx.payoutStatus,
-      expiresAt: tx.expiresAt
+      ...(tx.type === 'SWAP' || tx.type === 'OBIEX_SWAP' ? {
+        fromCurrency: tx.fromCurrency,
+        toCurrency: tx.toCurrency,
+        fromAmount: tx.fromAmount,
+        toAmount: tx.toAmount,
+        swapType: tx.swapType
+      } : {}),
+      ...(tx.isNGNZWithdrawal ? {
+        bankName: tx.ngnzWithdrawal?.destination?.bankName,
+        accountName: tx.ngnzWithdrawal?.destination?.accountName,
+        accountNumber: tx.ngnzWithdrawal?.destination?.accountNumber, // Show full account number for admin
+        withdrawalFee: tx.withdrawalFee
+      } : {})
     }));
 
     // Format users
@@ -525,32 +821,31 @@ router.get('/filter', async (req, res) => {
       createdAt: user.createdAt
     }));
 
-    // Calculate aggregate statistics for chatbot transactions (exclude expired from volume)
-    const aggregateStats = await ChatbotTransaction.aggregate([
+    // Calculate aggregate statistics
+    const aggregateStats = await Transaction.aggregate([
       { $match: transactionFilter },
       {
         $group: {
           _id: null,
-          totalAmount: { $sum: { $cond: [{ $ne: ['$status', 'EXPIRED'] }, { $abs: '$sellAmount' }, 0] } },
-          totalReceiveAmount: { $sum: { $cond: [{ $ne: ['$status', 'EXPIRED'] }, '$receiveAmount', 0] } },
-          totalActualReceiveAmount: { $sum: { $cond: [{ $ne: ['$status', 'EXPIRED'] }, '$actualReceiveAmount', 0] } },
-          avgAmount: { $avg: { $cond: [{ $ne: ['$status', 'EXPIRED'] }, { $abs: '$sellAmount' }, null] } },
+          totalAmount: { $sum: { $abs: '$amount' } },
+          totalFees: { $sum: '$fee' },
+          avgAmount: { $avg: { $abs: '$amount' } },
           successfulCount: {
             $sum: {
-              $cond: [{ $in: ['$status', ['CONFIRMED', 'COMPLETED']] }, 1, 0]
+              $cond: [{ $in: ['$status', ['SUCCESSFUL', 'COMPLETED', 'CONFIRMED']] }, 1, 0]
             }
           },
           pendingCount: {
             $sum: { $cond: [{ $eq: ['$status', 'PENDING'] }, 1, 0] }
           },
-          expiredCount: {
-            $sum: { $cond: [{ $eq: ['$status', 'EXPIRED'] }, 1, 0] }
+          failedCount: {
+            $sum: { $cond: [{ $eq: ['$status', 'FAILED'] }, 1, 0] }
           }
         }
       }
     ]);
 
-    const totalPages = Math.ceil(Math.max(totalTransactionCount, userCount) / limitNum);
+    const totalPages = Math.ceil(Math.max(transactionCount, userCount) / limitNum);
 
     res.json({
       success: true,
@@ -570,21 +865,19 @@ router.get('/filter', async (req, res) => {
         currentPage: pageNum,
         totalPages,
         limit: limitNum,
-        totalCount: Math.max(totalTransactionCount, userCount),
-        transactionCount: totalTransactionCount,
-        chatbotTransactionCount: chatbotCount,
+        totalCount: Math.max(transactionCount, userCount),
+        transactionCount,
         userCount,
         hasNextPage: pageNum < totalPages,
         hasPreviousPage: pageNum > 1
       },
       aggregateStats: {
         totalAmount: aggregateStats[0]?.totalAmount || 0,
-        totalReceiveAmount: aggregateStats[0]?.totalReceiveAmount || 0,
-        totalActualReceiveAmount: aggregateStats[0]?.totalActualReceiveAmount || 0,
+        totalFees: aggregateStats[0]?.totalFees || 0,
         avgAmount: aggregateStats[0]?.avgAmount || 0,
         successfulCount: aggregateStats[0]?.successfulCount || 0,
         pendingCount: aggregateStats[0]?.pendingCount || 0,
-        expiredCount: aggregateStats[0]?.expiredCount || 0
+        failedCount: aggregateStats[0]?.failedCount || 0
       },
       data: {
         transactions: formattedTransactions,
@@ -604,42 +897,42 @@ router.get('/filter', async (req, res) => {
 
 /**
  * GET /analytics/swap-pairs
- * Now returns top tokens by chatbot transaction volume
  */
 router.get('/swap-pairs', async (req, res) => {
   try {
     const { timeframe = '24h' } = req.query;
 
     const timeAgo = new Date();
-    const hours = timeframe === '24h' ? 24 :
-      timeframe === '7d' ? 24 * 7 :
-        timeframe === '30d' ? 24 * 30 : 24;
+    const hours = timeframe === '24h' ? 24 : 
+                  timeframe === '7d' ? 24 * 7 : 
+                  timeframe === '30d' ? 24 * 30 : 24;
     timeAgo.setHours(timeAgo.getHours() - hours);
 
-    const tokenStats = await ChatbotTransaction.aggregate([
+    const swapPairStats = await Transaction.aggregate([
       {
         $match: {
-          kind: 'SELL',
-          status: { $in: ['CONFIRMED', 'PENDING'] },
+          type: { $in: ['SWAP', 'OBIEX_SWAP'] },
+          status: 'SUCCESSFUL',
+          swapPair: { $exists: true },
           createdAt: { $gte: timeAgo }
         }
       },
       {
         $group: {
-          _id: '$token',
-          totalTransactions: { $sum: 1 },
-          totalVolume: { $sum: { $abs: '$sellAmount' } },
-          avgReceiveAmount: { $avg: '$receiveAmount' },
+          _id: '$swapPair',
+          totalSwaps: { $sum: 1 },
+          totalVolume: { $sum: { $abs: '$amount' } },
+          avgExchangeRate: { $avg: '$exchangeRate' },
           uniqueUsers: { $addToSet: '$userId' }
         }
       },
       {
         $project: {
           _id: 0,
-          token: '$_id',
-          totalTransactions: 1,
+          swapPair: '$_id',
+          totalSwaps: 1,
           totalVolume: 1,
-          avgReceiveAmount: 1,
+          avgExchangeRate: 1,
           uniqueUsers: { $size: '$uniqueUsers' }
         }
       },
@@ -649,16 +942,467 @@ router.get('/swap-pairs', async (req, res) => {
     res.json({
       success: true,
       timeframe,
-      data: tokenStats
+      data: swapPairStats
     });
 
   } catch (error) {
-    console.error('Error fetching token analytics:', error);
+    console.error('Error fetching swap pair analytics:', error);
     res.status(500).json({
       success: false,
-      error: 'Failed to fetch token analytics',
+      error: 'Failed to fetch swap pair analytics',
       message: error.message
     });
+  }
+});
+
+/**
+ * GET /analytics/platform-stats
+ * Comprehensive platform statistics:
+ * 1. Total user wallet balances (USD and Naira)
+ * 2. Total utility spending
+ * 3. Profit from markdowns (withdrawals and swaps)
+ */
+router.get('/platform-stats', async (req, res) => {
+  try {
+    console.log('=== Platform Stats Request Started ===');
+
+    // Get offramp rate for Naira conversion
+    const nairaMarkdown = await NairaMarkdown.findOne();
+    const offrampRate = nairaMarkdown?.offrampRate || 1554.42;
+
+    // Get current crypto prices
+    const cryptoTokens = ['BTC', 'ETH', 'SOL', 'USDT', 'USDC', 'BNB', 'MATIC', 'TRX'];
+    let prices = {};
+    try {
+      prices = await getPricesWithCache(cryptoTokens) || {};
+    } catch (e) {
+      console.warn('getPricesWithCache failed, using fallback prices:', e.message);
+      prices = { BTC: 65000, ETH: 3200, SOL: 200, USDT: 1, USDC: 1, BNB: 580, MATIC: 0.85, TRX: 0.14 };
+    }
+
+    // Calculate NGNZ price in USD
+    const ngnzPriceUsd = 1 / offrampRate;
+
+    // 1. AGGREGATE TOTAL USER WALLET BALANCES
+    const walletBalances = await User.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalBtc: { $sum: { $ifNull: ['$btcBalance', 0] } },
+          totalEth: { $sum: { $ifNull: ['$ethBalance', 0] } },
+          totalSol: { $sum: { $ifNull: ['$solBalance', 0] } },
+          totalUsdt: { $sum: { $ifNull: ['$usdtBalance', 0] } },
+          totalUsdc: { $sum: { $ifNull: ['$usdcBalance', 0] } },
+          totalBnb: { $sum: { $ifNull: ['$bnbBalance', 0] } },
+          totalMatic: { $sum: { $ifNull: ['$maticBalance', 0] } },
+          totalTrx: { $sum: { $ifNull: ['$trxBalance', 0] } },
+          totalNgnz: { $sum: { $ifNull: ['$ngnzBalance', 0] } },
+          // Pending balances
+          totalBtcPending: { $sum: { $ifNull: ['$btcPendingBalance', 0] } },
+          totalEthPending: { $sum: { $ifNull: ['$ethPendingBalance', 0] } },
+          totalSolPending: { $sum: { $ifNull: ['$solPendingBalance', 0] } },
+          totalUsdtPending: { $sum: { $ifNull: ['$usdtPendingBalance', 0] } },
+          totalUsdcPending: { $sum: { $ifNull: ['$usdcPendingBalance', 0] } },
+          totalBnbPending: { $sum: { $ifNull: ['$bnbPendingBalance', 0] } },
+          totalMaticPending: { $sum: { $ifNull: ['$maticPendingBalance', 0] } },
+          totalTrxPending: { $sum: { $ifNull: ['$trxPendingBalance', 0] } },
+          totalNgnzPending: { $sum: { $ifNull: ['$ngnzPendingBalance', 0] } },
+          userCount: { $sum: 1 }
+        }
+      }
+    ]);
+
+    const balances = walletBalances[0] || {};
+
+    // Calculate USD values for each token
+    const balanceBreakdown = {
+      BTC: {
+        amount: balances.totalBtc || 0,
+        pendingAmount: balances.totalBtcPending || 0,
+        price: prices.BTC || 0,
+        usdValue: (balances.totalBtc || 0) * (prices.BTC || 0),
+        pendingUsdValue: (balances.totalBtcPending || 0) * (prices.BTC || 0)
+      },
+      ETH: {
+        amount: balances.totalEth || 0,
+        pendingAmount: balances.totalEthPending || 0,
+        price: prices.ETH || 0,
+        usdValue: (balances.totalEth || 0) * (prices.ETH || 0),
+        pendingUsdValue: (balances.totalEthPending || 0) * (prices.ETH || 0)
+      },
+      SOL: {
+        amount: balances.totalSol || 0,
+        pendingAmount: balances.totalSolPending || 0,
+        price: prices.SOL || 0,
+        usdValue: (balances.totalSol || 0) * (prices.SOL || 0),
+        pendingUsdValue: (balances.totalSolPending || 0) * (prices.SOL || 0)
+      },
+      USDT: {
+        amount: balances.totalUsdt || 0,
+        pendingAmount: balances.totalUsdtPending || 0,
+        price: prices.USDT || 1,
+        usdValue: (balances.totalUsdt || 0) * (prices.USDT || 1),
+        pendingUsdValue: (balances.totalUsdtPending || 0) * (prices.USDT || 1)
+      },
+      USDC: {
+        amount: balances.totalUsdc || 0,
+        pendingAmount: balances.totalUsdcPending || 0,
+        price: prices.USDC || 1,
+        usdValue: (balances.totalUsdc || 0) * (prices.USDC || 1),
+        pendingUsdValue: (balances.totalUsdcPending || 0) * (prices.USDC || 1)
+      },
+      BNB: {
+        amount: balances.totalBnb || 0,
+        pendingAmount: balances.totalBnbPending || 0,
+        price: prices.BNB || 0,
+        usdValue: (balances.totalBnb || 0) * (prices.BNB || 0),
+        pendingUsdValue: (balances.totalBnbPending || 0) * (prices.BNB || 0)
+      },
+      MATIC: {
+        amount: balances.totalMatic || 0,
+        pendingAmount: balances.totalMaticPending || 0,
+        price: prices.MATIC || 0,
+        usdValue: (balances.totalMatic || 0) * (prices.MATIC || 0),
+        pendingUsdValue: (balances.totalMaticPending || 0) * (prices.MATIC || 0)
+      },
+      TRX: {
+        amount: balances.totalTrx || 0,
+        pendingAmount: balances.totalTrxPending || 0,
+        price: prices.TRX || 0,
+        usdValue: (balances.totalTrx || 0) * (prices.TRX || 0),
+        pendingUsdValue: (balances.totalTrxPending || 0) * (prices.TRX || 0)
+      },
+      NGNZ: {
+        amount: balances.totalNgnz || 0,
+        pendingAmount: balances.totalNgnzPending || 0,
+        price: ngnzPriceUsd,
+        usdValue: (balances.totalNgnz || 0) * ngnzPriceUsd,
+        pendingUsdValue: (balances.totalNgnzPending || 0) * ngnzPriceUsd,
+        nairaValue: balances.totalNgnz || 0, // NGNZ is 1:1 with Naira
+        pendingNairaValue: balances.totalNgnzPending || 0
+      }
+    };
+
+    // Calculate totals
+    const totalUsdValue = Object.values(balanceBreakdown).reduce((sum, token) => sum + token.usdValue, 0);
+    const totalPendingUsdValue = Object.values(balanceBreakdown).reduce((sum, token) => sum + token.pendingUsdValue, 0);
+    const totalNairaValue = totalUsdValue * offrampRate;
+    const totalPendingNairaValue = totalPendingUsdValue * offrampRate;
+
+    // 2. AGGREGATE TOTAL UTILITY SPENDING (from BillTransaction)
+    const BillTransaction = require('../models/billstransaction');
+    const utilityStats = await BillTransaction.aggregate([
+      {
+        $match: {
+          status: 'completed'
+        }
+      },
+      {
+        $group: {
+          _id: '$billType',
+          totalAmount: { $sum: { $ifNull: ['$amountNaira', 0] } },
+          totalAmountNGNZ: { $sum: { $ifNull: ['$amountNGNZ', 0] } },
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+
+    const utilityBreakdown = {};
+    let totalUtilitySpent = 0;
+    let totalUtilityCount = 0;
+
+    for (const stat of utilityStats) {
+      utilityBreakdown[stat._id] = {
+        totalNaira: stat.totalAmount,
+        totalNGNZ: stat.totalAmountNGNZ,
+        count: stat.count,
+        usdValue: stat.totalAmount / offrampRate
+      };
+      totalUtilitySpent += stat.totalAmount;
+      totalUtilityCount += stat.count;
+    }
+
+    // 3. CALCULATE PROFIT FROM MARKDOWNS
+    // Get global markdown settings
+    const GlobalMarkdown = require('../models/pricemarkdown');
+    const SwapMarkdown = require('../models/swapmarkdown');
+
+    let globalMarkdown = null;
+    let swapMarkdown = null;
+
+    try {
+      globalMarkdown = await GlobalMarkdown.getCurrentMarkdown();
+    } catch (e) {
+      console.warn('Could not fetch global markdown:', e.message);
+    }
+
+    try {
+      swapMarkdown = await SwapMarkdown.findOne();
+    } catch (e) {
+      console.warn('Could not fetch swap markdown:', e.message);
+    }
+
+    // Calculate profit from NGNZ withdrawals (fee retained)
+    const withdrawalProfitStats = await Transaction.aggregate([
+      {
+        $match: {
+          isNGNZWithdrawal: true,
+          status: { $in: ['SUCCESSFUL', 'COMPLETED'] }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalWithdrawalFees: { $sum: { $ifNull: ['$withdrawalFee', 0] } },
+          totalWithdrawals: { $sum: 1 },
+          totalAmountWithdrawn: { $sum: { $abs: '$amount' } },
+          totalBankAmount: { $sum: { $ifNull: ['$bankAmount', 0] } }
+        }
+      }
+    ]);
+
+    const withdrawalProfit = withdrawalProfitStats[0] || {
+      totalWithdrawalFees: 0,
+      totalWithdrawals: 0,
+      totalAmountWithdrawn: 0,
+      totalBankAmount: 0
+    };
+
+    // Calculate profit from swaps (markdown difference)
+    // For swaps, profit = fromAmount * fromPrice - toAmount * toPrice (when markdown is applied)
+    // Include legacy swaps without swapDirection, exclude IN swaps
+    const swapProfitStats = await Transaction.aggregate([
+      {
+        $match: {
+          type: { $in: ['SWAP', 'OBIEX_SWAP'] },
+          status: 'SUCCESSFUL',
+          $or: [
+            { swapDirection: 'OUT' },
+            { swapDirection: { $exists: false } },
+            { swapDirection: null }
+          ]
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalSwaps: { $sum: 1 },
+          totalFromAmount: { $sum: { $ifNull: ['$fromAmount', 0] } },
+          totalToAmount: { $sum: { $ifNull: ['$toAmount', 0] } },
+          totalFees: { $sum: { $ifNull: ['$fee', 0] } },
+          totalObiexFees: { $sum: { $ifNull: ['$obiexFee', 0] } }
+        }
+      }
+    ]);
+
+    const swapProfit = swapProfitStats[0] || {
+      totalSwaps: 0,
+      totalFromAmount: 0,
+      totalToAmount: 0,
+      totalFees: 0,
+      totalObiexFees: 0
+    };
+
+    // Calculate estimated markdown profit from swaps
+    // This is an approximation based on markdown percentage
+    const swapMarkdownPercentage = swapMarkdown?.markdownPercentage || 0;
+    const estimatedSwapMarkdownProfit = swapMarkdownPercentage > 0
+      ? (swapProfit.totalFromAmount * (swapMarkdownPercentage / 100))
+      : 0;
+
+    // Calculate estimated markdown profit from crypto prices (price markdown)
+    const globalMarkdownPercentage = globalMarkdown?.markdownPercentage || 0;
+
+    // Build response
+    const response = {
+      success: true,
+      timestamp: new Date().toISOString(),
+      data: {
+        // 1. Total Wallet Balances
+        walletBalances: {
+          totalUsd: parseFloat(totalUsdValue.toFixed(2)),
+          totalNaira: parseFloat(totalNairaValue.toFixed(2)),
+          totalPendingUsd: parseFloat(totalPendingUsdValue.toFixed(2)),
+          totalPendingNaira: parseFloat(totalPendingNairaValue.toFixed(2)),
+          grandTotalUsd: parseFloat((totalUsdValue + totalPendingUsdValue).toFixed(2)),
+          grandTotalNaira: parseFloat((totalNairaValue + totalPendingNairaValue).toFixed(2)),
+          userCount: balances.userCount || 0,
+          breakdown: balanceBreakdown,
+          conversionRate: {
+            usdToNaira: offrampRate,
+            nairaToUsd: ngnzPriceUsd
+          }
+        },
+
+        // 2. Utility Spending
+        utilitySpending: {
+          totalNaira: totalUtilitySpent,
+          totalUsd: parseFloat((totalUtilitySpent / offrampRate).toFixed(2)),
+          totalTransactions: totalUtilityCount,
+          breakdown: utilityBreakdown
+        },
+
+        // 3. Profit & Revenue
+        profits: {
+          // Withdrawal fees (direct profit)
+          withdrawals: {
+            totalFeesCollected: withdrawalProfit.totalWithdrawalFees,
+            totalFeesUsd: parseFloat((withdrawalProfit.totalWithdrawalFees / offrampRate).toFixed(2)),
+            totalTransactions: withdrawalProfit.totalWithdrawals,
+            totalAmountProcessed: withdrawalProfit.totalAmountWithdrawn,
+            totalSentToBank: withdrawalProfit.totalBankAmount
+          },
+
+          // Swap markdown profit (estimated)
+          swaps: {
+            totalSwaps: swapProfit.totalSwaps,
+            markdownPercentage: swapMarkdownPercentage,
+            estimatedMarkdownProfit: parseFloat(estimatedSwapMarkdownProfit.toFixed(2)),
+            estimatedMarkdownProfitUsd: parseFloat((estimatedSwapMarkdownProfit / offrampRate).toFixed(2)),
+            totalFeesCollected: swapProfit.totalFees,
+            totalObiexFees: swapProfit.totalObiexFees
+          },
+
+          // Price markdown (affects displayed prices)
+          priceMarkdown: {
+            percentage: globalMarkdownPercentage,
+            isActive: globalMarkdown?.isActive || false,
+            description: 'Applied to crypto prices (reduces displayed price to user)'
+          },
+
+          // Combined totals
+          summary: {
+            totalDirectFeesNaira: withdrawalProfit.totalWithdrawalFees + swapProfit.totalFees,
+            totalDirectFeesUsd: parseFloat(((withdrawalProfit.totalWithdrawalFees + swapProfit.totalFees) / offrampRate).toFixed(2)),
+            totalEstimatedMarkdownProfit: parseFloat(estimatedSwapMarkdownProfit.toFixed(2)),
+            totalEstimatedMarkdownProfitUsd: parseFloat((estimatedSwapMarkdownProfit / offrampRate).toFixed(2))
+          }
+        },
+
+        // Current settings
+        currentSettings: {
+          offrampRate: offrampRate,
+          globalMarkdownPercentage: globalMarkdownPercentage,
+          swapMarkdownPercentage: swapMarkdownPercentage
+        }
+      }
+    };
+
+    console.log('=== Platform Stats Request Complete ===');
+    res.json(response);
+
+  } catch (error) {
+    console.error('Error fetching platform stats:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch platform statistics',
+      message: error.message
+    });
+  }
+});
+
+/**
+ * GET /analytics/volumes
+ * Returns total deposit and withdrawal volumes (USD, using trade volume logic)
+ */
+router.get('/volumes', async (req, res) => {
+  try {
+    // Get offramp rate for NGNZ
+    const nairaMarkdown = await NairaMarkdown.findOne();
+    let offrampRate = nairaMarkdown?.offrampRate || 1554.42;
+    if (!offrampRate || isNaN(offrampRate) || Number(offrampRate) === 0) {
+      offrampRate = 1554.42;
+    }
+
+    // Aggregate deposits (some historical rows may have negative amounts; use abs for robustness)
+    const depositAgg = await Transaction.aggregate([
+      {
+        $match: {
+          type: 'DEPOSIT',
+          status: { $in: ['SUCCESSFUL', 'COMPLETED', 'CONFIRMED'] },
+          amount: { $ne: 0 },
+          currency: { $exists: true, $ne: null }
+        }
+      },
+      {
+        $group: {
+          _id: { $toUpper: '$currency' },
+          totalAmount: { $sum: { $abs: '$amount' } }
+        }
+      }
+    ]);
+
+    // Aggregate withdrawals
+    // IMPORTANT:
+    // - NGNZ withdrawals use negative `amount` (by convention)
+    // - Crypto withdrawals in `routes/withdraw.js` currently save POSITIVE `amount`
+    // So we must use abs(amount) and not rely on sign.
+    const withdrawalAgg = await Transaction.aggregate([
+      {
+        $match: {
+          type: 'WITHDRAWAL',
+          status: { $in: ['SUCCESSFUL', 'COMPLETED', 'CONFIRMED'] },
+          amount: { $ne: 0 },
+          currency: { $exists: true, $ne: null }
+        }
+      },
+      {
+        $group: {
+          _id: { $toUpper: '$currency' },
+          totalAmount: { $sum: { $abs: '$amount' } }
+        }
+      }
+    ]);
+
+    // Get all unique currencies
+    const allCurrencies = Array.from(new Set([
+      ...depositAgg.map(d => d._id),
+      ...withdrawalAgg.map(w => w._id)
+    ])).filter(Boolean);
+
+    // Get prices for all currencies that require market pricing
+    // - NGNZ is derived from offramp rate
+    // - USD is 1
+    const priceCurrencies = allCurrencies.filter((c) => c && c !== 'NGNZ' && c !== 'USD' && SUPPORTED_TOKENS[c]);
+    let prices = {};
+    try {
+      prices = await getPricesWithCache(priceCurrencies) || {};
+    } catch (e) {
+      prices = {};
+    }
+
+    // Helper to convert to USD
+    function toUSD(currency, amount) {
+      const cur = String(currency || '').toUpperCase();
+      const amt = Number(amount) || 0;
+      if (!amt) return 0;
+      if (cur === 'USD') return amt;
+      if (cur === 'NGNZ') {
+        return Number(offrampRate) ? amt / Number(offrampRate) : 0;
+      }
+      const price = prices[cur];
+      return price ? amt * Number(price) : 0;
+    }
+
+    // Sum all deposits and withdrawals in USD
+    let totalDepositUSD = 0;
+    let totalWithdrawalUSD = 0;
+    for (const d of depositAgg) {
+      totalDepositUSD += toUSD(d._id, d.totalAmount);
+    }
+    for (const w of withdrawalAgg) {
+      totalWithdrawalUSD += toUSD(w._id, w.totalAmount);
+    }
+
+    res.json({
+      success: true,
+      data: {
+        totalDepositUSD: Number(totalDepositUSD.toFixed(2)),
+        totalWithdrawalUSD: Number(totalWithdrawalUSD.toFixed(2))
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 

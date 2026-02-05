@@ -260,6 +260,147 @@ async function sendFinancialAnalysisCompleteEmail(to, name, jobId, bankStatement
   });
 }
 
+/**
+ * Send giftcard response email (approved or rejected)
+ */
+async function SendGiftcardMail(to, name, options = {}) {
+  try {
+    const {
+      status,
+      submissionId,
+      giftcardType,
+      cardFormat,
+      country,
+      cardValue,
+      paymentAmount,
+      paymentCurrency = 'NGN',
+      rejectionReason,
+      reviewNotes,
+      approvedValue,
+      paymentRate,
+      transactionId,
+      reviewedAt
+    } = options;
+
+    let templateId;
+    if (status === 'APPROVED' || status === 'PAID') {
+      templateId = parseInt(process.env.BREVO_TEMPLATE_GIFTCARD_APPROVED);
+      if (!templateId || isNaN(templateId)) throw new Error('Giftcard approved email template ID not configured');
+    } else if (status === 'REJECTED') {
+      templateId = parseInt(process.env.BREVO_TEMPLATE_GIFTCARD_REJECTED);
+      if (!templateId || isNaN(templateId)) throw new Error('Giftcard rejected email template ID not configured');
+    } else {
+      throw new Error(`Invalid status for giftcard email: ${status}`);
+    }
+
+    const rejectionReasons = {
+      'INVALID_IMAGE': 'The uploaded image(s) were invalid or unclear',
+      'ALREADY_USED': 'This gift card has already been used',
+      'INSUFFICIENT_BALANCE': 'The gift card has insufficient balance',
+      'FAKE_CARD': 'The gift card appears to be fake or counterfeit',
+      'UNREADABLE': 'The gift card code is unreadable',
+      'WRONG_TYPE': 'The gift card type does not match what was submitted',
+      'EXPIRED': 'The gift card has expired',
+      'INVALID_ECODE': 'The e-code provided is invalid',
+      'DUPLICATE_ECODE': 'This e-code has already been submitted',
+      'OTHER': 'Other reason'
+    };
+
+    const params = {
+      username: String(name || 'User'),
+      submissionId: String(submissionId || ''),
+      giftcardType: String(giftcardType || ''),
+      cardFormat: String(cardFormat || ''),
+      country: String(country || ''),
+      cardValue: String(cardValue || '0'),
+      status: String(status || ''),
+      date: new Date(reviewedAt || Date.now()).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }),
+      companyName: 'Bramp',
+      supportEmail: 'support@chatbramp.com',
+      approvedValue: String(approvedValue || cardValue || '0'),
+      paymentAmount: String(paymentAmount || '0'),
+      paymentCurrency: String(paymentCurrency || 'NGN'),
+      paymentRate: String(paymentRate || '0'),
+      transactionId: String(transactionId || ''),
+      rejectionReason: String(rejectionReasons[rejectionReason] || rejectionReasons['OTHER']),
+      additionalNotes: String(reviewNotes || '')
+    };
+
+    return await sendEmail({ to, name, templateId, params });
+  } catch (error) {
+    console.error('Failed to send giftcard response email:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * Send admin welcome email with 2FA setup instructions
+ */
+async function sendAdminWelcomeEmail(to, adminName, role) {
+  try {
+    const templateId = parseInt(process.env.BREVO_TEMPLATE_ADMIN_WELCOME);
+    if (!templateId || isNaN(templateId) || templateId <= 0) {
+      throw new Error('Admin welcome email template ID not configured');
+    }
+
+    const ADMIN_BASE_URL = process.env.ADMIN_BASE_URL || 'https://www.chatbramp.com';
+    const setup2FAUrl = `${ADMIN_BASE_URL}/admin-2fa-setup?email=${encodeURIComponent(to)}`;
+
+    const roleDescriptions = {
+      super_admin: 'Super Administrator - Full system access',
+      admin: 'Administrator - Manage wallets, fees, and notifications',
+      moderator: 'Moderator - View transactions and manage user accounts'
+    };
+
+    return await sendEmail({
+      to,
+      name: adminName,
+      templateId,
+      params: {
+        adminName: String(adminName || 'Admin'),
+        email: String(to),
+        role: String(role || 'admin'),
+        roleDescription: String(roleDescriptions[role] || roleDescriptions.admin),
+        setup2FAUrl: String(setup2FAUrl),
+        loginUrl: String(`${ADMIN_BASE_URL}/login`),
+        companyName: 'Bramp',
+        supportEmail: 'support@chatbramp.com',
+        registrationDate: new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+      }
+    });
+  } catch (error) {
+    console.error('Failed to send admin welcome email:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * Send NIN verification email
+ */
+async function sendNINVerificationEmail(to, name, options = {}) {
+  try {
+    const templateId = parseInt(process.env.BREVO_TEMPLATE_NIN_VERIFICATION || process.env.BREVO_TEMPLATE_KYC);
+    if (!templateId || isNaN(templateId) || templateId <= 0) {
+      throw new Error('NIN verification email template ID not configured');
+    }
+
+    return await sendEmail({
+      to,
+      name,
+      templateId,
+      params: {
+        name: String(name || 'User'),
+        status: String(options.status || 'verified'),
+        ninNumber: String(options.ninNumber || ''),
+        verificationDate: new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+      }
+    });
+  } catch (error) {
+    console.error('Failed to send NIN verification email:', error.message);
+    throw error;
+  }
+}
+
 module.exports = {
   sendDepositEmail,
   sendWithdrawalEmail,
@@ -271,5 +412,8 @@ module.exports = {
   sendOtpEmail,
   sendChatbotSellEmail,
   sendChatbotDepositEmail,
-  sendFinancialAnalysisCompleteEmail
+  sendFinancialAnalysisCompleteEmail,
+  sendAdminWelcomeEmail,
+  sendNINVerificationEmail,
+  SendGiftcardMail
 };

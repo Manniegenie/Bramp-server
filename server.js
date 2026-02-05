@@ -420,6 +420,16 @@ const adminsigninRoutes = require("./adminRoutes/adminsign-in");
 const adminRegisterRoutes = require("./adminRoutes/registeradmin");
 const usermanagementRoutes = require("./adminRoutes/usermanagement");
 const analyticsRoutes = require("./adminRoutes/analytics");
+const TwoFARoutes = require("./adminRoutes/2FA");
+const Admin2FARoutes = require("./adminRoutes/Admin2FA");
+const adminBannerRoutes = require("./adminRoutes/banners");
+const blockuserRoutes = require("./adminRoutes/blockuser");
+const Pushnotification = require("./adminRoutes/pushnotification");
+const AdminKYCRoutes = require("./adminRoutes/kyc");
+const scheduledNotificationRoutes = require("./adminRoutes/scheduledNotifications");
+const scheduledGiftCardNotificationRoutes = require("./adminRoutes/scheduledGiftCardNotifications");
+const nairamarkupRoutes = require("./adminRoutes/nairamarkup");
+const swapmarkdownRoutes = require("./adminRoutes/swapmarkdown");
 const financialAnalysisRoutes = require("./routes/financialAnalysis");
 const financialAnalysisWebhookRoutes = require("./routes/financialAnalysisWebhook");
 const liskWalletRoutes = require("./routes/liskWallet");
@@ -463,6 +473,15 @@ app.use("/bramp-wallets", generatebrampwalletsRoutes);
 app.use("/migration", authenticateAdminToken, requireAdmin, migrationRoutes);
 app.use("/marker", authenticateAdminToken, requireAdmin, pricemarkdownRoutes);
 app.use("/admingiftcard", authenticateAdminToken, requireAdmin, admingiftcardRoutes);
+app.use("/admin/banners", authenticateAdminToken, requireAdmin, adminBannerRoutes);
+app.use("/notification", Pushnotification);
+app.use("/admin/notification", authenticateAdminToken, requireAdmin, Pushnotification);
+app.use("/admin/scheduled-notifications", authenticateAdminToken, requireAdmin, scheduledNotificationRoutes);
+app.use("/admin/scheduled-giftcard-notifications", authenticateAdminToken, requireAdmin, scheduledGiftCardNotificationRoutes);
+app.use("/block-user", authenticateAdminToken, requireAdmin, blockuserRoutes);
+app.use("/nairamarkup", authenticateAdminToken, requireAdmin, nairamarkupRoutes);
+app.use("/swapmarkdown", authenticateAdminToken, requireAdmin, swapmarkdownRoutes);
+app.use("/admin/2FA", authenticateAdminToken, requireModerator, Admin2FARoutes);
 
 // MODERATOR LEVEL ROUTES (all admin roles can access)
 app.use("/fetch-wallet", authenticateAdminToken, requireModerator, fetchwalletRoutes);
@@ -472,6 +491,8 @@ app.use("/fetching", authenticateAdminToken, requireModerator, fetchrefreshtoken
 app.use("/fetchuser", authenticateAdminToken, requireModerator, fetchuserRoutes);
 app.use("/usermanagement", authenticateAdminToken, requireModerator, usermanagementRoutes);
 app.use("/analytics", authenticateAdminToken, requireModerator, analyticsRoutes);
+app.use("/2FA-Disable", authenticateAdminToken, requireModerator, TwoFARoutes);
+app.use("/admin-kyc", authenticateAdminToken, requireModerator, AdminKYCRoutes);
 
 // Public data
 app.use("/naira-price", nairaPriceRouter);
@@ -670,6 +691,17 @@ const startServer = async () => {
           console.error("Initial price update failed:", err.message);
         });
       }, 5000);
+
+      // Start scheduled notification services
+      try {
+        const scheduledNotificationService = require('./services/scheduledNotificationService');
+        const scheduledGiftCardNotificationService = require('./services/scheduledGiftCardNotificationService');
+        scheduledNotificationService.start();
+        scheduledGiftCardNotificationService.start();
+        console.log("📢 Scheduled notification services started");
+      } catch (notifErr) {
+        console.error("⚠️  Error starting scheduled notification services:", notifErr.message);
+      }
     });
   } catch (e) {
     console.error("Error during startup:", e);

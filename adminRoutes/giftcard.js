@@ -1,91 +1,91 @@
 const express = require('express');
 const router = express.Router();
+const GiftCard = require('../models/giftcard');
 const GiftCardPrice = require('../models/giftcardPrice');
+const User = require('../models/user');
+const Transaction = require('../models/transaction');
 const logger = require('../utils/logger');
+const validator = require('validator');
+const { SendGiftcardMail } = require('../services/EmailService');
+const { sendGiftcardApprovalNotification, sendGiftcardRejectionNotification } = require('../services/notificationService');
 
-// Validation function for rate data (updated for NGN rates)
-// Validation function for rate data (updated for NGN rates)
-function validateRateData(data) {
-  const { cardType, country, rate, physicalRate, ecodeRate, sourceCurrency, targetCurrency, minAmount, maxAmount } = data;
+// Rate ranges configuration
+const RATE_RANGES_CONFIG = {
+  range25_100: { min: 25, max: 100, label: '$25 - $100' },
+  range100_200: { min: 100, max: 200, label: '$100 - $200' },
+  range200_500: { min: 200, max: 500, label: '$200 - $500' },
+  range500_1000: { min: 500, max: 1000, label: '$500 - $1000' }
+};
+
+// Helper to validate a single rate range object
+function validateRateRange(rangeData, rangeName) {
   const errors = [];
+  if (rangeData === null || rangeData === undefined) return { valid: true, data: null };
 
-  // Updated allowed gift card types
-  const allowedCardTypes = [
-    'APPLE',              // Apple / iTunes
-    'STEAM',              // Steam card
-    'NORDSTROM',          // Nordstrom
-    'MACY',               // Macy
-    'NIKE',               // Nike gift card
-    'GOOGLE_PLAY',        // Google Play Store
-    'AMAZON',             // Amazon gift card
-    'VISA',               // Visa + Vanilla (4097|4118)
-    'RAZOR_GOLD',         // Razor gold gift card
-    'AMERICAN_EXPRESS',   // American Express (3779/3751)
-    'SEPHORA',            // Sephora
-    'FOOTLOCKER',         // Footlocker
-    'XBOX',               // Xbox card
-    'EBAY'                // eBay
-  ];
+  const { rate, physicalRate, ecodeRate } = rangeData;
 
-  const allowedCountries = ['US', 'CANADA', 'AUSTRALIA', 'SWITZERLAND'];
-  const allowedCurrencies = ['USD', 'NGN', 'GBP', 'EUR', 'CAD'];
-
-  // Required fields
-  if (!cardType) {
-    errors.push('cardType is required');
-  } else if (!allowedCardTypes.includes(cardType.toUpperCase())) {
-    errors.push(`Invalid cardType: ${cardType}`);
+  if (rate !== undefined && rate !== null) {
+    if (typeof rate !== 'number' || rate < 0) {
+      errors.push(`${rangeName}.rate must be a positive number`);
+    }
   }
-
-  if (!country) {
-    errors.push('country is required');
-  } else if (!allowedCountries.includes(country.toUpperCase())) {
-    errors.push(`Invalid country: ${country}`);
-  }
-
-  if (!rate && rate !== 0) {
-    errors.push('rate is required');
-  } else if (typeof rate !== 'number' || rate < 0) {
-    errors.push('rate must be a positive number');
-  } else if (rate < 100) {
-    errors.push('rate seems too low for NGN conversion (expected range: 1000-2000)');
-  }
-
-  // Optional field validations
   if (physicalRate !== undefined && physicalRate !== null) {
     if (typeof physicalRate !== 'number' || physicalRate < 0) {
-      errors.push('physicalRate must be a positive number');
-    } else if (physicalRate < 100) {
-      errors.push('physicalRate seems too low for NGN conversion (expected range: 1000-2000)');
+      errors.push(`${rangeName}.physicalRate must be a positive number`);
     }
   }
-
   if (ecodeRate !== undefined && ecodeRate !== null) {
     if (typeof ecodeRate !== 'number' || ecodeRate < 0) {
-      errors.push('ecodeRate must be a positive number');
-    } else if (ecodeRate < 100) {
-      errors.push('ecodeRate seems too low for NGN conversion (expected range: 1000-2000)');
+      errors.push(`${rangeName}.ecodeRate must be a positive number`);
     }
   }
 
-  if (sourceCurrency && !allowedCurrencies.includes(sourceCurrency.toUpperCase())) {
-    errors.push('Invalid sourceCurrency');
+  return {
+    valid: errors.length === 0,
+    errors,
+    data: errors.length === 0 ? {
+      rate: rate != null ? parseFloat(rate) : null,
+      physicalRate: physicalRate != null ? parseFloat(physicalRate) : null,
+      ecodeRate: ecodeRate != null ? parseFloat(ecodeRate) : null
+    } : null
+  };
+}
+
+// Validation function for rate data - essential checks only
+function validateRateData(data) {
+  const { cardType, country, rate, physicalRate, ecodeRate, sourceCurrency, targetCurrency, minAmount, maxAmount, vanillaType, rateRanges } = data;
+  const errors = [];
+
+  // Required fields only
+  if (!cardType) errors.push('cardType is required');
+  if (!country) errors.push('country is required');
+  if (rate === undefined || rate === null) errors.push('rate is required (default/fallback rate)');
+  else if (typeof rate !== 'number' || rate < 0) errors.push('rate must be a positive number');
+
+  // Vanilla cards need vanillaType
+  if (cardType && cardType.toUpperCase() === 'VANILLA' && !vanillaType) {
+    errors.push('vanillaType is required for VANILLA cards');
   }
 
-  if (targetCurrency && !allowedCurrencies.includes(targetCurrency.toUpperCase())) {
-    errors.push('Invalid targetCurrency');
-  }
-
-  if (minAmount !== undefined && minAmount !== null && (typeof minAmount !== 'number' || minAmount < 0)) {
-    errors.push('minAmount must be a positive number');
-  }
-
-  if (maxAmount !== undefined && maxAmount !== null && (typeof maxAmount !== 'number' || maxAmount < 0)) {
-    errors.push('maxAmount must be a positive number');
-  }
-
+  // minAmount/maxAmount sanity check
   if (minAmount && maxAmount && minAmount > maxAmount) {
     errors.push('minAmount cannot be greater than maxAmount');
+  }
+
+  // Validate rate ranges if provided
+  let validatedRateRanges = null;
+  if (rateRanges && typeof rateRanges === 'object') {
+    validatedRateRanges = {};
+    for (const rangeKey of Object.keys(RATE_RANGES_CONFIG)) {
+      if (rateRanges[rangeKey]) {
+        const rangeValidation = validateRateRange(rateRanges[rangeKey], rangeKey);
+        if (!rangeValidation.valid) {
+          errors.push(...rangeValidation.errors);
+        } else {
+          validatedRateRanges[rangeKey] = rangeValidation.data;
+        }
+      }
+    }
   }
 
   return {
@@ -95,21 +95,21 @@ function validateRateData(data) {
       cardType: cardType.toUpperCase(),
       country: country.toUpperCase(),
       rate: parseFloat(rate),
-      physicalRate: physicalRate ? parseFloat(physicalRate) : null,
-      ecodeRate: ecodeRate ? parseFloat(ecodeRate) : null,
+      rateRanges: validatedRateRanges,
+      physicalRate: physicalRate != null ? parseFloat(physicalRate) : null,
+      ecodeRate: ecodeRate != null ? parseFloat(ecodeRate) : null,
       sourceCurrency: sourceCurrency ? sourceCurrency.toUpperCase() : 'USD',
       targetCurrency: targetCurrency ? targetCurrency.toUpperCase() : 'NGN',
-      minAmount: minAmount ? parseFloat(minAmount) : 5,
-      maxAmount: maxAmount ? parseFloat(maxAmount) : 2000
+      minAmount: minAmount != null ? parseFloat(minAmount) : 25,
+      maxAmount: maxAmount != null ? parseFloat(maxAmount) : 1000,
+      vanillaType: vanillaType || null
     } : null
   };
 }
 
-// POST /admin/giftcard/rates - Create new rate
+// POST /admin/giftcard/rates - Create new rate (no auth)
 router.post('/rates', async (req, res) => {
   try {
-    const adminUserId = req.user?.id || null; // Handle case where no auth middleware
-    
     const validation = validateRateData(req.body);
     if (!validation.success) {
       return res.status(400).json({
@@ -121,30 +121,41 @@ router.post('/rates', async (req, res) => {
 
     const rateData = {
       ...validation.validatedData,
-      updatedBy: adminUserId,
       notes: req.body.notes || null
     };
 
-    // Check if rate already exists
-    const existingRate = await GiftCardPrice.findOne({
+    // Check if rate already exists (including vanillaType for VANILLA cards)
+    const existingQuery = {
       cardType: rateData.cardType,
       country: rateData.country
-    });
+    };
+
+    if (rateData.cardType === 'VANILLA' && rateData.vanillaType) {
+      existingQuery.vanillaType = rateData.vanillaType;
+    }
+
+    const existingRate = await GiftCardPrice.findOne(existingQuery);
 
     if (existingRate) {
+      let message = `Rate already exists for ${rateData.cardType} in ${rateData.country}`;
+      if (rateData.cardType === 'VANILLA' && rateData.vanillaType) {
+        message += ` with vanilla type ${rateData.vanillaType}`;
+      }
+      message += '. Use PUT to update.';
+      
       return res.status(409).json({
         success: false,
-        message: `Rate already exists for ${rateData.cardType} in ${rateData.country}. Use PUT to update.`
+        message: message
       });
     }
 
     const newRate = await GiftCardPrice.create(rateData);
 
     logger.info('Gift card rate created', {
-      adminUserId,
       cardType: newRate.cardType,
       country: newRate.country,
-      rate: newRate.rate
+      rate: newRate.rate,
+      vanillaType: newRate.vanillaType
     });
 
     res.status(201).json({
@@ -156,10 +167,12 @@ router.post('/rates', async (req, res) => {
         country: newRate.country,
         rate: newRate.rate,
         rateDisplay: `₦${newRate.rate}/${newRate.sourceCurrency}`,
+        rateRanges: newRate.rateRanges,
         physicalRate: newRate.physicalRate,
         ecodeRate: newRate.ecodeRate,
         minAmount: newRate.minAmount,
         maxAmount: newRate.maxAmount,
+        vanillaType: newRate.vanillaType,
         isActive: newRate.isActive,
         createdAt: newRate.createdAt
       }
@@ -167,7 +180,6 @@ router.post('/rates', async (req, res) => {
 
   } catch (error) {
     logger.error('Error creating gift card rate', {
-      adminUserId: req.user?.id,
       error: error.message,
       requestBody: req.body
     });
@@ -175,7 +187,7 @@ router.post('/rates', async (req, res) => {
     if (error.code === 11000) {
       return res.status(409).json({
         success: false,
-        message: 'Rate already exists for this card type and country'
+        message: 'Rate already exists for this card type and country combination'
       });
     }
 
@@ -186,10 +198,9 @@ router.post('/rates', async (req, res) => {
   }
 });
 
-// POST /admin/giftcard/rates/bulk - Create multiple rates
+// POST /admin/giftcard/rates/bulk - Create multiple rates (no auth)
 router.post('/rates/bulk', async (req, res) => {
   try {
-    const adminUserId = req.user?.id || null;
     const { rates } = req.body;
 
     if (!Array.isArray(rates) || rates.length === 0) {
@@ -221,7 +232,6 @@ router.post('/rates/bulk', async (req, res) => {
       } else {
         validatedRates.push({
           ...validation.validatedData,
-          updatedBy: adminUserId,
           notes: rates[i].notes || null
         });
       }
@@ -239,7 +249,6 @@ router.post('/rates/bulk', async (req, res) => {
     const createdRates = await GiftCardPrice.insertMany(validatedRates, { ordered: false });
 
     logger.info('Bulk gift card rates created', {
-      adminUserId,
       totalRates: createdRates.length
     });
 
@@ -253,14 +262,14 @@ router.post('/rates/bulk', async (req, res) => {
           cardType: rate.cardType,
           country: rate.country,
           rate: rate.rate,
-          rateDisplay: `₦${rate.rate}/${rate.sourceCurrency}`
+          rateDisplay: `₦${rate.rate}/${rate.sourceCurrency}`,
+          vanillaType: rate.vanillaType
         }))
       }
     });
 
   } catch (error) {
     logger.error('Error creating bulk gift card rates', {
-      adminUserId: req.user?.id,
       error: error.message
     });
 
@@ -279,10 +288,9 @@ router.post('/rates/bulk', async (req, res) => {
   }
 });
 
-// PUT /admin/giftcard/rates/:id - Update existing rate
+// PUT /admin/giftcard/rates/:id - Update existing rate (no auth)
 router.put('/rates/:id', async (req, res) => {
   try {
-    const adminUserId = req.user?.id || null;
     const { id } = req.params;
 
     const existingRate = await GiftCardPrice.findById(id);
@@ -293,69 +301,48 @@ router.put('/rates/:id', async (req, res) => {
       });
     }
 
-    // Validate only provided fields
+    // Build update data from allowed fields
     const updateData = {};
     const fieldsToUpdate = ['rate', 'physicalRate', 'ecodeRate', 'minAmount', 'maxAmount', 'isActive', 'notes'];
-    
+
     for (const field of fieldsToUpdate) {
       if (req.body[field] !== undefined) {
         updateData[field] = req.body[field];
       }
     }
 
-    // Validate rates if provided (updated for NGN ranges)
-    if (updateData.rate !== undefined) {
-      if (typeof updateData.rate !== 'number' || updateData.rate < 0) {
-        return res.status(400).json({
-          success: false,
-          message: 'rate must be a positive number'
-        });
-      } else if (updateData.rate < 100) {
-        return res.status(400).json({
-          success: false,
-          message: 'rate seems too low for NGN conversion (expected range: 1000-2000)'
-        });
+    // Basic rate validation
+    if (updateData.rate !== undefined && (typeof updateData.rate !== 'number' || updateData.rate < 0)) {
+      return res.status(400).json({ success: false, message: 'rate must be a positive number' });
+    }
+
+    // Handle rate ranges update
+    if (req.body.rateRanges && typeof req.body.rateRanges === 'object') {
+      const rateRanges = req.body.rateRanges;
+      for (const rangeKey of Object.keys(RATE_RANGES_CONFIG)) {
+        if (rateRanges[rangeKey] !== undefined) {
+          const rangeValidation = validateRateRange(rateRanges[rangeKey], rangeKey);
+          if (!rangeValidation.valid) {
+            return res.status(400).json({
+              success: false,
+              message: 'Invalid rate range data',
+              errors: rangeValidation.errors
+            });
+          }
+          updateData[`rateRanges.${rangeKey}`] = rangeValidation.data;
+        }
       }
     }
 
-    if (updateData.physicalRate !== undefined && updateData.physicalRate !== null) {
-      if (typeof updateData.physicalRate !== 'number' || updateData.physicalRate < 0) {
-        return res.status(400).json({
-          success: false,
-          message: 'physicalRate must be a positive number'
-        });
-      } else if (updateData.physicalRate < 100) {
-        return res.status(400).json({
-          success: false,
-          message: 'physicalRate seems too low for NGN conversion (expected range: 1000-2000)'
-        });
-      }
-    }
-
-    if (updateData.ecodeRate !== undefined && updateData.ecodeRate !== null) {
-      if (typeof updateData.ecodeRate !== 'number' || updateData.ecodeRate < 0) {
-        return res.status(400).json({
-          success: false,
-          message: 'ecodeRate must be a positive number'
-        });
-      } else if (updateData.ecodeRate < 100) {
-        return res.status(400).json({
-          success: false,
-          message: 'ecodeRate seems too low for NGN conversion (expected range: 1000-2000)'
-        });
-      }
-    }
-
-    updateData.updatedBy = adminUserId;
     updateData.lastUpdated = new Date();
 
     const updatedRate = await GiftCardPrice.findByIdAndUpdate(id, updateData, { new: true });
 
     logger.info('Gift card rate updated', {
-      adminUserId,
       rateId: id,
       cardType: updatedRate.cardType,
       country: updatedRate.country,
+      vanillaType: updatedRate.vanillaType,
       updatedFields: Object.keys(updateData)
     });
 
@@ -368,10 +355,12 @@ router.put('/rates/:id', async (req, res) => {
         country: updatedRate.country,
         rate: updatedRate.rate,
         rateDisplay: `₦${updatedRate.rate}/${updatedRate.sourceCurrency}`,
+        rateRanges: updatedRate.rateRanges,
         physicalRate: updatedRate.physicalRate,
         ecodeRate: updatedRate.ecodeRate,
         minAmount: updatedRate.minAmount,
         maxAmount: updatedRate.maxAmount,
+        vanillaType: updatedRate.vanillaType,
         isActive: updatedRate.isActive,
         lastUpdated: updatedRate.lastUpdated
       }
@@ -379,7 +368,6 @@ router.put('/rates/:id', async (req, res) => {
 
   } catch (error) {
     logger.error('Error updating gift card rate', {
-      adminUserId: req.user?.id,
       rateId: req.params.id,
       error: error.message
     });
@@ -391,10 +379,9 @@ router.put('/rates/:id', async (req, res) => {
   }
 });
 
-// DELETE /admin/giftcard/rates/:id - Delete rate
+// DELETE /admin/giftcard/rates/:id - Delete rate (no auth)
 router.delete('/rates/:id', async (req, res) => {
   try {
-    const adminUserId = req.user?.id || null;
     const { id } = req.params;
 
     const deletedRate = await GiftCardPrice.findByIdAndDelete(id);
@@ -407,10 +394,10 @@ router.delete('/rates/:id', async (req, res) => {
     }
 
     logger.info('Gift card rate deleted', {
-      adminUserId,
       rateId: id,
       cardType: deletedRate.cardType,
-      country: deletedRate.country
+      country: deletedRate.country,
+      vanillaType: deletedRate.vanillaType
     });
 
     res.status(200).json({
@@ -420,14 +407,14 @@ router.delete('/rates/:id', async (req, res) => {
         deletedRate: {
           cardType: deletedRate.cardType,
           country: deletedRate.country,
-          rate: deletedRate.rate
+          rate: deletedRate.rate,
+          vanillaType: deletedRate.vanillaType
         }
       }
     });
 
   } catch (error) {
     logger.error('Error deleting gift card rate', {
-      adminUserId: req.user?.id,
       rateId: req.params.id,
       error: error.message
     });
@@ -439,38 +426,37 @@ router.delete('/rates/:id', async (req, res) => {
   }
 });
 
-// GET /admin/giftcard/rates - Get all rates (admin view with more details)
+// GET /admin/giftcard/rate-ranges-config - Get rate ranges configuration
+router.get('/rate-ranges-config', (req, res) => {
+  res.status(200).json({
+    success: true,
+    data: {
+      rateRanges: RATE_RANGES_CONFIG,
+      rangeKeys: Object.keys(RATE_RANGES_CONFIG)
+    },
+    message: 'Rate ranges configuration retrieved successfully'
+  });
+});
+
+// GET /admin/giftcard/rates - Get all rates (admin view with more details) (no auth)
 router.get('/rates', async (req, res) => {
   try {
-    const { country, cardType, isActive, page = 1, limit = 50 } = req.query;
-    
+    const { country, cardType, vanillaType, isActive, page = 1, limit = 50 } = req.query;
+
     const query = {};
-    
-    if (country) {
-      if (!['US', 'CANADA', 'AUSTRALIA', 'SWITZERLAND'].includes(country.toUpperCase())) {
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid country'
-        });
-      }
-      query.country = country.toUpperCase();
-    }
-    
-    if (cardType) {
-      query.cardType = cardType.toUpperCase();
-    }
-    
-    if (isActive !== undefined) {
-      query.isActive = isActive === 'true';
-    }
+
+    if (country) query.country = country.toUpperCase();
+    if (cardType) query.cardType = cardType.toUpperCase();
+    if (vanillaType) query.vanillaType = vanillaType;
+    if (isActive !== undefined) query.isActive = isActive === 'true';
 
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
     const skip = (pageNum - 1) * limitNum;
 
+    // No populate() on updatedBy anymore
     const rates = await GiftCardPrice.find(query)
-      .populate('updatedBy', 'username email')
-      .sort({ country: 1, cardType: 1 })
+      .sort({ country: 1, cardType: 1, vanillaType: 1 })
       .skip(skip)
       .limit(limitNum);
 
@@ -485,18 +471,20 @@ router.get('/rates', async (req, res) => {
           country: rate.country,
           rate: rate.rate,
           rateDisplay: `₦${rate.rate}/${rate.sourceCurrency}`,
+          rateRanges: rate.rateRanges,
           physicalRate: rate.physicalRate,
           ecodeRate: rate.ecodeRate,
           sourceCurrency: rate.sourceCurrency,
           targetCurrency: rate.targetCurrency,
           minAmount: rate.minAmount,
           maxAmount: rate.maxAmount,
+          vanillaType: rate.vanillaType,
           isActive: rate.isActive,
           lastUpdated: rate.lastUpdated,
-          updatedBy: rate.updatedBy,
           notes: rate.notes,
           createdAt: rate.createdAt
         })),
+        rateRangesConfig: RATE_RANGES_CONFIG,
         pagination: {
           currentPage: pageNum,
           totalPages: Math.ceil(total / limitNum),
@@ -509,7 +497,6 @@ router.get('/rates', async (req, res) => {
 
   } catch (error) {
     logger.error('Error fetching admin gift card rates', {
-      adminUserId: req.user?.id,
       error: error.message
     });
 
@@ -517,6 +504,596 @@ router.get('/rates', async (req, res) => {
       success: false,
       message: 'Failed to fetch gift card rates'
     });
+  }
+});
+
+// ==================== GIFT CARD SUBMISSION REVIEW ENDPOINTS ====================
+
+// GET /admin/giftcard/submissions - List all gift card submissions with filtering
+router.get('/submissions', async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 20,
+      status,
+      cardType,
+      country,
+      searchTerm,
+      dateFrom,
+      dateTo,
+      sortBy = 'createdAt',
+      sortOrder = 'desc'
+    } = req.query;
+
+    // Build filter object
+    const filter = {};
+
+    if (status) {
+      filter.status = status.toUpperCase();
+    }
+
+    if (cardType) {
+      filter.cardType = cardType.toUpperCase();
+    }
+
+    if (country) {
+      filter.country = country.toUpperCase();
+    }
+
+    if (dateFrom || dateTo) {
+      filter.createdAt = {};
+      if (dateFrom) {
+        filter.createdAt.$gte = new Date(dateFrom);
+      }
+      if (dateTo) {
+        filter.createdAt.$lte = new Date(dateTo);
+      }
+    }
+
+    // Build aggregation pipeline
+    const pipeline = [
+      { $match: filter },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'userId',
+          foreignField: '_id',
+          as: 'user',
+          pipeline: [
+            {
+              $project: {
+                _id: 1,
+                firstname: 1,
+                lastname: 1,
+                email: 1,
+                phonenumber: 1,
+                username: 1
+              }
+            }
+          ]
+        }
+      },
+      { $unwind: '$user' }
+    ];
+
+    // Add search functionality
+    if (searchTerm) {
+      pipeline.push({
+        $match: {
+          $or: [
+            { eCode: { $regex: searchTerm, $options: 'i' } },
+            { cardRange: { $regex: searchTerm, $options: 'i' } },
+            { 'user.firstname': { $regex: searchTerm, $options: 'i' } },
+            { 'user.lastname': { $regex: searchTerm, $options: 'i' } },
+            { 'user.email': { $regex: searchTerm, $options: 'i' } },
+            { 'user.phonenumber': { $regex: searchTerm, $options: 'i' } }
+          ]
+        }
+      });
+    }
+
+    // Add sorting
+    const sortObj = {};
+    sortObj[sortBy] = sortOrder === 'desc' ? -1 : 1;
+    pipeline.push({ $sort: sortObj });
+
+    // Get total count
+    const countPipeline = [...pipeline, { $count: 'total' }];
+    const totalResult = await GiftCard.aggregate(countPipeline);
+    const total = totalResult.length > 0 ? totalResult[0].total : 0;
+
+    // Add pagination
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    pipeline.push(
+      { $skip: skip },
+      { $limit: parseInt(limit) }
+    );
+
+    const submissions = await GiftCard.aggregate(pipeline);
+
+    // Calculate pagination
+    const totalPages = Math.ceil(total / parseInt(limit));
+    const hasNextPage = parseInt(page) < totalPages;
+    const hasPrevPage = parseInt(page) > 1;
+
+    logger.info('Gift card submissions retrieved', {
+      total,
+      page: parseInt(page),
+      limit: parseInt(limit),
+      resultsCount: submissions.length
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        submissions,
+        pagination: {
+          currentPage: parseInt(page),
+          totalPages,
+          total,
+          hasNextPage,
+          hasPrevPage,
+          limit: parseInt(limit)
+        }
+      }
+    });
+
+  } catch (error) {
+    logger.error('Error retrieving gift card submissions', { error: error.message, stack: error.stack });
+    return res.status(500).json({ success: false, error: 'Internal server error.' });
+  }
+});
+
+// GET /admin/giftcard/submissions/:id - Get gift card submission details
+router.get('/submissions/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!validator.isMongoId(id)) {
+      return res.status(400).json({ success: false, error: 'Valid submission ID is required.' });
+    }
+
+    const submission = await GiftCard.findById(id)
+      .populate('userId', 'firstname lastname email phonenumber username createdAt')
+      .populate('giftCardRateId')
+      .populate('transactionId');
+
+    if (!submission) {
+      return res.status(404).json({ success: false, error: 'Gift card submission not found.' });
+    }
+
+    // Transform to match list API format - move populated userId to user field
+    const submissionObj = submission.toObject();
+    submissionObj.user = submissionObj.userId;
+
+    return res.status(200).json({
+      success: true,
+      data: submissionObj
+    });
+
+  } catch (error) {
+    logger.error('Error retrieving gift card submission details', { error: error.message });
+    return res.status(500).json({ success: false, error: 'Internal server error.' });
+  }
+});
+
+// POST /admin/giftcard/submissions/:id/approve - Approve gift card submission and fund user
+router.post('/submissions/:id/approve', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { approvedValue, paymentRate, notes } = req.body;
+
+    logger.info('Gift card approval request received', {
+      submissionId: id,
+      approvedValue,
+      paymentRate,
+      hasNotes: !!notes
+    });
+
+    if (!validator.isMongoId(id)) {
+      logger.warn('Invalid submission ID format', { id });
+      return res.status(400).json({ success: false, error: 'Valid submission ID is required.', message: 'Invalid ID format' });
+    }
+
+    const submission = await GiftCard.findById(id).populate('userId');
+    if (!submission) {
+      logger.warn('Submission not found', { id });
+      return res.status(404).json({ success: false, error: 'Gift card submission not found.', message: 'Submission not found' });
+    }
+
+    logger.info('Submission found', {
+      submissionId: id,
+      status: submission.status,
+      cardType: submission.cardType,
+      cardValue: submission.cardValue,
+      expectedRate: submission.expectedRate,
+      hasUserId: !!submission.userId,
+      userIdType: typeof submission.userId,
+      userIdHasId: submission.userId && !!submission.userId._id
+    });
+
+    // Validate userId is populated
+    if (!submission.userId || !submission.userId._id) {
+      logger.error('Gift card submission missing userId', {
+        submissionId: id,
+        userId: submission.userId,
+        userIdType: typeof submission.userId
+      });
+      return res.status(400).json({
+        success: false,
+        error: 'Gift card submission has invalid user reference.',
+        message: 'User reference is missing or invalid'
+      });
+    }
+
+    // Only allow approval of PENDING submissions
+    if (submission.status !== 'PENDING') {
+      logger.warn('Cannot approve submission with current status', {
+        submissionId: id,
+        currentStatus: submission.status,
+        allowedStatus: 'PENDING'
+      });
+      return res.status(400).json({
+        success: false,
+        error: `Cannot approve submission with status: ${submission.status}`,
+        message: submission.status === 'REJECTED'
+          ? 'Cannot approve rejected submissions'
+          : submission.status === 'PAID'
+          ? 'Submission has already been paid'
+          : `Only PENDING submissions can be approved`
+      });
+    }
+
+    const now = new Date();
+
+    // Calculate payment amount
+    const finalApprovedValue = approvedValue || submission.cardValue;
+    const finalPaymentRate = paymentRate || submission.expectedRate;
+    const paymentAmount = finalApprovedValue * finalPaymentRate;
+
+    logger.info('Payment calculation', {
+      submissionId: id,
+      approvedValue,
+      cardValue: submission.cardValue,
+      finalApprovedValue,
+      paymentRate,
+      expectedRate: submission.expectedRate,
+      finalPaymentRate,
+      paymentAmount
+    });
+
+    // Validate payment amount
+    if (!paymentAmount || paymentAmount <= 0 || !Number.isFinite(paymentAmount)) {
+      logger.error('Invalid payment amount calculated', {
+        submissionId: id,
+        paymentAmount,
+        finalApprovedValue,
+        finalPaymentRate
+      });
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid payment amount calculated.',
+        message: `Payment amount is invalid: ${paymentAmount}`
+      });
+    }
+
+    // Create and process transaction to fund user
+    const transaction = await Transaction.create({
+      userId: submission.userId._id,
+      type: 'GIFTCARD_PAYOUT',
+      currency: 'NGN',
+      amount: paymentAmount,
+      status: 'SUCCESSFUL',
+      giftCardId: submission._id,
+      cardType: submission.cardType,
+      cardFormat: submission.cardFormat,
+      cardRange: submission.cardRange,
+      country: submission.country,
+      description: `Gift card approved: ${submission.cardType} ${submission.cardFormat}`,
+      metadata: {
+        giftCardId: submission._id,
+        cardType: submission.cardType,
+        cardValue: finalApprovedValue,
+        paymentRate: finalPaymentRate,
+        approvedBy: 'admin'
+      }
+    });
+
+    // Update submission to PAID status (single save, no intermediate APPROVED state)
+    submission.status = 'PAID';
+    submission.approvedValue = finalApprovedValue;
+    submission.paymentRate = finalPaymentRate;
+    submission.paymentAmount = paymentAmount;
+    submission.reviewedAt = now;
+    submission.paidAt = now;
+    submission.reviewNotes = notes || null;
+    submission.transactionId = transaction._id;
+    await submission.save();
+
+    // Fund user's NGNZ balance ATOMICALLY using $inc (like funduser.js)
+    const user = await User.findByIdAndUpdate(
+      submission.userId._id,
+      {
+        $inc: { ngnzBalance: paymentAmount }
+      },
+      { new: true, runValidators: true }
+    ).select('email ngnzBalance');
+
+    if (!user) {
+      // This should never happen since we validated earlier, but handle it
+      throw new Error('User not found when funding');
+    }
+
+    logger.info('Gift card submission approved and user funded', {
+      submissionId: id,
+      userId: submission.userId._id,
+      paymentAmount,
+      ngnzBalance: user.ngnzBalance,
+      transactionId: transaction._id
+    });
+
+    // Send approval email to user
+    try {
+      logger.info('Attempting to send approval email', {
+        userId: submission.userId._id,
+        email: submission.userId.email,
+        submissionId: submission._id,
+        paymentAmount,
+        hasBrevoTemplateApproved: !!process.env.BREVO_TEMPLATE_GIFTCARD_APPROVED,
+        hasBrevoApiKey: !!process.env.BREVO_API_KEY
+      });
+
+      await SendGiftcardMail(
+        submission.userId.email,
+        submission.userId.firstname || submission.userId.username || 'User',
+        {
+          status: 'APPROVED',
+          submissionId: submission._id.toString(),
+          giftcardType: submission.cardType,
+          cardFormat: submission.cardFormat,
+          country: submission.country,
+          cardValue: submission.cardValue,
+          approvedValue: finalApprovedValue,
+          paymentAmount: paymentAmount,
+          paymentCurrency: 'NGN',
+          paymentRate: finalPaymentRate,
+          rateDisplay: `₦${finalPaymentRate}/USD`,
+          transactionId: transaction._id.toString(),
+          reference: transaction._id.toString(),
+          reviewNotes: notes,
+          reviewedAt: now
+        }
+      );
+
+      logger.info('✅ Approval email sent successfully to user', {
+        userId: submission.userId._id,
+        email: submission.userId.email,
+        submissionId: submission._id
+      });
+    } catch (emailError) {
+      logger.error('❌ Failed to send approval email - CRITICAL', {
+        error: emailError.message,
+        stack: emailError.stack,
+        statusCode: emailError.statusCode || emailError.status,
+        response: emailError.response?.body || emailError.response,
+        userId: submission.userId._id,
+        email: submission.userId.email,
+        submissionId: submission._id,
+        paymentAmount,
+        brevoTemplateApproved: process.env.BREVO_TEMPLATE_GIFTCARD_APPROVED,
+        brevoApiKeyConfigured: !!process.env.BREVO_API_KEY,
+        senderEmail: process.env.SENDER_EMAIL || process.env.SUPPORT_EMAIL
+      });
+      // Don't fail the request if email fails, but log extensively for debugging
+    }
+
+    // Send push notification
+    try {
+      await sendGiftcardApprovalNotification(
+        submission.userId._id,
+        submission.cardType,
+        paymentAmount,
+        submission._id.toString()
+      );
+      logger.info('Giftcard approval notification sent', {
+        userId: submission.userId._id,
+        submissionId: submission._id
+      });
+    } catch (error) {
+      logger.error('Failed to send giftcard approval push notification', {
+        userId: submission.userId._id,
+        submissionId: submission._id,
+        error: error.message
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Gift card approved and user funded successfully.',
+      data: {
+        submissionId: submission._id,
+        status: submission.status,
+        paymentAmount,
+        transactionId: transaction._id,
+        userBalance: user.ngnzBalance
+      }
+    });
+
+  } catch (error) {
+    logger.error('Error approving gift card submission', {
+      error: error.message,
+      stack: error.stack,
+      submissionId: req.params.id,
+      requestBody: req.body
+    });
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to approve submission',
+      message: error.message
+    });
+  }
+});
+
+// POST /admin/giftcard/submissions/:id/reject - Reject gift card submission
+router.post('/submissions/:id/reject', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { rejectionReason, notes } = req.body;
+
+    if (!validator.isMongoId(id)) {
+      return res.status(400).json({ success: false, error: 'Valid submission ID is required.' });
+    }
+
+    if (!rejectionReason) {
+      return res.status(400).json({ success: false, error: 'Rejection reason is required.' });
+    }
+
+    const submission = await GiftCard.findById(id).populate('userId');
+    if (!submission) {
+      return res.status(404).json({ success: false, error: 'Gift card submission not found.' });
+    }
+
+    if (submission.status !== 'PENDING' && submission.status !== 'REVIEWING') {
+      return res.status(400).json({
+        success: false,
+        error: `Cannot reject submission with status: ${submission.status}`
+      });
+    }
+
+    // Update submission
+    submission.status = 'REJECTED';
+    submission.rejectionReason = rejectionReason;
+    submission.reviewNotes = notes || null;
+    submission.reviewedAt = new Date();
+
+    await submission.save();
+
+    logger.info('Gift card submission rejected', {
+      submissionId: id,
+      userId: submission.userId,
+      rejectionReason
+    });
+
+    // Send rejection email to user
+    try {
+      logger.info('Attempting to send rejection email', {
+        userId: submission.userId._id,
+        email: submission.userId.email,
+        submissionId: submission._id,
+        rejectionReason,
+        hasBrevoTemplateRejected: !!process.env.BREVO_TEMPLATE_GIFTCARD_REJECTED,
+        hasBrevoApiKey: !!process.env.BREVO_API_KEY
+      });
+
+      await SendGiftcardMail(
+        submission.userId.email,
+        submission.userId.firstname || submission.userId.username || 'User',
+        {
+          status: 'REJECTED',
+          submissionId: submission._id.toString(),
+          giftcardType: submission.cardType,
+          cardFormat: submission.cardFormat,
+          country: submission.country,
+          cardValue: submission.cardValue,
+          rejectionReason: rejectionReason,
+          reviewNotes: notes,
+          reviewedAt: submission.reviewedAt
+        }
+      );
+
+      logger.info('✅ Rejection email sent successfully to user', {
+        userId: submission.userId._id,
+        email: submission.userId.email,
+        submissionId: submission._id
+      });
+    } catch (emailError) {
+      logger.error('❌ Failed to send rejection email - CRITICAL', {
+        error: emailError.message,
+        stack: emailError.stack,
+        statusCode: emailError.statusCode || emailError.status,
+        response: emailError.response?.body || emailError.response,
+        userId: submission.userId._id,
+        email: submission.userId.email,
+        submissionId: submission._id,
+        rejectionReason,
+        brevoTemplateRejected: process.env.BREVO_TEMPLATE_GIFTCARD_REJECTED,
+        brevoApiKeyConfigured: !!process.env.BREVO_API_KEY,
+        senderEmail: process.env.SENDER_EMAIL || process.env.SUPPORT_EMAIL
+      });
+      // Don't fail the request if email fails, but log extensively for debugging
+    }
+
+    // Send push notification
+    try {
+      await sendGiftcardRejectionNotification(
+        submission.userId._id,
+        submission.cardType,
+        rejectionReason,
+        submission._id.toString()
+      );
+      logger.info('Giftcard rejection notification sent', {
+        userId: submission.userId._id,
+        submissionId: submission._id
+      });
+    } catch (error) {
+      logger.error('Failed to send giftcard rejection push notification', {
+        userId: submission.userId._id,
+        submissionId: submission._id,
+        error: error.message
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Gift card submission rejected successfully.',
+      data: {
+        submissionId: submission._id,
+        status: submission.status,
+        rejectionReason
+      }
+    });
+
+  } catch (error) {
+    logger.error('Error rejecting gift card submission', { error: error.message, stack: error.stack });
+    return res.status(500).json({ success: false, error: 'Internal server error.' });
+  }
+});
+
+// POST /admin/giftcard/submissions/:id/review - Mark submission as under review
+router.post('/submissions/:id/review', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!validator.isMongoId(id)) {
+      return res.status(400).json({ success: false, error: 'Valid submission ID is required.' });
+    }
+
+    const submission = await GiftCard.findById(id);
+    if (!submission) {
+      return res.status(404).json({ success: false, error: 'Gift card submission not found.' });
+    }
+
+    if (submission.status !== 'PENDING') {
+      return res.status(400).json({
+        success: false,
+        error: `Cannot mark submission as reviewing with status: ${submission.status}`
+      });
+    }
+
+    submission.status = 'REVIEWING';
+    await submission.save();
+
+    logger.info('Gift card submission marked as reviewing', { submissionId: id });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Gift card submission marked as under review.',
+      data: { submissionId: submission._id, status: submission.status }
+    });
+
+  } catch (error) {
+    logger.error('Error marking gift card as reviewing', { error: error.message });
+    return res.status(500).json({ success: false, error: 'Internal server error.' });
   }
 });
 

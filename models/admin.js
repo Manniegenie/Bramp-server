@@ -40,11 +40,28 @@ const adminUserSchema = new mongoose.Schema({
   },
   
   // Security Features
-  loginAttempts: { 
-    type: Number, 
-    default: 0 
+  loginAttempts: {
+    type: Number,
+    default: 0
   },
-  lockUntil: { 
+  // 2FA Fields
+  twoFASecret: {
+    type: String,
+    default: null
+  },
+  is2FAEnabled: {
+    type: Boolean,
+    default: false
+  },
+  is2FAVerified: {
+    type: Boolean,
+    default: false
+  },
+  is2FASetupCompleted: {
+    type: Boolean,
+    default: false
+  },
+  lockUntil: {
     type: Date, 
     default: null 
   },
@@ -93,6 +110,7 @@ const adminUserSchema = new mongoose.Schema({
 });
 
 // Indexes
+adminUserSchema.index({ email: 1 }, { unique: true });
 adminUserSchema.index({ role: 1 });
 adminUserSchema.index({ isActive: 1 });
 adminUserSchema.index({ lastSuccessfulLogin: 1 });
