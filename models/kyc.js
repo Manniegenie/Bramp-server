@@ -102,10 +102,9 @@ const KYCSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// Indexes for performance
+// Indexes for performance (smileJobId already unique+sparse in schema)
 KYCSchema.index({ userId: 1, status: 1 });
 KYCSchema.index({ userId: 1, createdAt: -1 });
-KYCSchema.index({ smileJobId: 1 }, { unique: true, sparse: true });
 KYCSchema.index({ partnerJobId: 1, userId: 1 }, { unique: true, sparse: true });
 KYCSchema.index({ status: 1, createdAt: -1 });
 KYCSchema.index({ provider: 1, environment: 1 });

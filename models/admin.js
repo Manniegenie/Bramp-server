@@ -109,8 +109,7 @@ const adminUserSchema = new mongoose.Schema({
   timestamps: true 
 });
 
-// Indexes
-adminUserSchema.index({ email: 1 }, { unique: true });
+// Indexes (email already unique in schema)
 adminUserSchema.index({ role: 1 });
 adminUserSchema.index({ isActive: 1 });
 adminUserSchema.index({ lastSuccessfulLogin: 1 });

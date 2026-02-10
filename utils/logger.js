@@ -1,5 +1,7 @@
 const winston = require('winston');
 const DailyRotateFile = require('winston-daily-rotate-file');
+const path = require('path');
+const fs = require('fs');
 
 // Utility to safely stringify objects, handling circular references
 function safeStringify(obj, indent = 2) {
@@ -28,6 +30,52 @@ const logFormat = winston.format.printf(({ timestamp, level, message, ...metadat
   return logMessage;
 });
 
+const transports = [
+  new winston.transports.Console({
+    format: winston.format.combine(
+      winston.format.colorize(),
+      winston.format.simple()
+    )
+  })
+];
+
+// Add file transport only if logs dir is writable (avoids EACCES crash on server)
+function isLogsDirWritable() {
+  try {
+    const logsDir = path.join(process.cwd(), 'logs');
+    if (!fs.existsSync(logsDir)) {
+      fs.mkdirSync(logsDir, { recursive: true });
+    }
+    const testFile = path.join(logsDir, '.write-test');
+    fs.writeFileSync(testFile, '');
+    fs.unlinkSync(testFile);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+if (isLogsDirWritable()) {
+  try {
+    const logsDir = path.join(process.cwd(), 'logs');
+    const fileTransport = new DailyRotateFile({
+      filename: path.join(logsDir, 'app-%DATE%.log'),
+      datePattern: 'YYYY-MM-DD',
+      zippedArchive: true,
+      maxSize: '20m',
+      maxFiles: '14d'
+    });
+    fileTransport.on('error', () => { /* ignore write errors */ });
+    transports.push(fileTransport);
+  } catch (err) {
+    if (process.env.NODE_ENV !== 'test') {
+      console.warn('[logger] File logging disabled:', err.code || err.message);
+    }
+  }
+} else if (process.env.NODE_ENV !== 'test') {
+  console.warn('[logger] File logging disabled: logs directory not writable');
+}
+
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
@@ -35,23 +83,7 @@ const logger = winston.createLogger({
     winston.format.errors({ stack: true }),
     logFormat
   ),
-  transports: [
-    // Console logs for development
-    new winston.transports.Console({
-      format: winston.format.combine(
-        winston.format.colorize(),
-        winston.format.simple()
-      )
-    }),
-    // Daily rotating log file
-    new DailyRotateFile({
-      filename: 'logs/app-%DATE%.log',
-      datePattern: 'YYYY-MM-DD',
-      zippedArchive: true,
-      maxSize: '20m',
-      maxFiles: '14d'
-    })
-  ],
+  transports,
   exitOnError: false
 });
 
