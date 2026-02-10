@@ -420,7 +420,7 @@ const adminsigninRoutes = require("./adminRoutes/adminsign-in");
 const adminRegisterRoutes = require("./adminRoutes/registeradmin");
 const usermanagementRoutes = require("./adminRoutes/usermanagement");
 const analyticsRoutes = require("./adminRoutes/analytics");
-const TwoFARoutes = require("./adminRoutes/2FA");
+const AdminDisableTwoFARoutes = require("./adminRoutes/2FA");
 const Admin2FARoutes = require("./adminRoutes/Admin2FA");
 const adminBannerRoutes = require("./adminRoutes/banners");
 const blockuserRoutes = require("./adminRoutes/blockuser");
@@ -491,7 +491,7 @@ app.use("/fetching", authenticateAdminToken, requireModerator, fetchrefreshtoken
 app.use("/fetchuser", authenticateAdminToken, requireModerator, fetchuserRoutes);
 app.use("/usermanagement", authenticateAdminToken, requireModerator, usermanagementRoutes);
 app.use("/analytics", authenticateAdminToken, requireModerator, analyticsRoutes);
-app.use("/2FA-Disable", authenticateAdminToken, requireModerator, TwoFARoutes);
+app.use("/2FA-Disable", authenticateAdminToken, requireModerator, AdminDisableTwoFARoutes);
 app.use("/admin-kyc", authenticateAdminToken, requireModerator, AdminKYCRoutes);
 
 // Public data
