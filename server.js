@@ -13,6 +13,60 @@ const { updateCryptoPrices } = require("./services/cryptoPriceJob");
 const { markExpiredTransactions } = require("./services/transactionCleanup");
 const { logger: financialLogger } = require("./financial-analysis/utils/logger");
 
+// BULLETPROOF: Catch ALL errors from winston/file system that might crash the app
+process.on('uncaughtException', (error) => {
+  // If it's ANY file/logging error, ignore it and continue - NEVER crash from logging
+  const isLoggingError = (
+    (error.code === 'EACCES' || error.code === 'ENOENT' || error.code === 'EISDIR' || error.code === 'EPERM') &&
+    error.path && (
+      error.path.includes('logs') || 
+      error.path.includes('.log') ||
+      error.message && error.message.includes('log')
+    )
+  ) || (
+    error.message && (
+      error.message.includes('winston') ||
+      error.message.includes('DailyRotateFile') ||
+      error.message.includes('log file') ||
+      error.message.includes('permission denied') && error.message.includes('log')
+    )
+  );
+  
+  if (isLoggingError) {
+    // Silently ignore logging errors - app continues with console logging
+    return; // Don't crash the app
+  }
+  
+  // For other uncaught exceptions, log and exit
+  console.error('❌ Uncaught Exception:', error);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  // If it's ANY file/logging error, ignore it
+  const isLoggingError = reason && (
+    ((reason.code === 'EACCES' || reason.code === 'ENOENT' || reason.code === 'EPERM') &&
+     reason.path && (
+       reason.path.includes('logs') || 
+       reason.path.includes('.log')
+     )) ||
+    (reason.message && (
+      reason.message.includes('winston') ||
+      reason.message.includes('DailyRotateFile') ||
+      reason.message.includes('log file') ||
+      reason.message.includes('permission denied') && reason.message.includes('log')
+    ))
+  );
+  
+  if (isLoggingError) {
+    // Silently ignore logging errors - app continues
+    return; // Don't crash the app
+  }
+  
+  // For other unhandled rejections, log but don't exit (let the app continue)
+  console.error('⚠️  Unhandled Rejection:', reason);
+});
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -623,6 +677,16 @@ async function initializeFinancialAnalysisQueue() {
 const gracefulShutdown = async (signal) => {
   console.log(`${signal} received, shutting down gracefully...`);
 
+  // Close MongoDB connection
+  try {
+    if (mongoose.connection.readyState !== 0) {
+      await mongoose.connection.close();
+      console.log("✅ MongoDB connection closed");
+    }
+  } catch (error) {
+    console.error("Error closing MongoDB connection:", error);
+  }
+
   if (financialAnalysisWorker) {
     try {
       await financialAnalysisWorker.close();
@@ -643,13 +707,48 @@ const gracefulShutdown = async (signal) => {
   process.exit(0);
 };
 
+// MongoDB connection event handlers
+mongoose.connection.on('error', (err) => {
+  console.error('❌ MongoDB connection error:', err.message);
+});
+
+mongoose.connection.on('disconnected', () => {
+  console.warn('⚠️  MongoDB disconnected. Attempting to reconnect...');
+});
+
+mongoose.connection.on('reconnected', () => {
+  console.log('✅ MongoDB reconnected');
+});
+
+mongoose.connection.on('connected', () => {
+  console.log('✅ MongoDB connection established');
+});
+
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
 // Start
 const startServer = async () => {
   try {
-    await mongoose.connect(process.env.MONGODB_URI, {});
+    // Validate MONGODB_URI exists
+    if (!process.env.MONGODB_URI) {
+      console.error("❌ ERROR: MONGODB_URI environment variable is not set!");
+      console.error("Please set MONGODB_URI in your .env file");
+      process.exit(1);
+    }
+
+    // MongoDB connection options with timeout and retry
+    const mongooseOptions = {
+      serverSelectionTimeoutMS: 10000, // 10 seconds timeout
+      socketTimeoutMS: 45000,
+      connectTimeoutMS: 10000,
+      maxPoolSize: 10,
+      retryWrites: true,
+      retryReads: true,
+    };
+
+    console.log("🔄 Attempting to connect to MongoDB...");
+    await mongoose.connect(process.env.MONGODB_URI, mongooseOptions);
     console.log("✅ MongoDB Connected");
 
     // Initialize financial analysis queue (non-blocking, with fallback)
@@ -704,7 +803,28 @@ const startServer = async () => {
       }
     });
   } catch (e) {
-    console.error("Error during startup:", e);
+    console.error("❌ ERROR during startup:");
+    console.error("Error message:", e.message);
+    console.error("Error stack:", e.stack);
+    
+    // Provide helpful error messages for common issues
+    if (e.message && e.message.includes('MongoServerSelectionError')) {
+      console.error("\n💡 TROUBLESHOOTING:");
+      console.error("   - Check if MongoDB server is running");
+      console.error("   - Verify MONGODB_URI is correct in .env file");
+      console.error("   - Check network connectivity to MongoDB host");
+      console.error("   - Verify firewall rules allow connection");
+    } else if (e.message && e.message.includes('authentication failed')) {
+      console.error("\n💡 TROUBLESHOOTING:");
+      console.error("   - Check MongoDB username and password in MONGODB_URI");
+      console.error("   - Verify database user has proper permissions");
+    } else if (e.message && e.message.includes('ENOTFOUND') || e.message.includes('ECONNREFUSED')) {
+      console.error("\n💡 TROUBLESHOOTING:");
+      console.error("   - MongoDB host is unreachable");
+      console.error("   - Check MONGODB_URI hostname and port");
+      console.error("   - Verify MongoDB service is running");
+    }
+    
     process.exit(1);
   }
 };
