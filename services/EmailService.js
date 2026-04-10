@@ -401,19 +401,200 @@ async function sendNINVerificationEmail(to, name, options = {}) {
   }
 }
 
+// --- Additional functions ported from ZeusODX ---
+
+const COMPANY_NAME = process.env.COMPANY_NAME || 'Bramp';
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || 'support@chatbramp.com';
+const SENDER_EMAIL = process.env.SENDER_EMAIL || 'noreply@chatbramp.com';
+const SENDER_NAME = process.env.SENDER_NAME || COMPANY_NAME;
+const APP_WEB_BASE_URL = (process.env.APP_WEB_BASE_URL || process.env.FRONTEND_BASE_URL || '').replace(/\/$/, '');
+const APP_DEEP_LINK = (process.env.APP_DEEP_LINK || 'bramp://').replace(/\/$/, '');
+
+function safeParseTemplateId(val) {
+  const n = parseInt(val);
+  return (!isNaN(n) && n > 0) ? n : null;
+}
+
+function formatDate(date) {
+  return new Date(date).toLocaleString('en-US', {
+    year: 'numeric', month: 'long', day: '2-digit',
+    hour: '2-digit', minute: '2-digit'
+  });
+}
+
+function getKycAdminEmails() {
+  const raw = process.env.KYC_ADMIN_EMAILS || '';
+  return raw.split(',').map(e => e.trim()).filter(Boolean).map(entry => {
+    const [email, name] = entry.split(':').map(s => s.trim());
+    return { email, name: name || email };
+  });
+}
+
+function getGiftcardAdminEmails() {
+  const raw = process.env.GIFTCARD_ADMIN_EMAILS || '';
+  return raw.split(',').map(e => e.trim()).filter(Boolean).map(entry => {
+    const [email, name] = entry.split(':').map(s => s.trim());
+    return { email, name: name || email };
+  });
+}
+
+/**
+ * Send email verification OTP
+ */
+async function sendEmailVerificationOTP(to, name, otp, expiryMinutes = 10, extras = {}) {
+  try {
+    const templateId = safeParseTemplateId(process.env.BREVO_TEMPLATE_EMAIL_VERIFICATION);
+    if (!templateId) throw new Error('Email verification template ID not configured (BREVO_TEMPLATE_EMAIL_VERIFICATION)');
+
+    const qs = `email=${encodeURIComponent(to)}`;
+    const verifyUrl = extras.verifyUrl || `${APP_WEB_BASE_URL}/kyc/verify-email?${qs}`;
+    const appDeepLink = extras.appDeepLink || `${APP_DEEP_LINK}/kyc/verify-email?${qs}`;
+    const expiryTime = new Date(Date.now() + expiryMinutes * 60 * 1000);
+
+    const params = {
+      username: String(name || 'User'),
+      otp: String(otp),
+      expiryMinutes: String(expiryMinutes),
+      expiryTime: formatDate(expiryTime),
+      verifyUrl: String(verifyUrl),
+      appDeepLink: String(appDeepLink),
+      ctaText: String(extras.ctaText || 'Verify email'),
+      companyName: String(extras.companyName || COMPANY_NAME),
+      supportEmail: String(extras.supportEmail || SUPPORT_EMAIL)
+    };
+
+    return await sendEmail({ to, name, templateId, params });
+  } catch (error) {
+    console.error('Failed to send email verification OTP:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * Send KYC provisional email to user
+ */
+async function sendKycProvisionalEmail(to, name, idType, provisionalReason) {
+  try {
+    const templateId = safeParseTemplateId(process.env.BREVO_TEMPLATE_KYC_PROVISIONAL || process.env.BREVO_TEMPLATE_KYC);
+    if (!templateId) throw new Error('KYC provisional email template ID not configured');
+
+    return await sendEmail({
+      to, name, templateId,
+      params: {
+        username: String(name || 'User'),
+        idType: String(idType || 'document'),
+        provisionalReason: String(provisionalReason || 'Your verification is currently under review.'),
+        date: formatDate(new Date()),
+        kycUrl: String(`${APP_WEB_BASE_URL}/kyc`),
+        appDeepLink: String(`${APP_DEEP_LINK}/kyc`),
+        companyName: String(COMPANY_NAME),
+        supportEmail: String(SUPPORT_EMAIL)
+      }
+    });
+  } catch (error) {
+    console.error('Failed to send KYC provisional email:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * Notify KYC admins of a provisional/manual-review submission
+ */
+async function sendKycProvisionalAdminNotify({ username, userId, idType, provisionalReason, kycId }) {
+  const templateId = safeParseTemplateId(process.env.BREVO_TEMPLATE_KYC_PROVISIONAL_ADMIN);
+  if (!templateId) throw new Error('KYC provisional admin notify template ID not configured');
+
+  const adminEmails = getKycAdminEmails();
+  if (!adminEmails.length) {
+    console.warn('No KYC admin emails configured (KYC_ADMIN_EMAILS)');
+    return { success: false };
+  }
+
+  const params = {
+    username: String(username || 'Unknown User'),
+    userId: String(userId || ''),
+    idType: String(idType || 'document'),
+    provisionalReason: String(provisionalReason || 'No reason provided'),
+    kycId: String(kycId || ''),
+    reviewUrl: String(kycId ? `${APP_WEB_BASE_URL}/admin/kyc/${kycId}` : `${APP_WEB_BASE_URL}/admin/kyc`),
+    date: formatDate(new Date()),
+    companyName: String(COMPANY_NAME)
+  };
+
+  const results = await Promise.allSettled(
+    adminEmails.map(admin => sendEmail({ to: admin.email, name: admin.name, templateId, params }))
+  );
+
+  const failed = results.filter(r => r.status === 'rejected');
+  if (failed.length) failed.forEach(r => console.error('KYC provisional admin notify failed:', r.reason?.message));
+  return { success: failed.length < adminEmails.length };
+}
+
+/**
+ * Notify giftcard admins of a Tawk visitor message
+ */
+async function sendTawkMessageNotify({ visitorName, visitorEmail, message, chatId, event }) {
+  const templateId = safeParseTemplateId(process.env.BREVO_TEMPLATE_TAWK_MESSAGE);
+
+  const adminEmails = getGiftcardAdminEmails();
+  if (!adminEmails.length) {
+    console.warn('No giftcard admin emails configured (GIFTCARD_ADMIN_EMAILS)');
+    return { success: false };
+  }
+
+  const params = {
+    visitorName: String(visitorName || 'Unknown Visitor'),
+    visitorEmail: String(visitorEmail || '—'),
+    message: String(message || ''),
+    chatId: String(chatId || ''),
+    event: String(event || 'chat:message'),
+    date: formatDate(new Date()),
+    companyName: String(COMPANY_NAME)
+  };
+
+  const results = await Promise.allSettled(
+    adminEmails.map(admin => {
+      if (templateId) {
+        return sendEmail({ to: admin.email, name: admin.name, templateId, params });
+      }
+      // Fallback: plain-text email via Brevo when no template is configured
+      const email = new brevo.SendSmtpEmail();
+      email.to = [{ email: admin.email, name: admin.name }];
+      email.sender = { email: SENDER_EMAIL, name: SENDER_NAME };
+      email.subject = `💬 Tawk Message from ${params.visitorName}`;
+      email.htmlContent = `
+        <p><strong>Visitor:</strong> ${params.visitorName} (${params.visitorEmail})</p>
+        <p><strong>Message:</strong> ${params.message}</p>
+        <p><strong>Chat ID:</strong> ${params.chatId}</p>
+        <p><strong>Event:</strong> ${params.event}</p>
+        <p><strong>Time:</strong> ${params.date}</p>
+      `;
+      return apiInstance.sendTransacEmail(email);
+    })
+  );
+
+  const failed = results.filter(r => r.status === 'rejected');
+  if (failed.length) failed.forEach(r => console.error('Tawk message notify failed:', r.reason?.message));
+  return { success: failed.length < adminEmails.length };
+}
+
 module.exports = {
   sendDepositEmail,
   sendWithdrawalEmail,
   sendUtilityEmail,
   sendGiftcardEmail,
   sendKycEmail,
+  sendKycProvisionalEmail,
+  sendKycProvisionalAdminNotify,
   sendLoginEmail,
   sendSignupEmail,
   sendOtpEmail,
+  sendEmailVerificationOTP,
   sendChatbotSellEmail,
   sendChatbotDepositEmail,
   sendFinancialAnalysisCompleteEmail,
   sendAdminWelcomeEmail,
   sendNINVerificationEmail,
+  sendTawkMessageNotify,
   SendGiftcardMail
 };

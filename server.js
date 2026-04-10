@@ -239,7 +239,7 @@ app.use((req, res, next) => {
 });
 
 // Raw body capture middleware for webhook signature validation
-app.use(['/Chatbotwebhook', '/webhook', '/billwebhook', '/ngnbwebhook', '/whatsapp'], (req, res, next) => {
+app.use(['/Chatbotwebhook', '/webhook', '/billwebhook', '/ngnbwebhook', '/whatsapp', '/tawk'], (req, res, next) => {
   let data = '';
   req.setEncoding('utf8');
   req.on('data', chunk => {
@@ -385,6 +385,69 @@ const requireModerator = (req, res, next) => {
   next();
 };
 
+// Permission-based middleware
+const requirePermission = (permission) => {
+  return async (req, res, next) => {
+    try {
+      const AdminUser = require('./models/admin');
+      const adminId = req.admin.id || req.admin._id;
+
+      const adminUser = await AdminUser.findById(adminId);
+
+      if (!adminUser) {
+        return res.status(403).json({ success: false, error: "Admin user not found." });
+      }
+
+      if (adminUser.role === 'super_admin') {
+        return next();
+      }
+
+      const roleBasedPermissions = {
+        admin: {
+          canManagePushNotifications: true,
+          canManageUsers: true,
+          canManageBanners: true,
+          canManageGiftcards: true,
+          canManageKYC: true,
+        },
+        moderator: {
+          canViewTransactions: true,
+          canAccessReports: true,
+        }
+      };
+
+      if (adminUser.role === 'admin' && roleBasedPermissions.admin[permission]) {
+        return next();
+      }
+      if (adminUser.role === 'moderator' && roleBasedPermissions.moderator[permission]) {
+        return next();
+      }
+
+      if (req.admin.permissions && req.admin.permissions[permission] === true) {
+        return next();
+      }
+
+      if (adminUser.hasPermission && adminUser.hasPermission(permission)) {
+        return next();
+      }
+
+      return res.status(403).json({ success: false, error: `Permission denied: ${permission} required.` });
+
+    } catch (error) {
+      console.error('Error checking permission:', error);
+      return res.status(500).json({ success: false, error: "Internal server error checking permissions." });
+    }
+  };
+};
+
+const requirePushNotifications = requirePermission('canManagePushNotifications');
+const requireUserManagement = requirePermission('canManageUsers');
+const requireKYCReview = requirePermission('canManageKYC');
+const requireGiftcards = requirePermission('canManageGiftcards');
+const requireBanners = requirePermission('canManageBanners');
+const requireRemoveFunding = requirePermission('canRemoveFunding');
+const requireManageBalances = requirePermission('canManageBalances');
+
 // Routes
 const avatarsRoutes = require("./routes/avatars");
 const logoutRoutes = require("./routes/logout");
@@ -474,6 +537,10 @@ const adminsigninRoutes = require("./adminRoutes/adminsign-in");
 const adminRegisterRoutes = require("./adminRoutes/registeradmin");
 const usermanagementRoutes = require("./adminRoutes/usermanagement");
 const analyticsRoutes = require("./adminRoutes/analytics");
+const marketingStatsRoutes = require("./adminRoutes/marketingStats");
+const transactionDetailsRoutes = require("./adminRoutes/transactionDetails");
+const permissionsRoutes = require("./adminRoutes/permissions");
+const adminBlogRoutes = require("./adminRoutes/blog");
 const AdminDisableTwoFARoutes = require("./adminRoutes/2FA");
 const Admin2FARoutes = require("./adminRoutes/Admin2FA");
 const adminBannerRoutes = require("./adminRoutes/banners");
@@ -489,6 +556,20 @@ const financialAnalysisWebhookRoutes = require("./routes/financialAnalysisWebhoo
 const liskWalletRoutes = require("./routes/liskWallet");
 const newsRoutes = require("./routes/news");
 const notificationsRoutes = require("./routes/notifications");
+const verificationProgressRoutes = require("./routes/VerificationProgress");
+const blogRoutes = require("./routes/blog");
+const tokenPricesRoutes = require("./routes/tokenPrices");
+const bannersRoutes = require("./routes/Banners");
+const collectionsRoutes = require("./routes/collections");
+const giftcardcountryRoutes = require("./routes/giftcardcountry");
+const fetchnetworkRoutes = require("./routes/fetchnetwork");
+const tawkRoutes = require("./routes/tawk");
+const debugRoutes = require("./routes/debug");
+const resetPinRoutes = require("./routes/ResetPin");
+const emailVerifyRoutes = require("./routes/EmailVerify");
+const kycRoutes = require("./routes/KYC");
+const enhancedKycRoutes = require("./routes/EnhancedKYC");
+const ninRoutes = require("./routes/NIN");
 
 // Public routes (with auth rate limiting)
 app.use("/signin", signinRoutes);
@@ -510,11 +591,33 @@ app.use("/whatsapp", webhookLimiter, whatsappAIRoutes);
 app.use("/chatbot", ChatbotRoutes); // Removed rate limiter - user-facing chat endpoint
 app.use("/Chatbotwebhook", webhookLimiter, ChatbotwebhookRoutes);
 
+// MODERATOR LEVEL ROUTES (all admin roles can access)
+// IMPORTANT: More specific /admin/* routes must come BEFORE /admin to avoid conflicts
+app.use("/admin/transaction", authenticateAdminToken, requireModerator, transactionDetailsRoutes);
+app.use("/admin/permissions", authenticateAdminToken, permissionsRoutes);
+app.use("/admin/blog", authenticateAdminToken, requireAdmin, adminBlogRoutes);
+app.use("/admin/banners", authenticateAdminToken, requireAdmin, requireBanners, adminBannerRoutes);
+app.use("/admin/notification", authenticateAdminToken, requireAdmin, requirePushNotifications, Pushnotification);
+app.use("/admin/scheduled-notifications", authenticateAdminToken, requireAdmin, requirePushNotifications, scheduledNotificationRoutes);
+app.use("/admin/scheduled-giftcard-notifications", authenticateAdminToken, requireAdmin, requirePushNotifications, scheduledGiftCardNotificationRoutes);
+app.use("/admin/2FA", authenticateAdminToken, requireModerator, Admin2FARoutes);
+app.use("/fetch-wallet", authenticateAdminToken, requireModerator, fetchwalletRoutes);
+app.use("/fetch", authenticateAdminToken, requireModerator, fetchtransactionRoutes);
+app.use("/pending", authenticateAdminToken, requireModerator, clearpendingRoutes);
+app.use("/fetching", authenticateAdminToken, requireModerator, fetchrefreshtoken);
+app.use("/fetchuser", authenticateAdminToken, requireModerator, fetchuserRoutes);
+app.use("/usermanagement", authenticateAdminToken, requireModerator, requireUserManagement, usermanagementRoutes);
+app.use("/analytics", authenticateAdminToken, requireModerator, marketingStatsRoutes); // marketing-stats: moderators+
+app.use("/analytics", authenticateAdminToken, requireModerator, analyticsRoutes);
+app.use("/2FA-Disable", authenticateAdminToken, requireModerator, AdminDisableTwoFARoutes);
+app.use("/admin-kyc", authenticateAdminToken, requireModerator, AdminKYCRoutes);
+
 // SUPER ADMIN ONLY ROUTES (highest permissions)
 app.use("/deleteuser", authenticateAdminToken, requireSuperAdmin, deleteuserRoutes);
 app.use("/fund", authenticateAdminToken, requireSuperAdmin, FunduserRoutes);
 app.use("/unlockaccount", authenticateAdminToken, requireSuperAdmin, unlockaccountRoutes);
 app.use("/delete-pin", authenticateAdminToken, requireSuperAdmin, deletepinRoutes);
+// IMPORTANT: /admin must be LAST to avoid catching /admin/* routes above
 app.use("/admin", adminRegisterRoutes);
 
 // ADMIN LEVEL ROUTES (admin + super_admin)
@@ -526,27 +629,11 @@ app.use("/updateuseraddress", authenticateAdminToken, requireAdmin, updateuserad
 app.use("/bramp-wallets", generatebrampwalletsRoutes);
 app.use("/migration", authenticateAdminToken, requireAdmin, migrationRoutes);
 app.use("/marker", authenticateAdminToken, requireAdmin, pricemarkdownRoutes);
-app.use("/admingiftcard", authenticateAdminToken, requireAdmin, admingiftcardRoutes);
-app.use("/admin/banners", authenticateAdminToken, requireAdmin, adminBannerRoutes);
+app.use("/admingiftcard", authenticateAdminToken, requireAdmin, requireGiftcards, admingiftcardRoutes);
 app.use("/notification", Pushnotification);
-app.use("/admin/notification", authenticateAdminToken, requireAdmin, Pushnotification);
-app.use("/admin/scheduled-notifications", authenticateAdminToken, requireAdmin, scheduledNotificationRoutes);
-app.use("/admin/scheduled-giftcard-notifications", authenticateAdminToken, requireAdmin, scheduledGiftCardNotificationRoutes);
 app.use("/block-user", authenticateAdminToken, requireAdmin, blockuserRoutes);
 app.use("/nairamarkup", authenticateAdminToken, requireAdmin, nairamarkupRoutes);
 app.use("/swapmarkdown", authenticateAdminToken, requireAdmin, swapmarkdownRoutes);
-app.use("/admin/2FA", authenticateAdminToken, requireModerator, Admin2FARoutes);
-
-// MODERATOR LEVEL ROUTES (all admin roles can access)
-app.use("/fetch-wallet", authenticateAdminToken, requireModerator, fetchwalletRoutes);
-app.use("/fetch", authenticateAdminToken, requireModerator, fetchtransactionRoutes);
-app.use("/pending", authenticateAdminToken, requireModerator, clearpendingRoutes);
-app.use("/fetching", authenticateAdminToken, requireModerator, fetchrefreshtoken);
-app.use("/fetchuser", authenticateAdminToken, requireModerator, fetchuserRoutes);
-app.use("/usermanagement", authenticateAdminToken, requireModerator, usermanagementRoutes);
-app.use("/analytics", authenticateAdminToken, requireModerator, analyticsRoutes);
-app.use("/2FA-Disable", authenticateAdminToken, requireModerator, AdminDisableTwoFARoutes);
-app.use("/admin-kyc", authenticateAdminToken, requireModerator, AdminKYCRoutes);
 
 // Public data
 app.use("/naira-price", nairaPriceRouter);
@@ -606,6 +693,30 @@ app.use("/scan", authenticateToken, ScanRoutes);
 app.use("/voice", authenticateToken, VoiceRoutes);
 app.use("/lisk", authenticateToken, liskWalletRoutes);
 app.use("/notifications", authenticateToken, notificationsRoutes);
+// Verification progress
+app.use("/verification-progress", authenticateToken, verificationProgressRoutes);
+// Collections (Glyde payment)
+app.use("/collections", authenticateToken, collectionsRoutes);
+// Email OTP verification
+app.use("/email-verify", authenticateToken, emailVerifyRoutes);
+// KYC routes
+app.use("/kyc", authenticateToken, kycRoutes);
+app.use("/enhanced-kyc", authenticateToken, enhancedKycRoutes);
+app.use("/nin", authenticateToken, ninRoutes);
+// Reset PIN (3-step: initiate OTP → verify OTP → change pin with 2FA)
+app.use("/reset-pin", authenticateToken, resetPinRoutes);
+// Public data routes
+app.use("/blog", blogRoutes);
+app.use("/token-prices", tokenPricesRoutes);
+app.use("/banners", bannersRoutes);
+app.use("/giftcardcountry", giftcardcountryRoutes);
+app.use("/networks", fetchnetworkRoutes);
+// Webhooks
+app.use("/tawk", tawkRoutes);
+// Debug (restrict to non-production)
+if (process.env.NODE_ENV !== 'production') {
+  app.use("/debug", debugRoutes);
+}
 // Financial analysis routes (health is public, process requires auth)
 // Webhook endpoint is public (validated by signature), other endpoints require auth
 app.use("/financial-analysis", financialAnalysisRoutes);
