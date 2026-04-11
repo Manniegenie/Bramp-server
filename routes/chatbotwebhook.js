@@ -200,7 +200,7 @@ router.post('/transaction', webhookAuth, async (req, res) => {
       return res.status(200).json({ success: true, message: 'Already processed' });
     }
 
-    const FINAL_OK = new Set(['CONFIRMED', 'SUCCESS', 'COMPLETED']);
+    const FINAL_OK = new Set(['CONFIRMED', 'SUCCESS', 'COMPLETED', 'SUCCESSFUL']);
     if (!FINAL_OK.has(status)) {
       return res.status(200).json({ success: true, queued: true });
     }

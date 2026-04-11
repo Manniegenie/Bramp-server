@@ -392,7 +392,9 @@ async function getHourlyPriceChanges(tokens) {
 
         changes[upperToken] = {
           currentPrice: latestPrice.price,
-          hourlyChange: parseFloat(hourlyChange.toFixed(2)), // Calculated percentage
+          percentageChange: parseFloat(hourlyChange.toFixed(2)),
+          priceChange: historicalPrice ? parseFloat((latestPrice.price - historicalPrice).toFixed(8)) : 0,
+          dataAvailable: !!(historicalPrice && historicalPrice > 0),
           timestamp: latestPrice.timestamp
         };
 
@@ -406,7 +408,7 @@ async function getHourlyPriceChanges(tokens) {
     logger.info(`Retrieved hourly changes for ${Object.keys(changes).length} tokens`, {
       tokens: Object.keys(changes),
       changes: Object.fromEntries(
-        Object.entries(changes).map(([token, data]) => [token, `${data.hourlyChange}%`])
+        Object.entries(changes).map(([token, data]) => [token, `${data.percentageChange}%`])
       )
     });
 
