@@ -26,7 +26,7 @@ const { swapCryptoToNGNX } = require('../services/ObiexSwap');
 const PROVIDER_CURRENCY_MAP = { MATIC: 'POL' };
 
 async function triggerProviderNGNXConversion(token, amount, swapRef, log = logger) {
-  const SKIP_TOKENS = new Set(['NGNB', 'USDT', 'USDC']); // stablecoins — no swap needed
+  const SKIP_TOKENS = new Set(['NGNB']); // already naira internally — no provider swap needed
   if (SKIP_TOKENS.has(token)) return;
 
   const providerCode = PROVIDER_CURRENCY_MAP[token] || token;
