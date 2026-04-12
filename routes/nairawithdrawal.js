@@ -2,43 +2,27 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
+const mongoose = require('mongoose');
 
-const { validateUserBalance } = require('../services/balance');
-const { updateUserBalance } = require('../services/portfolio');
 const { debitNaira } = require('../services/nairaWithdrawal');
 const { validateTwoFactorAuth } = require('../services/twofactorAuth');
+const { sendWithdrawalEmail } = require('../services/EmailService');
+const { sendWithdrawalNotification } = require('../services/notificationService');
 
 const User = require('../models/user');
 const Transaction = require('../models/transaction');
 const logger = require('../utils/logger');
 
-// Fee constants (mirror ZeusODX NGNZ withdrawal)
-const NGNB_WITHDRAWAL_FEE_OPERATIONAL = 30;
-const NGNB_WITHDRAWAL_FEE_RECORDED = 100;
+// Fee constants
+const NGNB_WITHDRAWAL_FEE_OPERATIONAL = 30;  // deducted from payout to provider
+const NGNB_WITHDRAWAL_FEE_RECORDED    = 100; // shown to user / stored in transaction
 
-const NIGERIAN_BANK_CODES = {
-  '044': 'Access Bank',
-  '014': 'Afribank Nigeria Plc',
-  '023': 'Citibank Nigeria Limited',
-  '050': 'Ecobank Nigeria Plc',
-  '040': 'Equitorial Trust Bank',
-  '011': 'First Bank of Nigeria',
-  '214': 'First City Monument Bank',
-  '058': 'Guaranty Trust Bank',
-  '030': 'Heritage Bank',
-  '301': 'Jaiz Bank',
-  '082': 'Keystone Bank',
-  '014': 'MainStreet Bank',
-  '076': 'Polaris Bank',
-  '221': 'Stanbic IBTC Bank',
-  '068': 'Standard Chartered Bank',
-  '232': 'Sterling Bank',
-  '032': 'Union Bank of Nigeria',
-  '033': 'United Bank For Africa',
-  '215': 'Unity Bank',
-  '035': 'Wema Bank',
-  '057': 'Zenith Bank'
-};
+// In-process lock: prevents double-submit from the same user within a single server instance.
+// The atomic MongoDB findOneAndUpdate ($gte balance check) is the true race condition guard
+// at the database level — this is belt-and-suspenders for same-process concurrent requests.
+const processingUsers = new Set();
+
+// --- HELPERS ---
 
 function maskAccountNumber(accountNumber) {
   if (!accountNumber) return '';
@@ -50,53 +34,55 @@ function isValidAccountNumber(accountNumber) {
   return /^\d{10}$/.test(accountNumber);
 }
 
-function isValidBankCode(bankCode) {
-  return NIGERIAN_BANK_CODES.hasOwnProperty(bankCode);
-}
-
 async function comparePasswordPin(candidate, hashed) {
   if (!candidate || !hashed) return false;
   return await bcrypt.compare(candidate, hashed);
+}
+
+function generateWithdrawalReference() {
+  return `NGNB_WD_${Date.now()}_${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
 }
 
 function validateWithdrawalRequest(body) {
   const errors = [];
   const sanitized = {};
 
-  if (!body.amount) {
-    errors.push('Amount is required');
+  const numericAmount = Number(body.amount);
+  if (!body.amount || isNaN(numericAmount) || numericAmount <= 0) {
+    errors.push('Amount must be a positive number');
+  } else if (numericAmount < NGNB_WITHDRAWAL_FEE_OPERATIONAL + 1) {
+    errors.push(`Minimum withdrawal amount is ₦${NGNB_WITHDRAWAL_FEE_OPERATIONAL + 1}`);
+  } else if (numericAmount > 10_000_000) {
+    errors.push('Maximum withdrawal amount is ₦10,000,000');
   } else {
-    const numericAmount = Number(body.amount);
-    if (isNaN(numericAmount) || numericAmount <= 0) {
-      errors.push('Amount must be a positive number');
-    } else if (numericAmount < (NGNB_WITHDRAWAL_FEE_OPERATIONAL + 1)) {
-      errors.push(`Minimum withdrawal amount is ₦${NGNB_WITHDRAWAL_FEE_OPERATIONAL + 1} NGNB`);
-    } else if (numericAmount > 10000000) {
-      errors.push('Maximum withdrawal amount is 10,000,000 NGNB');
-    } else {
-      sanitized.amount = numericAmount;
-    }
+    sanitized.amount = numericAmount;
   }
 
   if (!body.bank_code) {
     errors.push('Bank code is required');
   } else {
     sanitized.bank_code = String(body.bank_code).trim();
-    if (!isValidBankCode(sanitized.bank_code)) errors.push('Invalid bank code provided');
   }
 
   if (!body.account_number) {
     errors.push('Account number is required');
   } else {
     sanitized.account_number = String(body.account_number).trim();
-    if (!isValidAccountNumber(sanitized.account_number)) errors.push('Account number must be exactly 10 digits');
+    if (!isValidAccountNumber(sanitized.account_number)) {
+      errors.push('Account number must be exactly 10 digits');
+    }
   }
 
-  // Required for Obiex
   if (!body.account_name || !String(body.account_name).trim()) {
     errors.push('Account name is required');
   } else {
     sanitized.account_name = String(body.account_name).trim().substring(0, 100);
+  }
+
+  if (!body.bank_name || !String(body.bank_name).trim()) {
+    errors.push('Bank name is required');
+  } else {
+    sanitized.bank_name = String(body.bank_name).trim().substring(0, 100);
   }
 
   if (body.narration) sanitized.narration = String(body.narration).trim().substring(0, 100);
@@ -111,351 +97,298 @@ function validateWithdrawalRequest(body) {
     errors.push('Password PIN is required');
   } else {
     sanitized.passwordpin = String(body.passwordpin).trim();
-    if (!/^\d{6}$/.test(sanitized.passwordpin)) errors.push('Password PIN must be exactly 6 numbers');
+    if (!/^\d{6}$/.test(sanitized.passwordpin)) errors.push('Password PIN must be exactly 6 digits');
   }
 
   return { isValid: errors.length === 0, errors, sanitized };
 }
 
-function generateWithdrawalReference() {
-  return `NGNB_WD_${Date.now()}_${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
-}
+// --- STAGE 1: Atomic balance deduction + transaction record (MongoDB session) ---
 
-/**
- * Stage 1: Deduct balance and create transaction (no MongoDB session - works on standalone)
- */
 async function executeNGNBWithdrawal(userId, withdrawalData, reference) {
-  const { amount, bank_code, account_number, account_name, narration } = withdrawalData;
-  const totalDeducted = amount;
-  const amountToObiex = amount - NGNB_WITHDRAWAL_FEE_OPERATIONAL;
-  const feeAmountRecorded = NGNB_WITHDRAWAL_FEE_RECORDED;
-  const bankName = NIGERIAN_BANK_CODES[bank_code] || 'Unknown';
+  const { amount, bank_code, bank_name, account_number, account_name, narration } = withdrawalData;
+  const amountToProvider = amount - NGNB_WITHDRAWAL_FEE_OPERATIONAL;
+  const feeRecorded      = NGNB_WITHDRAWAL_FEE_RECORDED;
 
-  const updatedUser = await User.findOneAndUpdate(
-    { _id: userId, ngnbBalance: { $gte: totalDeducted } },
-    { $inc: { ngnbBalance: -totalDeducted }, $set: { lastBalanceUpdate: new Date() } },
-    { new: true, runValidators: true }
-  );
-
-  if (!updatedUser) throw new Error('Insufficient NGNB balance');
-
-  const withdrawalTransaction = new Transaction({
-    userId,
-    type: 'WITHDRAWAL',
-    currency: 'NGNB',
-    amount: -totalDeducted,
-    status: 'PENDING',
-    source: 'BANK',
-    reference,
-    obiexTransactionId: reference,
-    narration: narration || `NGNB withdrawal to ${bankName}`,
-    fee: feeAmountRecorded,
-    metadata: {
-      provider: 'OBIEX',
-      bank_code,
-      bank_name,
-      account_number,
-      account_name,
-      amountSentToBank: amountToObiex,
-      withdrawalFee: feeAmountRecorded,
-      requestedAmount: totalDeducted,
-      initiated_at: new Date()
-    }
-  });
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
   try {
-    await withdrawalTransaction.save();
-  } catch (txErr) {
-    await updateUserBalance(userId, 'NGNB', totalDeducted);
-    logger.error('Failed to create withdrawal transaction record, refunded user', { userId, reference, error: txErr.message });
-    throw txErr;
-  }
+    const updatedUser = await User.findOneAndUpdate(
+      { _id: userId, ngnbBalance: { $gte: amount } },
+      { $inc: { ngnbBalance: -amount }, $set: { lastBalanceUpdate: new Date() } },
+      { new: true, runValidators: true, session }
+    );
 
-  return {
-    user: updatedUser,
-    transaction: withdrawalTransaction,
-    reference,
-    amountToObiex,
-    feeAmountRecorded,
-    bankName
-  };
+    if (!updatedUser) throw new Error('INSUFFICIENT_BALANCE');
+
+    const tx = new Transaction({
+      userId,
+      type: 'WITHDRAWAL',
+      currency: 'NGNB',
+      amount: -amount,
+      status: 'PENDING',
+      source: 'BANK',
+      reference,
+      obiexTransactionId: reference,
+      narration: narration || `NGNB withdrawal to ${bank_name || account_name}`,
+      fee: feeRecorded,
+      metadata: {
+        bank_code,
+        bank_name,
+        account_number,
+        account_name,
+        amountSentToBank: amountToProvider,
+        withdrawalFee: feeRecorded,
+        requestedAmount: amount,
+        initiated_at: new Date()
+      }
+    });
+
+    await tx.save({ session });
+    await session.commitTransaction();
+    session.endSession();
+
+    return { user: updatedUser, transaction: tx, amountToProvider, feeRecorded };
+  } catch (err) {
+    await session.abortTransaction();
+    session.endSession();
+    throw err;
+  }
 }
 
-/**
- * Stage 2: Call Obiex (mirror ZeusODX)
- */
-async function processObiexWithdrawal(userId, withdrawalData, amountToObiex, reference, transactionId) {
-  try {
-    const { bank_code, account_number, account_name, narration } = withdrawalData;
-    const bankName = NIGERIAN_BANK_CODES[bank_code] || 'Unknown';
+// --- STAGE 2: Provider payout (non-atomic, status driven by webhook) ---
 
-    const obiexPayload = {
+async function processProviderWithdrawal(userId, withdrawalData, amountToProvider, reference, transactionId) {
+  try {
+    const { bank_code, bank_name, account_number, account_name, narration } = withdrawalData;
+
+    const payload = {
       destination: {
         accountNumber: account_number,
-        accountName: account_name,
-        bankName,
-        bankCode: bank_code
+        accountName:   account_name,
+        bankName:      bank_name,
+        bankCode:      bank_code,
       },
-      amount: amountToObiex,
+      amount:   amountToProvider,
       currency: 'NGNX',
       narration: narration || `NGNB withdrawal - ${reference}`
     };
 
-    const obiexResult = await debitNaira(obiexPayload, {
-      userId: userId.toString(),
-      idempotencyKey: `ngnb-wd-${reference}`
-    });
+    const result = await debitNaira(payload, { userId: userId.toString(), idempotencyKey: `ngnb-wd-${reference}` });
 
-    if (obiexResult.success) {
+    if (result.success) {
+      // Stay PENDING — final status comes via Obiex naira webhook
       await Transaction.findByIdAndUpdate(transactionId, {
         $set: {
-          status: 'SUCCESSFUL',
-          completedAt: new Date(),
-          'metadata.obiexId': obiexResult.data?.id,
-          'metadata.obiexReference': obiexResult.data?.reference
+          status: 'PENDING',
+          'metadata.providerId':        result.data?.id || null,
+          'metadata.providerReference': result.data?.reference || null,
         }
       });
-      return { success: true, data: obiexResult.data };
+      return { success: true, data: result.data };
     } else {
+      // Provider rejected synchronously — mark failed and refund
       await Transaction.findByIdAndUpdate(transactionId, {
         $set: {
           status: 'FAILED',
           failedAt: new Date(),
-          failureReason: obiexResult.message,
-          'metadata.failureReason': obiexResult.message
+          'metadata.failureReason': 'Provider rejected withdrawal',
         }
       });
-      return { success: false, error: obiexResult.message };
+      // Refund balance
+      await User.findByIdAndUpdate(userId, {
+        $inc: { ngnbBalance: withdrawalData.amount },
+        $set: { lastBalanceUpdate: new Date() }
+      }, { runValidators: true });
+
+      logger.info('NGNB withdrawal refunded after provider rejection', { userId, reference, amount: withdrawalData.amount });
+      return { success: false, error: 'Withdrawal was rejected. Your balance has been refunded.' };
     }
-  } catch (error) {
-    return { success: false, error: error.message };
+  } catch (err) {
+    logger.error('Provider withdrawal call failed', { userId, reference, error: err.message });
+    return { success: false, error: 'Withdrawal processing failed. Please contact support.' };
   }
 }
 
+// --- ROUTES ---
+
 /**
- * @route   POST /withdrawal/ngnb
- * @desc    Withdraw NGNB to Nigerian bank via Obiex (mirror ZeusODX NGNZ flow)
- * @access  Authenticated
+ * POST /withdrawal/ngnb
+ * Withdraw NGNB balance to a Nigerian bank account.
  */
 router.post('/withdrawal/ngnb', async (req, res) => {
-  const userId = req.user.id;
+  const userId = req.user?.id;
+  if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+  // In-process concurrency guard
+  if (processingUsers.has(userId)) {
+    return res.status(409).json({ success: false, message: 'A withdrawal is already being processed. Please wait.' });
+  }
 
   try {
     logger.info('NGNB withdrawal request', {
       userId,
-      account_number: req.body.account_number ? req.body.account_number.substring(0, 4) + '****' : undefined,
-      passwordpin: '[REDACTED]'
+      account_number: req.body.account_number ? maskAccountNumber(req.body.account_number) : undefined,
     });
 
+    // 1. Validate input
     const validation = validateWithdrawalRequest(req.body);
     if (!validation.isValid) {
-      return res.status(400).json({
-        success: false,
-        message: 'Validation failed',
-        errors: validation.errors
-      });
+      return res.status(400).json({ success: false, message: 'Validation failed', errors: validation.errors });
     }
 
-    const { amount, bank_code, account_number, account_name, narration, twoFactorCode, passwordpin } = validation.sanitized;
+    const { amount, bank_code, bank_name, account_number, account_name, narration, twoFactorCode, passwordpin } = validation.sanitized;
 
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
+    // 2. Load user
+    const user = await User.findById(userId).select(
+      '_id twoFASecret is2FAEnabled passwordpin email username firstname ngnbBalance'
+    );
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
+    // 3. 2FA check
     if (!user.twoFASecret || !user.is2FAEnabled) {
-      return res.status(400).json({
-        success: false,
-        message: 'Two-factor authentication is not set up or not enabled. Please enable 2FA first.'
-      });
+      return res.status(400).json({ success: false, message: 'Please enable two-factor authentication before making withdrawals.' });
     }
-
     if (!validateTwoFactorAuth(user, twoFactorCode)) {
-      logger.warn('Invalid 2FA for NGNB withdrawal', { userId });
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid two-factor authentication code'
-      });
+      logger.warn('NGNB withdrawal blocked: invalid 2FA', { userId });
+      return res.status(401).json({ success: false, message: 'Invalid two-factor authentication code.' });
     }
 
+    // 4. PIN check
     if (!user.passwordpin) {
-      return res.status(400).json({
-        success: false,
-        message: 'Password PIN is not set up. Please set up your password PIN first.'
-      });
+      return res.status(400).json({ success: false, message: 'Please set up your PIN before making withdrawals.' });
     }
-
     const isPinValid = await comparePasswordPin(passwordpin, user.passwordpin);
     if (!isPinValid) {
-      logger.warn('Invalid password PIN for NGNB withdrawal', { userId });
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid password PIN'
-      });
+      logger.warn('NGNB withdrawal blocked: invalid PIN', { userId });
+      return res.status(401).json({ success: false, message: 'Invalid PIN.' });
     }
 
-    const balanceValidation = await validateUserBalance(userId, 'NGNB', amount, {
-      includeBalanceDetails: true,
-      logValidation: true
-    });
-    if (!balanceValidation.success) {
-      return res.status(400).json({
-        success: false,
-        error: 'INSUFFICIENT_BALANCE',
-        message: balanceValidation.message,
-        details: {
-          availableBalance: balanceValidation.availableBalance,
-          requiredAmount: amount,
-          currency: 'NGNB',
-          shortfall: balanceValidation.shortfall
-        }
-      });
+    // 5. Pre-check balance (fast fail before acquiring lock)
+    if ((user.ngnbBalance ?? 0) < amount) {
+      return res.status(400).json({ success: false, message: 'Insufficient NGNB balance.' });
     }
 
-    const reference = generateWithdrawalReference();
+    // 6. Acquire in-process lock
+    processingUsers.add(userId);
 
-    const withdrawalResult = await executeNGNBWithdrawal(
-      userId,
-      { amount, bank_code, account_number, account_name, narration },
-      reference
-    );
+    let withdrawalResult;
+    try {
+      const reference = generateWithdrawalReference();
+      withdrawalResult = await executeNGNBWithdrawal(
+        userId,
+        { amount, bank_code, bank_name, account_number, account_name, narration },
+        reference
+      );
+    } catch (err) {
+      processingUsers.delete(userId);
+      if (err.message === 'INSUFFICIENT_BALANCE') {
+        return res.status(400).json({ success: false, message: 'Insufficient NGNB balance.' });
+      }
+      throw err;
+    } finally {
+      processingUsers.delete(userId);
+    }
 
-    const obiexResult = await processObiexWithdrawal(
+    // 7. Provider payout
+    const providerResult = await processProviderWithdrawal(
       userId,
-      { bank_code, account_number, account_name, narration },
-      withdrawalResult.amountToObiex,
-      reference,
+      { amount, bank_code, bank_name, account_number, account_name, narration },
+      withdrawalResult.amountToProvider,
+      withdrawalResult.transaction.reference,
       withdrawalResult.transaction._id
     );
 
-    if (obiexResult.success) {
-      logger.info('NGNB withdrawal completed via Obiex', {
+    if (providerResult.success) {
+      logger.info('NGNB withdrawal submitted to provider', {
         userId,
-        reference,
-        amount: amount,
-        amountSentToBank: withdrawalResult.amountToObiex
+        reference: withdrawalResult.transaction.reference,
+        amount,
+        amountToProvider: withdrawalResult.amountToProvider,
       });
+
+      // Notifications (non-blocking)
+      const displayName = user.username || user.firstname || 'User';
+      sendWithdrawalNotification(userId, amount, 'NGNB', 'pending', {
+        reference: withdrawalResult.transaction.reference,
+        bankName: bank_name,
+        accountNumber: maskAccountNumber(account_number),
+        fee: withdrawalResult.feeRecorded,
+        totalAmount: amount,
+      }).catch(e => logger.warn('Push notification failed', { error: e.message }));
+
+      sendWithdrawalEmail(user.email, displayName, amount, 'NGNB', withdrawalResult.transaction.reference)
+        .catch(e => logger.warn('Withdrawal email failed', { error: e.message }));
+
       return res.status(200).json({
         success: true,
-        message: 'Withdrawal processed successfully',
+        message: 'Withdrawal submitted and is being processed.',
         data: {
-          withdrawalId: reference,
-          totalAmount: amount,
-          amountSentToBank: withdrawalResult.amountToObiex,
-          fee: withdrawalResult.feeAmountRecorded,
-          balanceAfter: withdrawalResult.user.ngnbBalance,
-          bankName: withdrawalResult.bankName,
-          accountNumber: maskAccountNumber(account_number),
-          status: 'SUCCESSFUL'
+          withdrawalId:     withdrawalResult.transaction.reference,
+          totalAmount:      amount,
+          amountSentToBank: withdrawalResult.amountToProvider,
+          fee:              withdrawalResult.feeRecorded,
+          balanceAfter:     withdrawalResult.user.ngnbBalance,
+          bankName:         bank_name,
+          accountNumber:    maskAccountNumber(account_number),
+          status:           'PENDING',
         }
       });
     } else {
-      await updateUserBalance(userId, 'NGNB', amount);
-      logger.error('NGNB withdrawal failed at Obiex', {
-        reference,
-        error: obiexResult.error,
-        userId
-      });
       return res.status(502).json({
         success: false,
-        message: 'Withdrawal failed at provider',
-        error: obiexResult.error,
-        reference
+        message: providerResult.error,
+        reference: withdrawalResult.transaction.reference,
       });
     }
   } catch (err) {
-    logger.error('NGNB withdrawal error', { userId: req.user?.id, error: err.message, stack: err.stack });
-    return res.status(500).json({
-      success: false,
-      message: 'Internal server error during withdrawal',
-      error: err.message
-    });
+    processingUsers.delete(userId);
+    logger.error('NGNB withdrawal error', { userId, error: err.message });
+    return res.status(500).json({ success: false, message: 'An error occurred. Please try again.' });
   }
 });
 
 /**
- * @route   GET /withdrawal/ngnb/status/:reference
- * @desc    Check NGNB withdrawal status
- * @access  Authenticated
+ * GET /withdrawal/ngnb/status/:reference
  */
 router.get('/withdrawal/ngnb/status/:reference', async (req, res) => {
   try {
     const { reference } = req.params;
     const userId = req.user.id;
 
-    if (!reference) {
-      return res.status(400).json({ success: false, error: 'Reference is required' });
-    }
-
-    const transaction = await Transaction.findOne({
-      reference,
-      userId,
-      type: 'WITHDRAWAL',
-      currency: 'NGNB'
-    });
-
-    if (!transaction) {
-      return res.status(404).json({
-        success: false,
-        error: 'Withdrawal transaction not found'
-      });
-    }
+    const tx = await Transaction.findOne({ reference, userId, type: 'WITHDRAWAL', currency: 'NGNB' });
+    if (!tx) return res.status(404).json({ success: false, error: 'Withdrawal not found' });
 
     return res.status(200).json({
       success: true,
       data: {
-        reference: transaction.reference,
-        status: transaction.status,
-        amount: Math.abs(transaction.amount),
-        createdAt: transaction.createdAt,
-        updatedAt: transaction.updatedAt,
-        completedAt: transaction.completedAt,
-        failedAt: transaction.failedAt,
-        failureReason: transaction.failureReason,
-        metadata: transaction.metadata
+        reference:     tx.reference,
+        status:        tx.status,
+        amount:        Math.abs(tx.amount),
+        fee:           tx.fee,
+        createdAt:     tx.createdAt,
+        updatedAt:     tx.updatedAt,
+        completedAt:   tx.completedAt,
+        failedAt:      tx.failedAt,
+        failureReason: tx.failureReason,
       }
     });
-  } catch (error) {
-    logger.error('Error checking withdrawal status:', error);
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to retrieve withdrawal status'
-    });
+  } catch (err) {
+    logger.error('Error checking withdrawal status', { error: err.message });
+    return res.status(500).json({ success: false, error: 'Failed to retrieve withdrawal status' });
   }
 });
 
 /**
- * @route   GET /withdrawal/ngnb/banks
- * @desc    Get list of supported Nigerian banks
- * @access  Authenticated
- */
-router.get('/withdrawal/ngnb/banks', async (req, res) => {
-  try {
-    const banks = Object.entries(NIGERIAN_BANK_CODES).map(([code, name]) => ({ code, name }));
-
-    return res.status(200).json({
-      success: true,
-      data: { banks, total: banks.length }
-    });
-  } catch (error) {
-    logger.error('Error fetching bank list:', error);
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to retrieve bank list'
-    });
-  }
-});
-
-/**
- * @route   GET /withdrawal/ngnb/fees
- * @desc    Get withdrawal fee info (mirror ZeusODX)
+ * GET /withdrawal/ngnb/fees
  */
 router.get('/withdrawal/ngnb/fees', (req, res) => {
   return res.json({
     success: true,
     data: {
-      withdrawalFee: NGNB_WITHDRAWAL_FEE_RECORDED,
-      minimumWithdrawal: NGNB_WITHDRAWAL_FEE_OPERATIONAL + 1
+      withdrawalFee:     NGNB_WITHDRAWAL_FEE_RECORDED,
+      minimumWithdrawal: NGNB_WITHDRAWAL_FEE_OPERATIONAL + 1,
     }
   });
 });
