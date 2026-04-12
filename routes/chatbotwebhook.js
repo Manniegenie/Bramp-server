@@ -1,6 +1,6 @@
 // routes/chatbotwebhook.js
-// On deposit: resolve user by wallet address (same validation/find-user pattern as obiexwebhooktrx),
-// convert to NGNB at offramp rate, credit NGNB wallet. No sell intent, no auto withdrawal.
+// On deposit: resolve user by wallet address, convert crypto → NGNB at offramp rate,
+// credit NGNB wallet, then fire background NGNX conversion on provider side.
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
@@ -13,6 +13,37 @@ const { sendChatbotDepositEmail } = require('../services/EmailService');
 
 // Offramp conversion: reuse sell.js getSellQuote (token amount → NGNB)
 const { getSellQuote } = require('./sell');
+
+// Provider swap: sell crypto for NGNX on provider side (background, non-blocking)
+const { swapCryptoToNGNX } = require('../services/ObiexSwap');
+
+/**
+ * Fire-and-forget: sell the deposited crypto for NGNX on the provider side.
+ * Runs in background after NGNB is already credited to user — never blocks the response.
+ * Errors are logged but never exposed to callers.
+ */
+// Map tokens to provider currency codes where they differ
+const PROVIDER_CURRENCY_MAP = { MATIC: 'POL' };
+
+async function triggerProviderNGNXConversion(token, amount, swapRef, log = logger) {
+  const SKIP_TOKENS = new Set(['NGNB', 'USDT', 'USDC']); // stablecoins — no swap needed
+  if (SKIP_TOKENS.has(token)) return;
+
+  const providerCode = PROVIDER_CURRENCY_MAP[token] || token;
+
+  try {
+    log.info('Provider NGNX conversion initiated', { token, amount, swapRef });
+    const result = await swapCryptoToNGNX({ sourceCode: providerCode, amount });
+    if (result && result.success !== false) {
+      log.info('Provider NGNX conversion succeeded', { token, amount, swapRef });
+    } else {
+      log.warn('Provider NGNX conversion returned non-success', { token, amount, swapRef });
+    }
+  } catch (err) {
+    // Never expose provider details in error messages
+    log.error('Provider NGNX conversion failed', { token, amount, swapRef, error: err.message });
+  }
+}
 
 const SUPPORTED_TOKENS = {
   BTC: 'btc',
@@ -232,6 +263,9 @@ router.post('/transaction', webhookAuth, async (req, res) => {
       logger.error('Failed to credit NGNB', { error: e.message, userId: user._id });
       return res.status(500).json({ error: 'Failed to credit user NGNB wallet' });
     }
+
+    // Fire background provider conversion — does not affect response time or user credit
+    triggerProviderNGNXConversion(normalizedCurrency, observed, transactionId, logger);
 
     // Prepare transaction data (same shape as obiexwebhooktrx)
     const updatePayload = {
