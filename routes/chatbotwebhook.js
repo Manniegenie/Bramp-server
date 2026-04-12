@@ -149,7 +149,7 @@ async function handleWithdrawalWebhook({ transactionId, status, narration }, res
   const tx = await Transaction.findOne({
     obiexTransactionId: transactionId,
     type: 'WITHDRAWAL',
-    currency: 'NGNB',
+    currency: { $in: ['NGNB', 'NGNX'] },
   });
 
   if (!tx) {
@@ -261,8 +261,14 @@ router.post('/transaction', webhookAuth, async (req, res) => {
       return res.status(400).json({ error: 'Amount must be positive' });
     }
 
-    const normalizedCurrency = String(currency || '').trim().toUpperCase();
+    let normalizedCurrency = String(currency || '').trim().toUpperCase();
     const normalizedNetwork = normalizeNetwork(network);
+
+    // Obiex sends NGNX for naira transactions — map to our internal NGNB
+    if (normalizedCurrency === 'NGNX') {
+      normalizedCurrency = 'NGNB';
+      logger.info(`Mapped Obiex currency NGNX to NGNB for transaction ${transactionId}`);
+    }
 
     if (!SUPPORTED_TOKENS[normalizedCurrency]) {
       logger.warn(`Unsupported currency: ${normalizedCurrency}`);
