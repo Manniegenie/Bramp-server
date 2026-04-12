@@ -11,6 +11,7 @@ const { sendWithdrawalNotification } = require('../services/notificationService'
 const User = require('../models/user');
 const Transaction = require('../models/transaction');
 const logger = require('../utils/logger');
+const { checkWithdrawalLimit } = require('../utils/withdrawalLimits'); // TEMP: remove when KYC fully set up
 
 // Fee constants
 const NGNB_WITHDRAWAL_FEE_OPERATIONAL = 30;  // deducted from payout to provider
@@ -257,6 +258,16 @@ router.post('/withdrawal/ngnb', async (req, res) => {
     // 5. Pre-check balance (fast fail before acquiring lock)
     if ((user.ngnbBalance ?? 0) < amount) {
       return res.status(400).json({ success: false, message: 'Insufficient NGNB balance.' });
+    }
+
+    // 5b. Rolling 7-day withdrawal limit — TEMP: remove when KYC fully set up
+    const limitCheck = await checkWithdrawalLimit(userId, amount);
+    if (!limitCheck.allowed) {
+      logger.warn('NGNB withdrawal blocked: 7-day limit reached', { userId, used: limitCheck.used, requested: amount });
+      return res.status(400).json({
+        success: false,
+        message: `You have reached your 7-day withdrawal limit of ₦${limitCheck.limit.toLocaleString()}. Available: ₦${limitCheck.remaining.toLocaleString()}.`,
+      });
     }
 
     // 6. Acquire in-process lock
