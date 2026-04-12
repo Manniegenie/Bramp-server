@@ -381,110 +381,68 @@ async function createInternalTransferTransactions(transferData) {
  * Executes the internal transfer atomically with direct User balance updates
  */
 async function executeInternalTransfer(transferData) {
-  const { 
-    senderUserId, 
-    recipientUserId, 
-    currency, 
+  const {
+    senderUserId,
+    recipientUserId,
+    currency,
     amount,
     senderTransaction,
-    recipientTransaction 
+    recipientTransaction,
   } = transferData;
-  
+
+  const balanceField = getBalanceFieldName(currency);
+  if (!balanceField) {
+    return { success: false, message: `Unsupported currency: ${currency}` };
+  }
+
   try {
-    // Get the balance field name for this currency
-    const balanceField = getBalanceFieldName(currency);
-    if (!balanceField) {
-      throw new Error(`Unsupported currency: ${currency}`);
+    // Step 1: Atomic debit from sender — only proceeds if balance is sufficient
+    const senderResult = await User.findOneAndUpdate(
+      { _id: senderUserId, [balanceField]: { $gte: amount } },
+      { $inc: { [balanceField]: -amount }, $set: { lastBalanceUpdate: new Date() } },
+      { new: true, runValidators: true }
+    );
+
+    if (!senderResult) {
+      await Transaction.updateMany(
+        { _id: { $in: [senderTransaction._id, recipientTransaction._id] } },
+        { status: 'FAILED', failedAt: new Date() }
+      );
+      return { success: false, message: 'Insufficient balance or sender not found' };
     }
 
-    const session = await User.startSession();
-    
-    try {
-      await session.withTransaction(async () => {
-        // Update sender's balance (debit) with balance validation
-        const senderUpdateResult = await User.updateOne(
-          { 
-            _id: senderUserId,
-            [balanceField]: { $gte: amount } // Ensure sufficient balance
-          },
-          { 
-            $inc: { [balanceField]: -amount },
-            $set: { lastBalanceUpdate: new Date() }
-          },
-          { session }
-        );
+    // Step 2: Credit recipient — should not fail under normal conditions
+    const recipientResult = await User.findOneAndUpdate(
+      { _id: recipientUserId },
+      { $inc: { [balanceField]: amount }, $set: { lastBalanceUpdate: new Date() } },
+      { new: true, runValidators: true }
+    );
 
-        if (senderUpdateResult.matchedCount === 0) {
-          throw new Error('Insufficient balance or sender not found');
-        }
-
-        // Update recipient's balance (credit)
-        const recipientUpdateResult = await User.updateOne(
-          { _id: recipientUserId },
-          { 
-            $inc: { [balanceField]: amount },
-            $set: { lastBalanceUpdate: new Date() }
-          },
-          { session }
-        );
-
-        if (recipientUpdateResult.matchedCount === 0) {
-          throw new Error('Recipient not found');
-        }
-        
-        // Mark transactions as completed
-        await Transaction.updateOne(
-          { _id: senderTransaction._id },
-          { 
-            status: 'COMPLETED', 
-            completedAt: new Date(),
-            'metadata.balance_updated_directly': true
-          },
-          { session }
-        );
-        
-        await Transaction.updateOne(
-          { _id: recipientTransaction._id },
-          { 
-            status: 'COMPLETED', 
-            completedAt: new Date(),
-            'metadata.balance_updated_directly': true
-          },
-          { session }
-        );
-
-        logger.info('✅ Direct balance updates completed successfully', {
-          senderUserId,
-          recipientUserId,
-          currency,
-          amount,
-          balanceField,
-          senderDeducted: -amount,
-          recipientCredited: amount
-        });
+    if (!recipientResult) {
+      // Rollback: refund sender
+      await User.findByIdAndUpdate(senderUserId, {
+        $inc: { [balanceField]: amount },
+        $set: { lastBalanceUpdate: new Date() },
       });
-      
-      await session.endSession();
-      return { success: true };
-      
-    } catch (sessionError) {
-      await session.abortTransaction();
-      await session.endSession();
-      throw sessionError;
+      await Transaction.updateMany(
+        { _id: { $in: [senderTransaction._id, recipientTransaction._id] } },
+        { status: 'FAILED', failedAt: new Date() }
+      );
+      return { success: false, message: 'Recipient not found' };
     }
+
+    // Step 3: Mark both transactions completed
+    await Transaction.updateMany(
+      { _id: { $in: [senderTransaction._id, recipientTransaction._id] } },
+      { status: 'COMPLETED', completedAt: new Date() }
+    );
+
+    logger.info('✅ Internal transfer completed', { senderUserId, recipientUserId, currency, amount, balanceField });
+    return { success: true };
+
   } catch (error) {
-    logger.error('❌ Internal transfer execution failed', {
-      senderUserId,
-      recipientUserId,
-      currency,
-      amount,
-      error: error.message
-    });
-    
-    return {
-      success: false,
-      message: 'Failed to complete internal transfer: ' + error.message
-    };
+    logger.error('❌ Internal transfer execution failed', { senderUserId, recipientUserId, currency, amount, error: error.message });
+    return { success: false, message: 'Failed to complete internal transfer: ' + error.message };
   }
 }
 

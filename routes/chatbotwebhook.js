@@ -137,6 +137,68 @@ function allow(ip, limit = RATE_LIMIT_PER_MINUTE, windowMs = 60_000) {
   return rec.count <= limit;
 }
 
+const FINAL_FAILED  = new Set(['FAILED', 'REJECTED']);
+const FINAL_SUCCESS = new Set(['SUCCESSFUL', 'SUCCESS', 'COMPLETED', 'CONFIRMED']);
+
+/**
+ * Handle Obiex withdrawal callbacks for NGNB.
+ * Balance was already deducted at initiation — refund on failure, confirm on success.
+ * Idempotent: re-delivery of the same status is a no-op.
+ */
+async function handleWithdrawalWebhook({ transactionId, status, narration }, res) {
+  const tx = await Transaction.findOne({
+    obiexTransactionId: transactionId,
+    type: 'WITHDRAWAL',
+    currency: 'NGNB',
+  });
+
+  if (!tx) {
+    // Could be a withdrawal for a different route/currency — acknowledge and move on
+    logger.warn('NGNB withdrawal webhook: transaction not found', { transactionId });
+    return res.status(200).json({ success: true, ignored: true });
+  }
+
+  // Idempotency: already in a terminal state
+  if (FINAL_FAILED.has(tx.status) || FINAL_SUCCESS.has(tx.status)) {
+    logger.info('NGNB withdrawal webhook: already terminal, skipping', { transactionId, status: tx.status });
+    return res.status(200).json({ success: true, message: 'Already processed' });
+  }
+
+  if (FINAL_FAILED.has(status)) {
+    // Refund: add back the full requested amount (stored as negative, so abs it)
+    const refundAmount = Math.abs(tx.metadata?.requestedAmount || Math.abs(tx.amount));
+    await User.findByIdAndUpdate(tx.userId, {
+      $inc: { ngnbBalance: refundAmount },
+      $set: { lastBalanceUpdate: new Date() },
+    }, { runValidators: true });
+
+    await Transaction.findByIdAndUpdate(tx._id, {
+      $set: {
+        status: 'FAILED',
+        failedAt: new Date(),
+        'metadata.failureReason': narration || 'Withdrawal failed via provider callback',
+        'metadata.refundedAt': new Date(),
+        'metadata.refundAmount': refundAmount,
+      },
+    });
+
+    logger.info('NGNB withdrawal failed — balance refunded', { userId: tx.userId, transactionId, refundAmount });
+    return res.status(200).json({ success: true, refunded: true });
+  }
+
+  if (FINAL_SUCCESS.has(status)) {
+    await Transaction.findByIdAndUpdate(tx._id, {
+      $set: { status: 'SUCCESSFUL', completedAt: new Date() },
+    });
+    logger.info('NGNB withdrawal confirmed successful', { userId: tx.userId, transactionId });
+    return res.status(200).json({ success: true });
+  }
+
+  // Non-terminal status (e.g. PROCESSING) — acknowledge without changing anything
+  logger.info('NGNB withdrawal webhook: non-terminal status, no action', { transactionId, status });
+  return res.status(200).json({ success: true, queued: true });
+}
+
 router.post('/transaction', webhookAuth, async (req, res) => {
   const ip = req.ip || req.headers['x-forwarded-for'] || req.connection?.remoteAddress;
   if (!allow(String(ip))) {
@@ -205,6 +267,12 @@ router.post('/transaction', webhookAuth, async (req, res) => {
       logger.warn(`Unsupported currency: ${normalizedCurrency}`);
       return res.status(400).json({ error: `Unsupported currency: ${normalizedCurrency}` });
     }
+
+    // --- WITHDRAWAL callbacks ---
+    if (type === 'WITHDRAWAL') {
+      return handleWithdrawalWebhook({ transactionId, status, narration }, res);
+    }
+
     if (type !== 'DEPOSIT') {
       return res.status(200).json({ success: true, ignored: true });
     }
