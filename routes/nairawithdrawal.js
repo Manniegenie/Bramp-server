@@ -14,8 +14,10 @@ const logger = require('../utils/logger');
 const { checkWithdrawalLimit } = require('../utils/withdrawalLimits'); // TEMP: remove when KYC fully set up
 
 // Fee constants
-const NGNB_WITHDRAWAL_FEE_OPERATIONAL = 30;  // deducted from payout to provider
-const NGNB_WITHDRAWAL_FEE_RECORDED    = 100; // shown to user / stored in transaction
+// Total fee charged to user on top of their withdrawal amount.
+const NGNB_FEE_TOTAL    = 100;    // ₦100 charged to user (additive — on top of amount)
+const NGNB_FEE_OBIEX    = 53.75;  // Obiex's share — added to the payout sent to provider
+const NGNB_FEE_PLATFORM = 46.25;  // Platform keeps this (NGNB_FEE_TOTAL - NGNB_FEE_OBIEX)
 
 // In-process lock: prevents double-submit from the same user within a single server instance.
 // The atomic MongoDB findOneAndUpdate ($gte balance check) is the true race condition guard
@@ -50,8 +52,8 @@ function validateWithdrawalRequest(body) {
   const numericAmount = Number(body.amount);
   if (!body.amount || isNaN(numericAmount) || numericAmount <= 0) {
     errors.push('Amount must be a positive number');
-  } else if (numericAmount < NGNB_WITHDRAWAL_FEE_OPERATIONAL + 1) {
-    errors.push(`Minimum withdrawal amount is ₦${NGNB_WITHDRAWAL_FEE_OPERATIONAL + 1}`);
+  } else if (numericAmount < 100) {
+    errors.push('Minimum withdrawal amount is ₦100');
   } else if (numericAmount > 10_000_000) {
     errors.push('Maximum withdrawal amount is ₦10,000,000');
   } else {
@@ -107,13 +109,17 @@ function validateWithdrawalRequest(body) {
 
 async function executeNGNBWithdrawal(userId, withdrawalData, reference) {
   const { amount, bank_code, bank_name, account_number, account_name, narration } = withdrawalData;
-  const amountToProvider = amount - NGNB_WITHDRAWAL_FEE_OPERATIONAL;
-  const feeRecorded      = NGNB_WITHDRAWAL_FEE_RECORDED;
 
-  // Atomic balance deduction: only succeeds if balance >= amount
+  // Fee is additive: user pays amount + NGNB_FEE_TOTAL
+  // Provider receives amount + NGNB_FEE_OBIEX (Obiex's share of the fee)
+  // Platform keeps NGNB_FEE_PLATFORM (= NGNB_FEE_TOTAL - NGNB_FEE_OBIEX)
+  const totalDeducted  = amount + NGNB_FEE_TOTAL;   // deducted from user's wallet
+  const amountToProvider = amount + NGNB_FEE_OBIEX; // sent to Obiex
+
+  // Atomic balance deduction: only succeeds if balance >= totalDeducted
   const updatedUser = await User.findOneAndUpdate(
-    { _id: userId, ngnbBalance: { $gte: amount } },
-    { $inc: { ngnbBalance: -amount }, $set: { lastBalanceUpdate: new Date() } },
+    { _id: userId, ngnbBalance: { $gte: totalDeducted } },
+    { $inc: { ngnbBalance: -totalDeducted }, $set: { lastBalanceUpdate: new Date() } },
     { new: true, runValidators: true }
   );
 
@@ -123,33 +129,36 @@ async function executeNGNBWithdrawal(userId, withdrawalData, reference) {
     userId,
     type: 'WITHDRAWAL',
     currency: 'NGNB',
-    amount: -amount,
+    amount: -amount,            // withdrawal amount (excluding fee)
     status: 'PENDING',
     source: 'BANK',
     reference,
     obiexTransactionId: reference,
     narration: narration || `NGNB withdrawal to ${bank_name || account_name}`,
-    fee: feeRecorded,
+    fee: NGNB_FEE_TOTAL,
     metadata: {
       bank_code,
       bank_name,
       account_number,
       account_name,
-      amountSentToBank: amountToProvider,
-      withdrawalFee: feeRecorded,
-      requestedAmount: amount,
+      amountSentToBank:  amountToProvider,
+      withdrawalFee:     NGNB_FEE_TOTAL,
+      platformFee:       NGNB_FEE_PLATFORM,
+      obiexFee:          NGNB_FEE_OBIEX,
+      requestedAmount:   amount,
+      totalDeducted,
       initiated_at: new Date()
     }
   });
 
   await tx.save();
 
-  return { user: updatedUser, transaction: tx, amountToProvider, feeRecorded };
+  return { user: updatedUser, transaction: tx, amountToProvider, totalDeducted };
 }
 
 // --- STAGE 2: Provider payout (non-atomic, status driven by webhook) ---
 
-async function processProviderWithdrawal(userId, withdrawalData, amountToProvider, reference, transactionId) {
+async function processProviderWithdrawal(userId, withdrawalData, amountToProvider, totalDeducted, reference, transactionId) {
   try {
     const { bank_code, bank_name, account_number, account_name, narration } = withdrawalData;
 
@@ -186,13 +195,13 @@ async function processProviderWithdrawal(userId, withdrawalData, amountToProvide
           'metadata.failureReason': 'Provider rejected withdrawal',
         }
       });
-      // Refund balance
+      // Refund the full amount deducted (withdrawal + fee)
       await User.findByIdAndUpdate(userId, {
-        $inc: { ngnbBalance: withdrawalData.amount },
+        $inc: { ngnbBalance: totalDeducted },
         $set: { lastBalanceUpdate: new Date() }
       }, { runValidators: true });
 
-      logger.info('NGNB withdrawal refunded after provider rejection', { userId, reference, amount: withdrawalData.amount });
+      logger.info('NGNB withdrawal refunded after provider rejection', { userId, reference, totalDeducted });
       return { success: false, error: 'Withdrawal was rejected. Your balance has been refunded.' };
     }
   } catch (err) {
@@ -255,8 +264,8 @@ router.post('/withdrawal/ngnb', async (req, res) => {
       return res.status(401).json({ success: false, message: 'Invalid PIN.' });
     }
 
-    // 5. Pre-check balance (fast fail before acquiring lock)
-    if ((user.ngnbBalance ?? 0) < amount) {
+    // 5. Pre-check balance (fast fail before acquiring lock) — must cover amount + fee
+    if ((user.ngnbBalance ?? 0) < amount + NGNB_FEE_TOTAL) {
       return res.status(400).json({ success: false, message: 'Insufficient NGNB balance.' });
     }
 
@@ -296,6 +305,7 @@ router.post('/withdrawal/ngnb', async (req, res) => {
       userId,
       { amount, bank_code, bank_name, account_number, account_name, narration },
       withdrawalResult.amountToProvider,
+      withdrawalResult.totalDeducted,
       withdrawalResult.transaction.reference,
       withdrawalResult.transaction._id
     );
@@ -314,8 +324,8 @@ router.post('/withdrawal/ngnb', async (req, res) => {
         reference: withdrawalResult.transaction.reference,
         bankName: bank_name,
         accountNumber: maskAccountNumber(account_number),
-        fee: withdrawalResult.feeRecorded,
-        totalAmount: amount,
+        fee: NGNB_FEE_TOTAL,
+        totalAmount: withdrawalResult.totalDeducted,
       }).catch(e => logger.warn('Push notification failed', { error: e.message }));
 
       sendWithdrawalEmail(user.email, displayName, amount, 'NGNB', withdrawalResult.transaction.reference)
@@ -326,9 +336,10 @@ router.post('/withdrawal/ngnb', async (req, res) => {
         message: 'Withdrawal submitted and is being processed.',
         data: {
           withdrawalId:     withdrawalResult.transaction.reference,
-          totalAmount:      amount,
+          amount,
+          fee:              NGNB_FEE_TOTAL,
+          totalDeducted:    withdrawalResult.totalDeducted,
           amountSentToBank: withdrawalResult.amountToProvider,
-          fee:              withdrawalResult.feeRecorded,
           balanceAfter:     withdrawalResult.user.ngnbBalance,
           bankName:         bank_name,
           accountNumber:    maskAccountNumber(account_number),

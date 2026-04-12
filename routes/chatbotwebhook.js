@@ -166,7 +166,8 @@ async function handleWithdrawalWebhook({ transactionId, status, narration }, res
 
   if (FINAL_FAILED.has(status)) {
     // Refund: add back the full requested amount (stored as negative, so abs it)
-    const refundAmount = Math.abs(tx.metadata?.requestedAmount || Math.abs(tx.amount));
+    // Refund the full amount deducted (amount + fee). totalDeducted is the source of truth.
+    const refundAmount = tx.metadata?.totalDeducted || Math.abs(tx.metadata?.requestedAmount || Math.abs(tx.amount));
     await User.findByIdAndUpdate(tx.userId, {
       $inc: { ngnbBalance: refundAmount },
       $set: { lastBalanceUpdate: new Date() },
