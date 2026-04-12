@@ -2,7 +2,6 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-const mongoose = require('mongoose');
 
 const { debitNaira } = require('../services/nairaWithdrawal');
 const { validateTwoFactorAuth } = require('../services/twofactorAuth');
@@ -110,51 +109,41 @@ async function executeNGNBWithdrawal(userId, withdrawalData, reference) {
   const amountToProvider = amount - NGNB_WITHDRAWAL_FEE_OPERATIONAL;
   const feeRecorded      = NGNB_WITHDRAWAL_FEE_RECORDED;
 
-  const session = await mongoose.startSession();
-  session.startTransaction();
+  // Atomic balance deduction: only succeeds if balance >= amount
+  const updatedUser = await User.findOneAndUpdate(
+    { _id: userId, ngnbBalance: { $gte: amount } },
+    { $inc: { ngnbBalance: -amount }, $set: { lastBalanceUpdate: new Date() } },
+    { new: true, runValidators: true }
+  );
 
-  try {
-    const updatedUser = await User.findOneAndUpdate(
-      { _id: userId, ngnbBalance: { $gte: amount } },
-      { $inc: { ngnbBalance: -amount }, $set: { lastBalanceUpdate: new Date() } },
-      { new: true, runValidators: true, session }
-    );
+  if (!updatedUser) throw new Error('INSUFFICIENT_BALANCE');
 
-    if (!updatedUser) throw new Error('INSUFFICIENT_BALANCE');
+  const tx = new Transaction({
+    userId,
+    type: 'WITHDRAWAL',
+    currency: 'NGNB',
+    amount: -amount,
+    status: 'PENDING',
+    source: 'BANK',
+    reference,
+    obiexTransactionId: reference,
+    narration: narration || `NGNB withdrawal to ${bank_name || account_name}`,
+    fee: feeRecorded,
+    metadata: {
+      bank_code,
+      bank_name,
+      account_number,
+      account_name,
+      amountSentToBank: amountToProvider,
+      withdrawalFee: feeRecorded,
+      requestedAmount: amount,
+      initiated_at: new Date()
+    }
+  });
 
-    const tx = new Transaction({
-      userId,
-      type: 'WITHDRAWAL',
-      currency: 'NGNB',
-      amount: -amount,
-      status: 'PENDING',
-      source: 'BANK',
-      reference,
-      obiexTransactionId: reference,
-      narration: narration || `NGNB withdrawal to ${bank_name || account_name}`,
-      fee: feeRecorded,
-      metadata: {
-        bank_code,
-        bank_name,
-        account_number,
-        account_name,
-        amountSentToBank: amountToProvider,
-        withdrawalFee: feeRecorded,
-        requestedAmount: amount,
-        initiated_at: new Date()
-      }
-    });
+  await tx.save();
 
-    await tx.save({ session });
-    await session.commitTransaction();
-    session.endSession();
-
-    return { user: updatedUser, transaction: tx, amountToProvider, feeRecorded };
-  } catch (err) {
-    await session.abortTransaction();
-    session.endSession();
-    throw err;
-  }
+  return { user: updatedUser, transaction: tx, amountToProvider, feeRecorded };
 }
 
 // --- STAGE 2: Provider payout (non-atomic, status driven by webhook) ---
