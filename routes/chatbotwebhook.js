@@ -10,6 +10,10 @@ const Transaction = require('../models/transaction');
 const webhookAuth = require('../auth/webhookauth');
 const logger = require('../utils/logger');
 const { sendChatbotDepositEmail } = require('../services/EmailService');
+const {
+  sendDepositNotification,
+  sendWithdrawalNotification,
+} = require('../services/notificationService');
 
 // Offramp conversion: reuse sell.js getSellQuote (token amount → NGNB)
 const { getSellQuote } = require('./sell');
@@ -184,6 +188,15 @@ async function handleWithdrawalWebhook({ transactionId, status, narration }, res
     });
 
     logger.info('NGNB withdrawal failed — balance refunded', { userId: tx.userId, transactionId, refundAmount });
+
+    sendWithdrawalNotification(
+      tx.userId.toString(),
+      tx.metadata?.requestedAmount || Math.abs(tx.amount),
+      'NGNB',
+      'failed',
+      { transactionId, reference: tx.reference }
+    ).catch((err) => logger.error('Failed to send withdrawal failure notification', { userId: tx.userId, error: err.message }));
+
     return res.status(200).json({ success: true, refunded: true });
   }
 
@@ -192,6 +205,15 @@ async function handleWithdrawalWebhook({ transactionId, status, narration }, res
       $set: { status: 'SUCCESSFUL', completedAt: new Date() },
     });
     logger.info('NGNB withdrawal confirmed successful', { userId: tx.userId, transactionId });
+
+    sendWithdrawalNotification(
+      tx.userId.toString(),
+      tx.metadata?.requestedAmount || Math.abs(tx.amount),
+      'NGNB',
+      'completed',
+      { transactionId, reference: tx.reference }
+    ).catch((err) => logger.error('Failed to send withdrawal success notification', { userId: tx.userId, error: err.message }));
+
     return res.status(200).json({ success: true });
   }
 
@@ -384,6 +406,14 @@ router.post('/transaction', webhookAuth, async (req, res) => {
     } catch (emailErr) {
       logger.warn('Chatbot deposit email failed', { error: emailErr.message });
     }
+
+    sendDepositNotification(
+      user._id.toString(),
+      actualReceiveAmount,
+      'NGNB',
+      'confirmed',
+      { transactionId, token: normalizedCurrency, observedAmount: observed }
+    ).catch((err) => logger.error('Failed to send deposit notification', { userId: user._id, error: err.message }));
 
     logger.info('Deposit credited as NGNB', {
       userId: user._id,

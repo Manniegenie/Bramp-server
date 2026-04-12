@@ -166,7 +166,13 @@ const userSchema = new mongoose.Schema({
   },
   voiceCooldown: {
     availableAt: { type: Date, default: null }
-  }
+  },
+
+  // Push Notifications
+  expoPushToken: { type: String, default: null },
+  fcmToken: { type: String, default: null },
+  deviceId: { type: String, default: null },
+  pushPlatform: { type: String, default: null },
 }, { timestamps: true });
 
 // Indexes
@@ -177,6 +183,8 @@ userSchema.index({ kycLevel: 1, kycStatus: 1 });
 userSchema.index({ chatbotTransactionVerified: 1 }); // New index for chatbot verification
 userSchema.index({ 'voiceSession.expiresAt': 1 }); // Index for session expiration queries
 userSchema.index({ 'voiceCooldown.availableAt': 1 }); // Index for cooldown queries
+userSchema.index({ deviceId: 1 }, { sparse: true });
+userSchema.index({ expoPushToken: 1 }, { sparse: true });
 
 // Virtuals
 userSchema.virtual('id').get(function () { return this._id.toHexString(); });

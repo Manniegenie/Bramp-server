@@ -178,13 +178,16 @@ async function processProviderWithdrawal(userId, withdrawalData, amountToProvide
 
     if (result.success) {
       // Stay PENDING — final status comes via Obiex naira webhook
-      await Transaction.findByIdAndUpdate(transactionId, {
-        $set: {
-          status: 'PENDING',
-          'metadata.providerId':        result.data?.id || null,
-          'metadata.providerReference': result.data?.reference || null,
-        }
-      });
+      // Also store Obiex's actual transactionId so the webhook lookup can find this record
+      const updateFields = {
+        status: 'PENDING',
+        'metadata.providerId':        result.data?.id || null,
+        'metadata.providerReference': result.data?.reference || null,
+      };
+      if (result.data?.id) {
+        updateFields.obiexTransactionId = result.data.id;
+      }
+      await Transaction.findByIdAndUpdate(transactionId, { $set: updateFields });
       return { success: true, data: result.data };
     } else {
       // Provider rejected synchronously — mark failed and refund

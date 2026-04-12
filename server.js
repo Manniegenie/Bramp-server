@@ -97,11 +97,13 @@ const exactOrigins = new Set(
 // Note: trailing slashes are stripped by normalize()
 exactOrigins.add(normalize("https://chatbotbramp-git-game-staging-manniegenies-projects.vercel.app"));
 
-// Explicitly allow chatbramp.com domains (production frontend)
+// Explicitly allow chatbramp.com and brampchat.online domains (production frontends)
 // Add both normalized and non-normalized to ensure they're in the set
 const chatbrampOrigins = [
   "https://chatbramp.com",
-  "https://www.chatbramp.com"
+  "https://www.chatbramp.com",
+  "https://brampchat.online",
+  "https://www.brampchat.online",
 ];
 chatbrampOrigins.forEach(origin => {
   exactOrigins.add(origin);
@@ -163,7 +165,7 @@ const corsOptions = {
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
   allowedHeaders: ["Content-Type", "Authorization", "x-obiex-signature"],
   exposedHeaders: ["Content-Length", "Content-Type"],
-  credentials: false,                          // set true only if you use cookies
+  credentials: true,
   optionsSuccessStatus: 204,
   maxAge: 86400
 };
@@ -735,6 +737,7 @@ app.use((err, req, res, next) => {
   const origin = req.headers.origin;
   if (origin && isAllowed(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
   }
 
   if (err.message && err.message.includes('CORS')) {
