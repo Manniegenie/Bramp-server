@@ -584,6 +584,8 @@ app.use("/verifypin", verifypasswordpinRoutes);
 app.use("/chatsignup", chatsignupRoutes);
 app.use("/prices", PricesRoutes);
 app.use("/adminsignin", adminsigninRoutes);
+// Public admin 2FA setup/verify routes (auth via email+PIN, no token required)
+app.use("/admin-2fa", Admin2FARoutes);
 
 // Webhooks (rate-limited)
 app.use("/webhook", webhookLimiter, webhookRoutes);
