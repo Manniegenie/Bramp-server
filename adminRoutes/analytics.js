@@ -201,6 +201,72 @@ async function calculateTransactionVolume() {
 }
 
 /**
+ * Calculate total deposit volume in USD (successful deposits only, all currencies converted via Binance price)
+ */
+async function calculateDepositVolume() {
+  try {
+    let agg = await Transaction.aggregate([
+      {
+        $match: {
+          type: 'DEPOSIT',
+          status: { $in: ['SUCCESSFUL', 'COMPLETED', 'CONFIRMED'] },
+          currency: { $exists: true, $ne: null }
+        }
+      },
+      {
+        $group: {
+          _id: { $toUpper: '$currency' },
+          totalAmount: { $sum: { $abs: '$amount' } }
+        }
+      }
+    ]).exec();
+
+    if (!agg || agg.length === 0) return { totalDepositVolumeUSD: 0, breakdown: {} };
+
+    const nairaMarkdown = await NairaMarkdown.findOne();
+    const offrampRate = nairaMarkdown?.offrampRate || 1554.42;
+
+    const currencies = agg
+      .map(r => r._id)
+      .filter(c => c && c !== 'NGNB' && c !== 'NGNX' && SUPPORTED_TOKENS[c]);
+
+    let prices = {};
+    try {
+      prices = await getPricesWithCache(currencies) || {};
+    } catch (e) {
+      console.warn('calculateDepositVolume: getPricesWithCache error:', e.message);
+    }
+
+    const Decimal = require('decimal.js');
+    let totalUSD = new Decimal(0);
+    const breakdown = {};
+
+    for (const row of agg) {
+      const currency = row._id;
+      const amount = new Decimal(row.totalAmount || 0);
+
+      if (currency === 'NGNB' || currency === 'NGNX') {
+        const usdValue = amount.div(new Decimal(offrampRate));
+        totalUSD = totalUSD.plus(usdValue);
+        breakdown[currency] = { totalAmount: amount.toString(), usdValue: usdValue.toString() };
+      } else {
+        const price = prices?.[currency];
+        if (typeof price === 'number' || typeof price === 'string') {
+          const usdValue = amount.times(new Decimal(price));
+          totalUSD = totalUSD.plus(usdValue);
+          breakdown[currency] = { totalAmount: amount.toString(), usdValue: usdValue.toString(), price: Number(price) };
+        }
+      }
+    }
+
+    return { totalDepositVolumeUSD: Number(totalUSD.toFixed(2)), breakdown };
+  } catch (error) {
+    console.error('Error calculating deposit volume:', error);
+    return { totalDepositVolumeUSD: 0, breakdown: {} };
+  }
+}
+
+/**
  * GET /analytics/dashboard
  */
 router.get('/dashboard', async (req, res) => {
@@ -218,7 +284,9 @@ router.get('/dashboard', async (req, res) => {
       pendingTradesStats,
       approvedGiftCardsCount,
       rejectedGiftCardsCount,
-      paidGiftCardsCount
+      paidGiftCardsCount,
+      depositVolumeResult,
+      tradeVolumeResult
     ] = await Promise.all([
       User.aggregate([
         {
@@ -370,7 +438,31 @@ router.get('/dashboard', async (req, res) => {
 
       GiftCard.countDocuments({ status: 'APPROVED' }),
       GiftCard.countDocuments({ status: 'REJECTED' }),
-      GiftCard.countDocuments({ status: 'PAID' })
+      GiftCard.countDocuments({ status: 'PAID' }),
+      calculateDepositVolume(),
+
+      // Trade volume: total NGN auto-converted and sent to bank (offramp swaps)
+      Transaction.aggregate([
+        {
+          $match: {
+            type: { $in: ['SWAP', 'OBIEX_SWAP'] },
+            swapType: { $in: ['offramp', 'OFFRAMP'] },
+            status: { $in: ['SUCCESSFUL', 'COMPLETED', 'CONFIRMED'] },
+            $or: [
+              { swapDirection: 'OUT' },
+              { swapDirection: { $exists: false } },
+              { swapDirection: null }
+            ]
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            totalTradeVolumeNGN: { $sum: { $abs: '$bankAmount' } },
+            totalTrades: { $sum: 1 }
+          }
+        }
+      ])
     ]);
 
     const response = {
@@ -455,6 +547,10 @@ router.get('/dashboard', async (req, res) => {
         transactionVolume: transactionVolumeResult?.totalVolumeUSD ?? 0,
         transactionVolumeBreakdown: transactionVolumeResult?.breakdown ?? {},
         transactionVolumeCounts: transactionVolumeResult?.counts ?? { totalCurrencies: 0, processedCurrencies: 0, skippedCurrencies: 0 },
+        depositVolume: depositVolumeResult?.totalDepositVolumeUSD ?? 0,
+        depositVolumeBreakdown: depositVolumeResult?.breakdown ?? {},
+        tradeVolumeNGN: tradeVolumeResult?.[0]?.totalTradeVolumeNGN ?? 0,
+        totalTrades: tradeVolumeResult?.[0]?.totalTrades ?? (swapStats[0]?.offramps ?? 0),
         giftCardStats: {
           approved: (Number(approvedGiftCardsCount) || 0) + (Number(paidGiftCardsCount) || 0),
           rejected: Number(rejectedGiftCardsCount) || 0,

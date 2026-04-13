@@ -64,9 +64,9 @@ router.post('/setup-2fa', async (req, res) => {
 
     // Generate QR code with explicit settings to avoid rendering issues
     const qrCodeDataURL = await qrcode.toDataURL(otpAuthUrl, {
-      errorCorrectionLevel: 'M',
+      errorCorrectionLevel: 'H',
       type: 'image/png',
-      width: 300,
+      width: 520,
       margin: 2,
       color: {
         dark: '#000000',
