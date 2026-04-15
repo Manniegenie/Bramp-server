@@ -4,6 +4,7 @@ const User = require('../models/user');
 const Transaction = require('../models/transaction');
 const webhookAuth = require('../auth/webhookauth');
 const logger = require('../utils/logger');
+const { sendDepositNotification, sendWithdrawalNotification } = require('../services/notificationService');
 
 // Supported tokens - aligned with user schema (DOGE REMOVED)
 const SUPPORTED_TOKENS = {
@@ -292,11 +293,13 @@ router.post('/transaction', webhookAuth, async (req, res) => {
       try {
         updatedUser = await updateUserBalance(user._id, normalizedCurrency, parseFloat(amount));
         logger.info(`Credited ${amount} ${normalizedCurrency} to user ${user._id} for confirmed deposit`);
+        sendDepositNotification(user._id, amount, normalizedCurrency, 'confirmed', { transactionId, reference })
+          .catch(e => logger.warn('Deposit notification failed', { error: e.message }));
       } catch (err) {
         logger.error(`Error crediting balance for confirmed deposit:`, err);
-        return res.status(500).json({ 
+        return res.status(500).json({
           error: 'Failed to credit user balance',
-          details: err.message 
+          details: err.message
         });
       }
     }
@@ -328,18 +331,20 @@ router.post('/transaction', webhookAuth, async (req, res) => {
         } catch (err) {
           logger.error(`Error releasing reserved balance for failed withdrawal:`, err);
         }
+        sendWithdrawalNotification(user._id, amount, normalizedCurrency, 'failed', { transactionId, reference })
+          .catch(e => logger.warn('Withdrawal failed notification error', { error: e.message }));
       } else if (status === 'SUCCESSFUL') {
         // Reduce pending balance for successful withdrawals
         try {
           const currencyLower = SUPPORTED_TOKENS[normalizedCurrency];
           const pendingBalanceField = `${currencyLower}PendingBalance`;
-          
+
           const totalReservedAmount = parseFloat(amount) + (transaction.fee || 0);
           let newPendingBalance = Math.max(0, (user[pendingBalanceField] || 0) - totalReservedAmount);
-          
+
           updatedUser = await User.findByIdAndUpdate(
             user._id,
-            { 
+            {
               [pendingBalanceField]: newPendingBalance,
               lastBalanceUpdate: new Date()
             },
@@ -350,6 +355,8 @@ router.post('/transaction', webhookAuth, async (req, res) => {
         } catch (err) {
           logger.error(`Error reducing pending balance for user ${user._id}:`, err);
         }
+        sendWithdrawalNotification(user._id, amount, normalizedCurrency, 'completed', { transactionId, reference })
+          .catch(e => logger.warn('Withdrawal completed notification error', { error: e.message }));
       }
     }
 

@@ -9,7 +9,7 @@ const User = require('../models/user');
 const Transaction = require('../models/transaction');
 const webhookAuth = require('../auth/webhookauth');
 const logger = require('../utils/logger');
-const { sendChatbotDepositEmail } = require('../services/EmailService');
+const { sendChatbotDepositEmail, sendChatbotWithdrawalEmail } = require('../services/EmailService');
 const {
   sendDepositNotification,
   sendWithdrawalNotification,
@@ -197,6 +197,19 @@ async function handleWithdrawalWebhook({ transactionId, status, narration }, res
       { transactionId, reference: tx.reference }
     ).catch((err) => logger.error('Failed to send withdrawal failure notification', { userId: tx.userId, error: err.message }));
 
+    User.findById(tx.userId).select('email username firstname').lean().then((failedUser) => {
+      if (failedUser?.email) {
+        sendChatbotWithdrawalEmail(
+          failedUser.email,
+          failedUser.username || failedUser.firstname || 'User',
+          tx.metadata?.requestedAmount || Math.abs(tx.amount),
+          'NGNB',
+          tx.reference,
+          'failed'
+        ).catch((err) => logger.warn('Withdrawal failed email error', { error: err.message }));
+      }
+    }).catch(() => {});
+
     return res.status(200).json({ success: true, refunded: true });
   }
 
@@ -213,6 +226,19 @@ async function handleWithdrawalWebhook({ transactionId, status, narration }, res
       'completed',
       { transactionId, reference: tx.reference }
     ).catch((err) => logger.error('Failed to send withdrawal success notification', { userId: tx.userId, error: err.message }));
+
+    User.findById(tx.userId).select('email username firstname').lean().then((successUser) => {
+      if (successUser?.email) {
+        sendChatbotWithdrawalEmail(
+          successUser.email,
+          successUser.username || successUser.firstname || 'User',
+          tx.metadata?.requestedAmount || Math.abs(tx.amount),
+          'NGNB',
+          tx.reference,
+          'completed'
+        ).catch((err) => logger.warn('Withdrawal success email error', { error: err.message }));
+      }
+    }).catch(() => {});
 
     return res.status(200).json({ success: true });
   }

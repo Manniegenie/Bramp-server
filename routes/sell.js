@@ -10,19 +10,6 @@ const NairaMarkdown = require('../models/offramp');
 const { getPricesWithCache } = require('../services/portfolio');
 const { getSellDepositAddress } = require('../services/getSellDepositAddress');
 
-// NOTE: require path must match actual filename (case-sensitive on Linux)
-let sendChatbotSellEmail = null;
-try {
-  // use lowercase filename as in your project
-  const emailSvc = require('../services/EmailService');
-  sendChatbotSellEmail = emailSvc && emailSvc.sendChatbotSellEmail;
-  if (!sendChatbotSellEmail) {
-    logger.warn?.('emailService loaded but sendChatbotSellEmail was not found');
-  }
-} catch (e) {
-  logger.error?.('Failed to load emailService for sell route:', e?.message || e);
-}
-
 /* Constants */
 const FALLBACK_OFFRAMP_RATE_NGN_PER_USD = 1554.42;
 const SUPPORTED_TOKENS = new Set(['BTC', 'ETH', 'SOL', 'USDT', 'USDC', 'BNB', 'MATIC', 'AVAX']);

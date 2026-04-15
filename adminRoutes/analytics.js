@@ -273,6 +273,9 @@ router.get('/dashboard', async (req, res) => {
   try {
     console.log('=== Dashboard Analytics Request Started ===');
 
+    const nairaMarkdownDoc = await NairaMarkdown.findOne();
+    const currentOfframpRate = nairaMarkdownDoc?.offrampRate || 1554.42;
+
     const [
       userStats,
       transactionStats,
@@ -286,7 +289,8 @@ router.get('/dashboard', async (req, res) => {
       rejectedGiftCardsCount,
       paidGiftCardsCount,
       depositVolumeResult,
-      tradeVolumeResult
+      tradeCountResult,
+      withdrawalVolumeResult
     ] = await Promise.all([
       User.aggregate([
         {
@@ -441,25 +445,38 @@ router.get('/dashboard', async (req, res) => {
       GiftCard.countDocuments({ status: 'PAID' }),
       calculateDepositVolume(),
 
-      // Trade volume: total NGN auto-converted and sent to bank (offramp swaps)
+      // Trade volume: total NGNB credited to customers from successful deposits (auto-conversion)
+      // NGNB amount is stored in metadata.requestedAmount for withdrawals, but for deposits
+      // we use the ngnbBalance credit which equals the deposit amount converted at offramp rate.
+      // We compute: deposit USD value × offramp rate using the deposit amounts directly.
       Transaction.aggregate([
         {
           $match: {
-            type: { $in: ['SWAP', 'OBIEX_SWAP'] },
-            swapType: { $in: ['offramp', 'OFFRAMP'] },
-            status: { $in: ['SUCCESSFUL', 'COMPLETED', 'CONFIRMED'] },
-            $or: [
-              { swapDirection: 'OUT' },
-              { swapDirection: { $exists: false } },
-              { swapDirection: null }
-            ]
+            type: 'DEPOSIT',
+            status: { $in: ['SUCCESSFUL', 'COMPLETED', 'CONFIRMED'] }
           }
         },
         {
           $group: {
             _id: null,
-            totalTradeVolumeNGN: { $sum: { $abs: '$bankAmount' } },
             totalTrades: { $sum: 1 }
+          }
+        }
+      ]),
+
+      // Withdrawal volume: sum of NGNB requested amounts from completed withdrawals
+      Transaction.aggregate([
+        {
+          $match: {
+            type: 'WITHDRAWAL',
+            currency: 'NGNB',
+            status: { $in: ['SUCCESSFUL', 'COMPLETED', 'CONFIRMED'] }
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            totalWithdrawalVolumeNGN: { $sum: { $ifNull: ['$metadata.requestedAmount', { $abs: '$amount' }] } }
           }
         }
       ])
@@ -549,8 +566,9 @@ router.get('/dashboard', async (req, res) => {
         transactionVolumeCounts: transactionVolumeResult?.counts ?? { totalCurrencies: 0, processedCurrencies: 0, skippedCurrencies: 0 },
         depositVolume: depositVolumeResult?.totalDepositVolumeUSD ?? 0,
         depositVolumeBreakdown: depositVolumeResult?.breakdown ?? {},
-        tradeVolumeNGN: tradeVolumeResult?.[0]?.totalTradeVolumeNGN ?? 0,
-        totalTrades: tradeVolumeResult?.[0]?.totalTrades ?? (swapStats[0]?.offramps ?? 0),
+        totalTrades: tradeCountResult?.[0]?.totalTrades ?? 0,
+        tradeVolumeNGN: Math.round((depositVolumeResult?.totalDepositVolumeUSD ?? 0) * currentOfframpRate),
+        withdrawalVolumeNGN: withdrawalVolumeResult?.[0]?.totalWithdrawalVolumeNGN ?? 0,
         giftCardStats: {
           approved: (Number(approvedGiftCardsCount) || 0) + (Number(paidGiftCardsCount) || 0),
           rejected: Number(rejectedGiftCardsCount) || 0,

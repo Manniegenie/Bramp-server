@@ -239,6 +239,23 @@ async function sendChatbotDepositEmail(to, name, depositAmount, token, creditAmo
   });
 }
 
+async function sendChatbotWithdrawalEmail(to, name, amount, currency, reference, status = 'completed') {
+  return sendEmail({
+    to,
+    name,
+    templateId: parseInt(process.env.BREVO_TEMPLATE_CHATBOT_WITHDRAWAL),
+    params: {
+      username: String(name || 'User'),
+      amount: String(amount),
+      currency: String(currency),
+      reference: String(reference),
+      status: String(status),
+      transactionDate: String(new Date().toLocaleDateString()),
+      transactionTime: String(new Date().toLocaleTimeString())
+    }
+  });
+}
+
 async function sendFinancialAnalysisCompleteEmail(to, name, jobId, bankStatementProcessed, cryptoStatementProcessed) {
   const params = {
     username: String(name || 'User'),
@@ -592,6 +609,7 @@ module.exports = {
   sendEmailVerificationOTP,
   sendChatbotSellEmail,
   sendChatbotDepositEmail,
+  sendChatbotWithdrawalEmail,
   sendFinancialAnalysisCompleteEmail,
   sendAdminWelcomeEmail,
   sendNINVerificationEmail,
