@@ -189,6 +189,22 @@ router.get('/prices', async (req, res) => {
   }
 });
 
+// Fetch last N price points per symbol for sparkline rendering.
+// Returns { BTC: [p1, p2, ...], ETH: [...], ... } — oldest first.
+async function getSparklines(symbols, points = 10) {
+  const rows = await PriceChange.aggregate([
+    { $match: { symbol: { $in: symbols.map(s => s.toUpperCase()) } } },
+    { $sort:  { timestamp: -1 } },
+    { $group: { _id: '$symbol', prices: { $push: '$price' } } },
+    { $project: { prices: { $slice: ['$prices', points] } } },
+  ]);
+  const map = {};
+  for (const row of rows) {
+    map[row._id] = row.prices.slice().reverse(); // oldest → newest
+  }
+  return map;
+}
+
 /**
  * GET /betamarket/markets?window=1H|4H|24H
  */
@@ -196,9 +212,10 @@ router.get('/markets', async (req, res) => {
   const window = validWindow(req.query.window);
 
   try {
-    const [{ mids }, ctxMap] = await Promise.all([
+    const [{ mids }, ctxMap, sparklines] = await Promise.all([
       getMidsWithFallback(MARKET_TOKENS),
       getCtxMapWithFallback(),
+      getSparklines(MARKET_TOKENS),
     ]);
 
     const { roundStart, roundEnd } = getRoundBounds(window);
@@ -230,6 +247,7 @@ router.get('/markets', async (req, res) => {
         upOdds,
         downOdds,
         participants: participantCounts[mId] || 0,
+        sparkline:    sparklines[symbol] || [],
         roundStart:   roundStart.toISOString(),
         endTime:      roundEnd.getTime(),
       };
@@ -254,6 +272,7 @@ router.get('/markets', async (req, res) => {
         highOdds,
         lowOdds,
         participants: participantCounts[vId] || 0,
+        sparkline:    sparklines[symbol] || [],
         roundStart:   roundStart.toISOString(),
         endTime:      roundEnd.getTime(),
       };
