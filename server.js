@@ -532,8 +532,9 @@ const AccountnameRoutes = require("./routes/Accountname");
 const ChatbottransactionHistoryRoutes = require("./routes/ChatbottransactionHistory");
 const SmileIDRedirectRoutes = require("./routes/SmileIDRedirect");
 const PricesRoutes = require("./routes/prices");
-const GameRoutes = require("./routes/game");
-const ScanRoutes = require("./routes/scan");
+const GameRoutes       = require("./routes/game");
+const BetaMarketRoutes = require("./routes/betamarket");
+const ScanRoutes       = require("./routes/scan");
 const VoiceRoutes = require("./routes/voice");
 const adminsigninRoutes = require("./adminRoutes/adminsign-in");
 const adminRegisterRoutes = require("./adminRoutes/registeradmin");
@@ -677,7 +678,7 @@ app.use("/dollarvalue", authenticateToken, dollarvalueRoutes);
 app.use("/giftcard", authenticateToken, giftcardRoutes);
 app.use("/giftcardrates", authenticateToken, giftcardRatesRoutes);
 app.use("/changepin", authenticateToken, changepinRoutes);
-app.use("/forgotpin", authenticateToken, forgotpinRoutes);
+app.use("/forgotpin", forgotpinRoutes);
 app.use("/deleteaccount", authenticateToken, deleteaccountRoutes);
 app.use("/verifyemail", authenticateToken, verifyemailRoutes);
 app.use("/bankenquiry", authenticateToken, bankenquiryRoutes);
@@ -692,8 +693,9 @@ app.use("/buy", authenticateToken, BuyRoutes);
 app.use("/chat-history", authenticateToken, ChatbottransactionHistoryRoutes);
 app.use("/smileid-redirect", SmileIDRedirectRoutes);
 app.use("/chatbot-kyc", authenticateToken, chatbotKYCRoutes);
-app.use("/game", authenticateToken, GameRoutes);
-app.use("/scan", authenticateToken, ScanRoutes);
+app.use("/game",       authenticateToken, GameRoutes);
+app.use("/betamarket", authenticateToken, BetaMarketRoutes);
+app.use("/scan",       authenticateToken, ScanRoutes);
 app.use("/voice", authenticateToken, VoiceRoutes);
 app.use("/lisk", authenticateToken, liskWalletRoutes);
 app.use("/notifications", authenticateToken, notificationsRoutes);
@@ -916,6 +918,24 @@ const startServer = async () => {
         console.log("📢 Scheduled notification services started");
       } catch (notifErr) {
         console.error("⚠️  Error starting scheduled notification services:", notifErr.message);
+      }
+
+      // Start BetaMarket prediction settlement + position crons
+      try {
+        const betamarketCron = require('./services/betamarketCron');
+        betamarketCron.start();
+        console.log("📊 BetaMarket cron started");
+      } catch (cronErr) {
+        console.error("⚠️  Error starting BetaMarket cron:", cronErr.message);
+      }
+
+      // Start Hyperliquid balance guard (hourly)
+      try {
+        const hlBalanceGuard = require('./services/hlBalanceGuard');
+        hlBalanceGuard.start();
+        console.log("🛡️  HL balance guard started");
+      } catch (cronErr) {
+        console.error("⚠️  Error starting HL balance guard:", cronErr.message);
       }
     });
   } catch (e) {
