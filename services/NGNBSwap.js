@@ -6,14 +6,15 @@
  * Converts NGNB stakes to USDC at the platform level via Obiex.
  *
  * Architecture note:
- *   - NGNB is Bramp's internal Naira-pegged token (1 NGNB ≈ 1 NGN).
- *   - On Obiex, the Naira-pegged token is listed as NGNB (or NGNX as fallback).
- *   - This service calls the Obiex API using platform credentials (not user-level).
- *   - The resulting USDC lives in the platform's Obiex account and will be used
- *     to open Hyperliquid perp positions on behalf of the pooled bets.
+ *   - NGNB is Bramp's internal Naira balance (1 NGNB ≈ 1 NGN).
+ *   - On Obiex, the Naira token is listed as NGNX.
+ *   - Obiex trade pairs are ALWAYS crypto↔NGNX. NGNX is ALWAYS the targetId.
+ *     Direction is controlled by `side`: BUY = spend NGNX to get crypto,
+ *     SELL = give crypto to receive NGNX.
+ *   - To go NGNX → USDC: sourceId=USDC, targetId=NGNX, side='BUY', amount=NGNX amount to spend.
  *
  * Obiex swap flow:
- *   createQuote(NGNB → USDC, side=SELL)  →  acceptQuote(quoteId)
+ *   createQuote(sourceId=USDC, targetId=NGNX, side=BUY, amount=ngnbAmount)  →  acceptQuote(quoteId)
  */
 
 const logger              = require('../utils/logger');
@@ -47,16 +48,20 @@ async function resolveNGNBCode() {
 // common field names in order of likelihood.
 
 function extractUSDCAmount(quoteData, acceptData) {
+  // For a BUY (spend NGNX → receive USDC), Obiex returns the USDC amount
+  // received in sourceAmount / sourceValue / destinationAmount depending on API version.
   const candidates = [
+    acceptData?.sourceAmount,
+    acceptData?.sourceValue,
     acceptData?.destinationAmount,
     acceptData?.toAmount,
     acceptData?.receivedAmount,
-    acceptData?.targetAmount,
+    acceptData?.data?.sourceAmount,
+    acceptData?.data?.sourceValue,
     acceptData?.data?.destinationAmount,
-    acceptData?.data?.toAmount,
+    quoteData?.sourceAmount,
     quoteData?.destinationAmount,
     quoteData?.toAmount,
-    quoteData?.rate ? null : undefined, // rate alone isn't enough
   ];
 
   for (const v of candidates) {
@@ -91,17 +96,19 @@ async function swapNGNBtoUSDC(ngnbAmount) {
   try {
     ngnbCode = await resolveNGNBCode();
 
-    const [ngnbId, usdcId] = await Promise.all([
-      getCurrencyIdByCode(ngnbCode),
+    // Obiex rule: crypto is always sourceId, NGNX is always targetId.
+    // To spend NGNX and receive USDC: sourceId=USDC, targetId=NGNX, side='BUY'.
+    const [usdcId, ngnxId] = await Promise.all([
       getCurrencyIdByCode('USDC'),
+      getCurrencyIdByCode(ngnbCode), // resolves to 'NGNX'
     ]);
 
     // ── Step 1: Create quote ─────────────────────────────────────────────────
     const quoteResult = await createQuote({
-      sourceId: ngnbId,
-      targetId: usdcId,
-      amount:   ngnbAmount,
-      side:     'SELL', // we are selling NGNB to receive USDC
+      sourceId: usdcId,    // crypto is always sourceId on Obiex
+      targetId: ngnxId,    // NGNX is always targetId on Obiex
+      amount:   ngnbAmount, // amount of NGNX (naira) to spend
+      side:     'BUY',     // BUY USDC with NGNX
     });
 
     if (!quoteResult.success) {
