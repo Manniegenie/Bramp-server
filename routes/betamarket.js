@@ -49,43 +49,49 @@ const MARKET_TOKENS = ['BTC', 'ETH', 'SOL', 'BNB', 'MATIC', 'AVAX'];
 
 // Platform-defined multiplier options shown on every market card.
 // Users pick the one matching their risk appetite — no custom input.
-const PLATFORM_MULTIPLIERS = [2, 5, 10];
+const PLATFORM_MULTIPLIERS = [1.7, 2, 5, 10];
 
 // Target % move required to win per asset × window × multiplier.
 // Calibrated to approximate win rates:
 //   2x  → ~30% win rate   (moderate, often in reach on active days)
 //   5x  → ~15% win rate   (requires conviction + momentum)
 //   10x → ~8%  win rate   (outlier moves, high-reward believers)
+// Target % move required to win per asset × window × multiplier.
+// Calibrated approximate win rates:
+//   1.7x → ~55% win rate  (small move, accessible — most will win)
+//   2x   → ~35% win rate  (moderate conviction required)
+//   5x   → ~15% win rate  (strong move, high reward)
+//   10x  → ~8%  win rate  (outlier moves only)
 const TARGET_PCT = {
   BTC: {
-    '1H':  { 2: 1.5,  5: 3.5,  10: 7.0  },
-    '4H':  { 2: 3.0,  5: 7.0,  10: 14.0 },
-    '24H': { 2: 5.0,  5: 12.0, 10: 22.0 },
+    '1H':  { 1.7: 0.6,  2: 1.5,  5: 3.5,  10: 7.0  },
+    '4H':  { 1.7: 1.2,  2: 3.0,  5: 7.0,  10: 14.0 },
+    '24H': { 1.7: 2.0,  2: 5.0,  5: 12.0, 10: 22.0 },
   },
   ETH: {
-    '1H':  { 2: 2.0,  5: 4.5,  10: 9.0  },
-    '4H':  { 2: 4.0,  5: 9.0,  10: 18.0 },
-    '24H': { 2: 7.0,  5: 15.0, 10: 28.0 },
+    '1H':  { 1.7: 0.8,  2: 2.0,  5: 4.5,  10: 9.0  },
+    '4H':  { 1.7: 1.6,  2: 4.0,  5: 9.0,  10: 18.0 },
+    '24H': { 1.7: 3.0,  2: 7.0,  5: 15.0, 10: 28.0 },
   },
   SOL: {
-    '1H':  { 2: 3.0,  5: 7.0,  10: 14.0 },
-    '4H':  { 2: 6.0,  5: 14.0, 10: 28.0 },
-    '24H': { 2: 10.0, 5: 22.0, 10: 40.0 },
+    '1H':  { 1.7: 1.2,  2: 3.0,  5: 7.0,  10: 14.0 },
+    '4H':  { 1.7: 2.5,  2: 6.0,  5: 14.0, 10: 28.0 },
+    '24H': { 1.7: 4.0,  2: 10.0, 5: 22.0, 10: 40.0 },
   },
   BNB: {
-    '1H':  { 2: 2.0,  5: 4.5,  10: 9.0  },
-    '4H':  { 2: 4.0,  5: 9.0,  10: 18.0 },
-    '24H': { 2: 7.0,  5: 15.0, 10: 28.0 },
+    '1H':  { 1.7: 0.8,  2: 2.0,  5: 4.5,  10: 9.0  },
+    '4H':  { 1.7: 1.6,  2: 4.0,  5: 9.0,  10: 18.0 },
+    '24H': { 1.7: 3.0,  2: 7.0,  5: 15.0, 10: 28.0 },
   },
   MATIC: {
-    '1H':  { 2: 2.5,  5: 6.0,  10: 12.0 },
-    '4H':  { 2: 5.0,  5: 12.0, 10: 24.0 },
-    '24H': { 2: 9.0,  5: 20.0, 10: 38.0 },
+    '1H':  { 1.7: 1.0,  2: 2.5,  5: 6.0,  10: 12.0 },
+    '4H':  { 1.7: 2.0,  2: 5.0,  5: 12.0, 10: 24.0 },
+    '24H': { 1.7: 3.5,  2: 9.0,  5: 20.0, 10: 38.0 },
   },
   AVAX: {
-    '1H':  { 2: 2.5,  5: 6.0,  10: 12.0 },
-    '4H':  { 2: 5.0,  5: 12.0, 10: 24.0 },
-    '24H': { 2: 9.0,  5: 20.0, 10: 38.0 },
+    '1H':  { 1.7: 1.0,  2: 2.5,  5: 6.0,  10: 12.0 },
+    '4H':  { 1.7: 2.0,  2: 5.0,  5: 12.0, 10: 24.0 },
+    '24H': { 1.7: 3.5,  2: 9.0,  5: 20.0, 10: 38.0 },
   },
 };
 
