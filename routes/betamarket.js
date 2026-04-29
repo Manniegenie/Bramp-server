@@ -363,12 +363,6 @@ router.post('/predict', async (req, res) => {
     ]);
 
     // ── Resolve picks with live odds ────────────────────────────────────────
-    const marketIds = rawPicks.map(p => {
-      const { roundStart } = getRoundBounds(p.window);
-      return makeMarketId(p.symbol, p.window, roundStart);
-    });
-    const realPools = await aggregatePools(marketIds);
-
     const resolvedPicks = rawPicks.map(p => {
       const mType             = p.marketType || 'directional';
       const { roundStart, roundEnd } = getRoundBounds(p.window);
@@ -376,7 +370,6 @@ router.post('/predict', async (req, res) => {
       const mId               = isVol
         ? makeVolMarketId(p.symbol, p.window, roundStart)
         : makeMarketId(p.symbol,    p.window, roundStart);
-      const real              = realPools[mId] || { up: 0, down: 0, high: 0, low: 0 };
 
       let odds;
       let threshold = null;
