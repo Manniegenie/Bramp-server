@@ -25,7 +25,7 @@ async function getHL() {
 async function getMidsWithFallback(symbols) {
   try {
     const hl      = await getHL();
-    const allMids = await hl.getAllMids();
+    const allMids = await hl.allMids();
     // Verify we got at least one of our symbols; if not, treat as failure
     if (symbols.some(s => allMids[s] !== undefined)) return { mids: allMids, source: 'hyperliquid' };
     throw new Error('No matching symbols in HL response');
@@ -51,7 +51,7 @@ async function getMidsWithFallback(symbols) {
 async function getCtxMapWithFallback() {
   try {
     const hl       = await getHL();
-    const metaCtxs = await hl.getMetaAndAssetCtxs();
+    const metaCtxs = await hl.metaAndAssetCtxs();
     return buildCtxMap(metaCtxs);
   } catch {
     _hlInfo = null;
