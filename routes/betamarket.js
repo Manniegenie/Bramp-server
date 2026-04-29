@@ -7,11 +7,11 @@ const logger           = require('../utils/logger');
 const User             = require('../models/user');
 const Prediction       = require('../models/Prediction');
 const PriceChange      = require('../models/pricechange');
-const { swapNGNBtoUSDC }       = require('../services/NGNBSwap');
+const { swapNGNBtoUSDC }        = require('../services/NGNBSwap');
 const { validateTwoFactorAuth } = require('../services/twofactorAuth');
+const { getOnrampRate }         = require('../services/onramppriceservice');
 
-// ─── Hyperliquid SDK (read-only price oracle, no account/keys required) ───────
-// ESM-only package, loaded lazily via dynamic import.
+// ── Hyperliquid price oracle ───────────────────────────────────────────────────
 
 let _hlInfo = null;
 
@@ -23,24 +23,19 @@ async function getHL() {
   return _hlInfo;
 }
 
-// If Hyperliquid is unavailable fall back to Binance prices from our own DB.
 async function getMidsWithFallback(symbols) {
   try {
     const hl      = await getHL();
     const allMids = await hl.allMids();
-    // Verify we got at least one of our symbols; if not, treat as failure
     if (symbols.some(s => allMids[s] !== undefined)) return { mids: allMids, source: 'hyperliquid' };
     throw new Error('No matching symbols in HL response');
   } catch (hlErr) {
     logger.warn('BetaMarket: Hyperliquid unavailable, falling back to Binance DB', { error: hlErr.message });
-    // Reset singleton so next request retries the HL connection
     _hlInfo = null;
-
     const prices = {};
     await Promise.all(
       symbols.map(async s => {
-        const doc = await PriceChange.findOne({ symbol: s })
-          .sort({ timestamp: -1 }).lean();
+        const doc = await PriceChange.findOne({ symbol: s }).sort({ timestamp: -1 }).lean();
         if (doc) prices[s] = doc.price;
       })
     );
@@ -48,94 +43,67 @@ async function getMidsWithFallback(symbols) {
   }
 }
 
-// Same fallback for getMetaAndAssetCtxs (funding rates / OI).
-// Returns an empty ctxMap on failure — markets still work, just without funding nudge.
-async function getCtxMapWithFallback() {
-  try {
-    const hl       = await getHL();
-    const metaCtxs = await hl.metaAndAssetCtxs();
-    return buildCtxMap(metaCtxs);
-  } catch {
-    _hlInfo = null;
-    return {};
-  }
-}
+// ── Constants ─────────────────────────────────────────────────────────────────
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+const MARKET_TOKENS = ['BTC', 'ETH', 'SOL', 'BNB', 'MATIC', 'AVAX'];
 
-const MARKET_TOKENS  = ['BTC', 'ETH', 'SOL', 'BNB', 'MATIC', 'AVAX'];
-const LEVERAGE       = 2.0;    // HL perp leverage — sets the base fair odds ceiling
-const HOUSE_EDGE     = 0.06;   // 6% — platform keeps this fraction of every losing stake in expectation
-const PLATFORM_FEE   = 100;    // flat ₦100 NGNB fee per prediction (platform revenue, on top of house edge)
-const MIN_STAKE      = 100;    // ₦100 minimum (plus fee on top)
-const MAX_STAKE      = 10_000_000;
-const MAX_PAYOUT     = 10_000_000;
-const MAX_PICKS      = 6;
+// Platform-defined multiplier options shown on every market card.
+// Users pick the one matching their risk appetite — no custom input.
+const PLATFORM_MULTIPLIERS = [2, 5, 10];
+
+// Target % move required to win per asset × window × multiplier.
+// Calibrated to approximate win rates:
+//   2x  → ~30% win rate   (moderate, often in reach on active days)
+//   5x  → ~15% win rate   (requires conviction + momentum)
+//   10x → ~8%  win rate   (outlier moves, high-reward believers)
+const TARGET_PCT = {
+  BTC: {
+    '1H':  { 2: 1.5,  5: 3.5,  10: 7.0  },
+    '4H':  { 2: 3.0,  5: 7.0,  10: 14.0 },
+    '24H': { 2: 5.0,  5: 12.0, 10: 22.0 },
+  },
+  ETH: {
+    '1H':  { 2: 2.0,  5: 4.5,  10: 9.0  },
+    '4H':  { 2: 4.0,  5: 9.0,  10: 18.0 },
+    '24H': { 2: 7.0,  5: 15.0, 10: 28.0 },
+  },
+  SOL: {
+    '1H':  { 2: 3.0,  5: 7.0,  10: 14.0 },
+    '4H':  { 2: 6.0,  5: 14.0, 10: 28.0 },
+    '24H': { 2: 10.0, 5: 22.0, 10: 40.0 },
+  },
+  BNB: {
+    '1H':  { 2: 2.0,  5: 4.5,  10: 9.0  },
+    '4H':  { 2: 4.0,  5: 9.0,  10: 18.0 },
+    '24H': { 2: 7.0,  5: 15.0, 10: 28.0 },
+  },
+  MATIC: {
+    '1H':  { 2: 2.5,  5: 6.0,  10: 12.0 },
+    '4H':  { 2: 5.0,  5: 12.0, 10: 24.0 },
+    '24H': { 2: 9.0,  5: 20.0, 10: 38.0 },
+  },
+  AVAX: {
+    '1H':  { 2: 2.5,  5: 6.0,  10: 12.0 },
+    '4H':  { 2: 5.0,  5: 12.0, 10: 24.0 },
+    '24H': { 2: 9.0,  5: 20.0, 10: 38.0 },
+  },
+};
+
+const PLATFORM_FEE  = 100;          // flat ₦100 per prediction — sole platform revenue
+const MIN_STAKE_USD = 10;           // $10 USDC minimum — matches HL minimum notional
+const MAX_STAKE     = 10_000_000;
+const MAX_PAYOUT    = 10_000_000;
+const MAX_PICKS     = 6;
 
 const WINDOW_MS = { '1H': 3_600_000, '4H': 14_400_000, '24H': 86_400_000 };
 
-// % price move required to win a volatility 'high' pick
-const VOLATILITY_THRESHOLDS = {
-  BTC:   { '1H': 1.5, '4H': 3.0, '24H': 5.5 },
-  ETH:   { '1H': 2.0, '4H': 3.8, '24H': 6.5 },
-  SOL:   { '1H': 2.5, '4H': 4.8, '24H': 8.0 },
-  BNB:   { '1H': 1.8, '4H': 3.4, '24H': 6.0 },
-  MATIC: { '1H': 2.2, '4H': 4.2, '24H': 7.0 },
-  AVAX:  { '1H': 2.0, '4H': 3.8, '24H': 6.5 },
-};
-
-// ─── Pure helpers ─────────────────────────────────────────────────────────────
+// ── Pure helpers ──────────────────────────────────────────────────────────────
 
 function validWindow(w) { return WINDOW_MS[w] ? w : '1H'; }
 
-function buildCtxMap(metaCtxs) {
-  const map = {};
-  if (metaCtxs?.[0]?.universe && Array.isArray(metaCtxs[1])) {
-    metaCtxs[0].universe.forEach((asset, i) => { map[asset.name] = metaCtxs[1][i] || {}; });
-  }
-  return map;
-}
-
-/**
- * Directional odds — house model with HL funding rate as a probability signal.
- *
- * Base fair odds = LEVERAGE (2.0x). House edge is applied first, then a bias
- * derived from the HL funding rate nudges one side ±10% max.
- *
- * Positive funding (longs crowded/paying shorts) → UP slightly less likely →
- *   UP odds nudge down, DOWN odds nudge up.
- *
- * With LEVERAGE=2 and HOUSE_EDGE=0.06, symmetric base odds are 1.88x.
- * Expected platform margin per ₦100 staked (50/50 outcome): ₦6.
- */
-function calcDirectionalOdds(funding) {
-  const base = LEVERAGE * (1 - HOUSE_EDGE);              // e.g. 2.0 × 0.94 = 1.88
-  const bias = Math.tanh((funding ?? 0) * 2000) * 0.10;  // ±10% max tilt from funding signal
-  const upOdds   = Math.max(1.05, parseFloat((base * (1 - bias)).toFixed(2)));
-  const downOdds = Math.max(1.05, parseFloat((base * (1 + bias)).toFixed(2)));
-  return { upOdds, downOdds };
-}
-
-/**
- * Volatility odds — house model with HL mark/oracle spread as a signal.
- *
- * Wider spread = market implies a bigger move = BIG odds nudge down,
- * QUIET odds nudge up. House edge applied at base.
- */
-function calcVolatilityOdds(markPx, oraclePx, threshold) {
-  const base   = LEVERAGE * (1 - HOUSE_EDGE);
-  const spread = (markPx && oraclePx && oraclePx > 0)
-    ? Math.abs(markPx - oraclePx) / oraclePx * 100
-    : 0;
-  const factor   = Math.min(spread / Math.max(threshold, 0.1), 0.20);
-  const highOdds = Math.max(1.05, parseFloat((base * (1 - factor)).toFixed(2)));
-  const lowOdds  = Math.max(1.05, parseFloat((base * (1 + factor)).toFixed(2)));
-  return { highOdds, lowOdds };
-}
-
 function getRoundBounds(window) {
-  const ms = WINDOW_MS[window];
-  const start = Math.floor(Date.now() / ms) * ms; // current window — timer shows time remaining
+  const ms    = WINDOW_MS[window];
+  const start = Math.floor(Date.now() / ms) * ms;
   return { roundStart: new Date(start), roundEnd: new Date(start + ms) };
 }
 
@@ -143,54 +111,49 @@ function makeMarketId(symbol, window, roundStart) {
   return `${symbol}-${window}-${roundStart.getTime()}`;
 }
 
-function makeVolMarketId(symbol, window, roundStart) {
-  return `VOL-${symbol}-${window}-${roundStart.getTime()}`;
+// Build all platform multiplier options for a single market.
+// Returns array — one entry per multiplier, each with UP + DOWN target prices.
+function buildOptions(symbol, window, currentPrice) {
+  return PLATFORM_MULTIPLIERS.map(multiplier => {
+    const targetPct = TARGET_PCT[symbol]?.[window]?.[multiplier] ?? 3.0;
+    return {
+      multiplier,
+      targetPct,
+      targetPriceUp:   currentPrice
+        ? parseFloat((currentPrice * (1 + targetPct / 100)).toFixed(2))
+        : null,
+      targetPriceDown: currentPrice
+        ? parseFloat((currentPrice * (1 - targetPct / 100)).toFixed(2))
+        : null,
+    };
+  });
 }
 
-// ─── DB helpers ───────────────────────────────────────────────────────────────
+// Min stake in NGNB = $10 at the admin on-ramp rate
+async function getMinStakeNGNB() {
+  try {
+    const rate = await getOnrampRate();
+    return Math.ceil(MIN_STAKE_USD * rate.finalPrice);
+  } catch {
+    return 16_000; // fallback ~$10 at ₦1,600
+  }
+}
 
-async function aggregatePools(marketIds) {
+// ── DB helpers ────────────────────────────────────────────────────────────────
+
+async function aggregateParticipants(marketIds) {
   if (!marketIds.length) return {};
   const rows = await Prediction.aggregate([
     { $match: { status: { $in: ['pending', 'settling'] }, 'picks.marketId': { $in: marketIds } } },
     { $unwind: '$picks' },
-    { $match: { 'picks.marketId': { $in: marketIds }, 'picks.result': 'pending' } },
-    { $group: {
-      _id:   { marketId: '$picks.marketId', direction: '$picks.direction' },
-      total: { $sum: '$stake' },
-    }},
+    { $match: { 'picks.marketId': { $in: marketIds } } },
+    { $group: { _id: '$picks.marketId', count: { $sum: 1 } } },
   ]);
-
-  // Return participant count per marketId (direction-agnostic)
   const map = {};
-  for (const r of rows) {
-    const { marketId } = r._id;
-    map[marketId] = (map[marketId] || 0) + 1;
-  }
+  for (const r of rows) map[r._id] = r.count;
   return map;
 }
 
-// ─── Routes ──────────────────────────────────────────────────────────────────
-
-/**
- * GET /betamarket/prices
- */
-router.get('/prices', async (req, res) => {
-  try {
-    const { mids } = await getMidsWithFallback(MARKET_TOKENS);
-    const prices = {};
-    for (const s of MARKET_TOKENS) {
-      if (mids[s] !== undefined) prices[s] = parseFloat(mids[s]);
-    }
-    res.json({ success: true, data: { prices, fetchedAt: new Date().toISOString() } });
-  } catch (err) {
-    logger.error('BetaMarket /prices error', { error: err.message });
-    res.status(500).json({ success: false, error: 'Failed to fetch live prices' });
-  }
-});
-
-// Fetch last N price points per symbol for sparkline rendering.
-// Returns { BTC: [p1, p2, ...], ETH: [...], ... } — oldest first.
 async function getSparklines(symbols, points = 10) {
   const rows = await PriceChange.aggregate([
     { $match: { symbol: { $in: symbols.map(s => s.toUpperCase()) } } },
@@ -199,79 +162,43 @@ async function getSparklines(symbols, points = 10) {
     { $project: { prices: { $slice: ['$prices', points] } } },
   ]);
   const map = {};
-  for (const row of rows) {
-    map[row._id] = row.prices.slice().reverse(); // oldest → newest
-  }
+  for (const row of rows) map[row._id] = row.prices.slice().reverse();
   return map;
 }
 
+// ── Routes ────────────────────────────────────────────────────────────────────
+
 /**
  * GET /betamarket/markets?window=1H|4H|24H
+ *
+ * Each market carries a pre-built options array (one per platform multiplier).
+ * Frontend renders them as a row of tappable buttons — no user config required.
  */
 router.get('/markets', async (req, res) => {
   const window = validWindow(req.query.window);
 
   try {
-    const [{ mids }, ctxMap, sparklines] = await Promise.all([
+    const [{ mids }, sparklines, minStake] = await Promise.all([
       getMidsWithFallback(MARKET_TOKENS),
-      getCtxMapWithFallback(),
       getSparklines(MARKET_TOKENS),
+      getMinStakeNGNB(),
     ]);
 
     const { roundStart, roundEnd } = getRoundBounds(window);
-    const allMarketIds = [
-      ...MARKET_TOKENS.map(s => makeMarketId(s,    window, roundStart)),
-      ...MARKET_TOKENS.map(s => makeVolMarketId(s, window, roundStart)),
-    ];
-    const participantCounts = await aggregatePools(allMarketIds);
+    const marketIds    = MARKET_TOKENS.map(s => makeMarketId(s, window, roundStart));
+    const participants = await aggregateParticipants(marketIds);
 
     const markets = MARKET_TOKENS.map(symbol => {
-      const ctx       = ctxMap[symbol] || {};
-      const funding   = parseFloat(ctx.funding  ?? 0);
-      const markPx    = ctx.markPx    ? parseFloat(ctx.markPx)    : null;
-      const oraclePx  = ctx.oraclePx  ? parseFloat(ctx.oraclePx)  : null;
-      const mId       = makeMarketId(symbol, window, roundStart);
-      const { upOdds, downOdds } = calcDirectionalOdds(funding);
+      const currentPrice = mids[symbol] ? parseFloat(mids[symbol]) : null;
+      const mId          = makeMarketId(symbol, window, roundStart);
 
       return {
         id:           mId,
         symbol,
         window,
-        marketType:   'directional',
-        midPrice:     mids[symbol] ? parseFloat(mids[symbol]) : null,
-        markPrice:    markPx,
-        oraclePrice:  oraclePx,
-        openInterest: ctx.openInterest ? parseFloat(ctx.openInterest) : null,
-        dayVolume:    ctx.dayNtlVlm    ? parseFloat(ctx.dayNtlVlm)    : null,
-        fundingRate:  funding,
-        upOdds,
-        downOdds,
-        participants: participantCounts[mId] || 0,
-        sparkline:    sparklines[symbol] || [],
-        roundStart:   roundStart.toISOString(),
-        endTime:      roundEnd.getTime(),
-      };
-    });
-
-    const volatilityMarkets = MARKET_TOKENS.map(symbol => {
-      const ctx       = ctxMap[symbol] || {};
-      const markPx    = ctx.markPx   ? parseFloat(ctx.markPx)   : null;
-      const oraclePx  = ctx.oraclePx ? parseFloat(ctx.oraclePx) : null;
-      const threshold = VOLATILITY_THRESHOLDS[symbol]?.[window] ?? 2.0;
-      const vId       = makeVolMarketId(symbol, window, roundStart);
-      const { highOdds, lowOdds } = calcVolatilityOdds(markPx, oraclePx, threshold);
-
-      return {
-        id:           vId,
-        symbol,
-        window,
-        marketType:   'volatility',
-        threshold,
-        midPrice:     mids[symbol] ? parseFloat(mids[symbol]) : null,
-        fundingRate:  ctx.funding  ? parseFloat(ctx.funding)  : 0,
-        highOdds,
-        lowOdds,
-        participants: participantCounts[vId] || 0,
+        currentPrice,
+        options:      buildOptions(symbol, window, currentPrice),
+        participants: participants[mId] || 0,
         sparkline:    sparklines[symbol] || [],
         roundStart:   roundStart.toISOString(),
         endTime:      roundEnd.getTime(),
@@ -280,7 +207,13 @@ router.get('/markets', async (req, res) => {
 
     res.json({
       success: true,
-      data: { markets, volatilityMarkets, window, fetchedAt: new Date().toISOString() },
+      data: {
+        markets,
+        window,
+        multipliers: PLATFORM_MULTIPLIERS,
+        minStake,
+        fetchedAt: new Date().toISOString(),
+      },
     });
   } catch (err) {
     logger.error('BetaMarket /markets error', { error: err.message });
@@ -292,18 +225,17 @@ router.get('/markets', async (req, res) => {
  * POST /betamarket/predict
  *
  * Body: {
- *   picks:          [{ symbol, direction: 'up'|'down', window: '1H'|'4H'|'24H' }],
- *   stake:          number,          // NGNB — debited from ngnbBalance
- *   idempotencyKey: string           // client-generated UUID; prevents duplicate submissions
+ *   picks: [{
+ *     symbol:     'BTC' | 'ETH' | ...
+ *     direction:  'up' | 'down'
+ *     window:     '1H' | '4H' | '24H'
+ *     multiplier: 2 | 5 | 10
+ *   }],
+ *   stake:          number,
+ *   idempotencyKey: string,
+ *   passwordpin:    string,
+ *   twoFactorCode:  string
  * }
- *
- * Security controls applied:
- *   - MAX_PICKS (6) — prevents expensive payload DoS
- *   - MIN_STAKE / MAX_STAKE — business limits
- *   - MAX_PAYOUT — pool protection cap
- *   - Idempotency key — prevents double-submission on network retry
- *   - Atomic $gte debit — prevents race-condition overdraft
- *   - Duplicate market guard — no two picks for same symbol+window
  */
 router.post('/predict', async (req, res) => {
   const userId = req.user?.id;
@@ -311,18 +243,18 @@ router.post('/predict', async (req, res) => {
 
   const { picks: rawPicks, stake, idempotencyKey, passwordpin, twoFactorCode } = req.body;
 
-  // ── Input validation ────────────────────────────────────────────────────────
+  // ── Input validation ──────────────────────────────────────────────────────
 
   if (!Array.isArray(rawPicks) || rawPicks.length === 0) {
     return res.status(400).json({ success: false, error: 'picks must be a non-empty array' });
   }
   if (rawPicks.length > MAX_PICKS) {
-    return res.status(400).json({ success: false, error: `Maximum ${MAX_PICKS} picks per bet` });
+    return res.status(400).json({ success: false, error: `Maximum ${MAX_PICKS} picks per prediction` });
   }
 
   const stakeNum = parseFloat(stake);
-  if (!stakeNum || stakeNum < MIN_STAKE) {
-    return res.status(400).json({ success: false, error: `Minimum stake is ₦${MIN_STAKE}` });
+  if (!stakeNum || isNaN(stakeNum) || stakeNum <= 0) {
+    return res.status(400).json({ success: false, error: 'Invalid stake amount' });
   }
   if (stakeNum > MAX_STAKE) {
     return res.status(400).json({ success: false, error: `Maximum stake is ₦${MAX_STAKE.toLocaleString()}` });
@@ -334,19 +266,15 @@ router.post('/predict', async (req, res) => {
       return res.status(400).json({ success: false, error: `Unsupported symbol: ${p.symbol}` });
     }
     if (!WINDOW_MS[p.window]) {
-      return res.status(400).json({ success: false, error: `window must be 1H, 4H, or 24H` });
+      return res.status(400).json({ success: false, error: 'window must be 1H, 4H, or 24H' });
     }
-    const mType = p.marketType || 'directional';
-    if (mType === 'volatility') {
-      if (!['high', 'low'].includes(p.direction)) {
-        return res.status(400).json({ success: false, error: `volatility direction must be 'high' or 'low'` });
-      }
-    } else {
-      if (!['up', 'down'].includes(p.direction)) {
-        return res.status(400).json({ success: false, error: `direction must be 'up' or 'down'` });
-      }
+    if (!['up', 'down'].includes(p.direction)) {
+      return res.status(400).json({ success: false, error: 'direction must be up or down' });
     }
-    const key = `${mType}-${p.symbol}-${p.window}`;
+    if (!PLATFORM_MULTIPLIERS.includes(Number(p.multiplier))) {
+      return res.status(400).json({ success: false, error: `multiplier must be one of: ${PLATFORM_MULTIPLIERS.join(', ')}` });
+    }
+    const key = `${p.symbol}-${p.window}`;
     if (seenMarkets.has(key)) {
       return res.status(400).json({ success: false, error: `Duplicate pick: ${p.symbol} ${p.window}` });
     }
@@ -354,26 +282,33 @@ router.post('/predict', async (req, res) => {
   }
 
   try {
-    // ── Idempotency check ───────────────────────────────────────────────────
-    // Reject if this key was already used by this user (network retry / double-tap guard)
-    if (idempotencyKey) {
-      const existingKeyed = await Prediction.findOne({ userId, idempotencyKey }).lean();
-      if (existingKeyed) {
-        return res.status(200).json({ success: true, data: existingKeyed, duplicate: true });
-      }
+    // ── Min stake check ───────────────────────────────────────────────────────
+    const minStake = await getMinStakeNGNB();
+    if (stakeNum < minStake) {
+      return res.status(400).json({
+        success: false,
+        error:   'INSUFFICIENT_STAKE',
+        message: `Minimum stake is ₦${minStake.toLocaleString()} ($${MIN_STAKE_USD} USDC equivalent)`,
+      });
     }
 
-    // ── Auth checks (PIN + 2FA) ─────────────────────────────────────────────
+    // ── Idempotency ───────────────────────────────────────────────────────────
+    if (idempotencyKey) {
+      const existing = await Prediction.findOne({ userId, idempotencyKey }).lean();
+      if (existing) return res.status(200).json({ success: true, data: existing, duplicate: true });
+    }
+
+    // ── Auth ──────────────────────────────────────────────────────────────────
     const user = await User.findById(userId)
       .select('ngnbBalance ngnbPendingBalance passwordpin twoFactorSecret twoFactorEnabled')
       .lean();
     if (!user) return res.status(404).json({ success: false, error: 'User not found' });
 
     if (!user.passwordpin) {
-      return res.status(403).json({ success: false, error: 'PIN_NOT_SET_UP', message: 'Please set up your Password PIN in Profile before placing predictions.' });
+      return res.status(403).json({ success: false, error: 'PIN_NOT_SET_UP', message: 'Set up your Password PIN in Profile first.' });
     }
     if (!passwordpin) {
-      return res.status(400).json({ success: false, error: 'PIN_REQUIRED', message: 'Password PIN is required.' });
+      return res.status(400).json({ success: false, error: 'PIN_REQUIRED' });
     }
     const pinValid = await bcrypt.compare(String(passwordpin), user.passwordpin);
     if (!pinValid) {
@@ -381,104 +316,79 @@ router.post('/predict', async (req, res) => {
     }
 
     if (user.twoFactorEnabled) {
-      if (!twoFactorCode) {
-        return res.status(400).json({ success: false, error: '2FA_REQUIRED', message: '2FA code is required.' });
-      }
+      if (!twoFactorCode) return res.status(400).json({ success: false, error: '2FA_REQUIRED' });
       if (!validateTwoFactorAuth(user, String(twoFactorCode))) {
         return res.status(401).json({ success: false, error: 'INVALID_2FA', message: 'Invalid 2FA code. Please try again.' });
       }
     }
 
-    // ── Balance check ───────────────────────────────────────────────────────
+    // ── Balance check ─────────────────────────────────────────────────────────
     const totalRequired = stakeNum + PLATFORM_FEE;
-    const available = Math.max(0, (user.ngnbBalance || 0) - (user.ngnbPendingBalance || 0));
+    const available     = Math.max(0, (user.ngnbBalance || 0) - (user.ngnbPendingBalance || 0));
     if (available < totalRequired) {
       return res.status(400).json({
         success: false,
-        error: 'INSUFFICIENT_BALANCE',
+        error:   'INSUFFICIENT_BALANCE',
         message: `Insufficient balance. Available: ₦${available.toFixed(2)}, Required: ₦${totalRequired.toFixed(2)} (stake + ₦${PLATFORM_FEE} fee)`,
       });
     }
 
-    // ── Fetch live prices (with Binance fallback) ───────────────────────────
+    // ── Fetch live prices + resolve picks with locked target prices ───────────
     const symbols = [...new Set(rawPicks.map(p => p.symbol))];
-    const [{ mids }, ctxMap] = await Promise.all([
-      getMidsWithFallback(symbols),
-      getCtxMapWithFallback(),
-    ]);
+    const { mids } = await getMidsWithFallback(symbols);
 
-    // ── Resolve picks with live odds ────────────────────────────────────────
     const resolvedPicks = rawPicks.map(p => {
-      const mType             = p.marketType || 'directional';
       const { roundStart, roundEnd } = getRoundBounds(p.window);
-      const isVol             = mType === 'volatility';
-      const mId               = isVol
-        ? makeVolMarketId(p.symbol, p.window, roundStart)
-        : makeMarketId(p.symbol,    p.window, roundStart);
-
-      let odds;
-      let threshold = null;
-      if (isVol) {
-        threshold             = VOLATILITY_THRESHOLDS[p.symbol]?.[p.window] ?? 2.0;
-        const ctx             = ctxMap[p.symbol] || {};
-        const markPx          = ctx.markPx   ? parseFloat(ctx.markPx)   : null;
-        const oraclePx        = ctx.oraclePx ? parseFloat(ctx.oraclePx) : null;
-        const { highOdds, lowOdds } = calcVolatilityOdds(markPx, oraclePx, threshold);
-        odds = p.direction === 'high' ? highOdds : lowOdds;
-      } else {
-        const ctx     = ctxMap[p.symbol] || {};
-        const funding = parseFloat(ctx.funding ?? 0);
-        const { upOdds, downOdds } = calcDirectionalOdds(funding);
-        odds = p.direction === 'up' ? upOdds : downOdds;
-      }
+      const mId          = makeMarketId(p.symbol, p.window, roundStart);
+      const currentPrice = mids[p.symbol] ? parseFloat(mids[p.symbol]) : null;
+      const multiplier   = Number(p.multiplier);
+      const targetPct    = TARGET_PCT[p.symbol]?.[p.window]?.[multiplier] ?? 3.0;
+      const targetPrice  = currentPrice
+        ? parseFloat((currentPrice * (1 + (p.direction === 'up' ? 1 : -1) * targetPct / 100)).toFixed(2))
+        : null;
 
       return {
         symbol:        p.symbol,
-        marketType:    mType,
         direction:     p.direction,
-        ...(threshold !== null && { threshold }),
         window:        p.window,
+        multiplier,
         marketId:      mId,
         roundStart,
         roundEnd,
-        odds,
-        entryPriceUSD: mids[p.symbol] ? parseFloat(mids[p.symbol]) : null,
+        targetPct,
+        targetPrice,
+        entryPriceUSD: currentPrice,
+        odds:          multiplier,   // multiplier IS the odds — payout = stake × odds
       };
     });
 
-    const totalOdds      = resolvedPicks.reduce((acc, p) => acc * p.odds, 1);
-    const rawPayout      = stakeNum * totalOdds;
-    // Cap payout to protect the pool from catastrophic multi-leg parlays
+    // Parlay: total odds = product of all individual multipliers
+    const totalOdds       = resolvedPicks.reduce((acc, p) => acc * p.multiplier, 1);
+    const rawPayout       = stakeNum * totalOdds;
     const potentialPayout = parseFloat(Math.min(rawPayout, MAX_PAYOUT).toFixed(2));
 
-    // ── Atomic balance debit (race-condition safe) ──────────────────────────
-    // Deducts stake (goes to HL position) + PLATFORM_FEE (platform revenue)
+    // ── Atomic balance debit ──────────────────────────────────────────────────
     const debited = await User.findOneAndUpdate(
       { _id: userId, ngnbBalance: { $gte: totalRequired } },
       { $inc: { ngnbBalance: -totalRequired } },
       { new: false },
     );
     if (!debited) {
-      logger.warn('BetaMarket: balance debit failed (race condition or insufficient funds)', { userId, totalRequired });
+      logger.warn('BetaMarket: balance debit failed (race condition)', { userId, totalRequired });
       return res.status(400).json({ success: false, error: 'Balance changed — please retry' });
     }
 
-    // ── Convert NGNB stake → USDC via Obiex (best-effort, non-blocking) ────
-    // Only the stake portion is swapped — PLATFORM_FEE stays as NGNB revenue.
-    // If the swap fails (e.g. trade pair unavailable), the prediction is still
-    // recorded. The HL cron will hedge at pool level using its own liquidity.
+    // ── NGNB → USDC swap (best-effort) ───────────────────────────────────────
     const swapResult = await swapNGNBtoUSDC(stakeNum);
     if (!swapResult.success) {
-      logger.warn('BetaMarket: NGNB→USDC swap failed — proceeding without HL swap', {
-        userId, stakeNum, error: swapResult.error,
-      });
+      logger.warn('BetaMarket: NGNB→USDC swap failed', { userId, stakeNum, error: swapResult.error });
     } else {
       logger.info('BetaMarket: NGNB→USDC swap succeeded', {
-        userId, ngnbStake: stakeNum, usdcAmount: swapResult.usdcAmount, quoteId: swapResult.quoteId,
+        userId, ngnbStake: stakeNum, usdcAmount: swapResult.usdcAmount,
       });
     }
 
-    // ── Persist prediction ──────────────────────────────────────────────────
+    // ── Persist ───────────────────────────────────────────────────────────────
     const prediction = await Prediction.create({
       userId,
       picks:           resolvedPicks,
@@ -492,12 +402,12 @@ router.post('/predict', async (req, res) => {
     });
 
     logger.info('BetaMarket prediction placed', {
-      userId:         userId.toString(),
-      predictionId:   prediction._id.toString(),
-      picks:          resolvedPicks.map(p => `${p.symbol} ${p.direction} ${p.window} @${p.odds}`),
-      ngnbStake:      stakeNum,
-      usdcAmount:     swapResult.usdcAmount,
-      obiexQuoteId:   swapResult.quoteId,
+      userId:       userId.toString(),
+      predictionId: prediction._id.toString(),
+      picks:        resolvedPicks.map(p =>
+        `${p.symbol} ${p.direction} ${p.window} ${p.multiplier}x target=${p.targetPrice}`
+      ),
+      ngnbStake:    stakeNum,
       totalOdds,
       potentialPayout,
     });

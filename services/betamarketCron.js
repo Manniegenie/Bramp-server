@@ -149,14 +149,18 @@ async function processBet(bet, now) {
       break;
     }
 
-    let winDir;
-    if (pick.marketType === 'volatility') {
-      const movePct = Math.abs(closePrice - openPrice) / openPrice * 100;
-      winDir = movePct >= (pick.threshold ?? 2.0) ? 'high' : 'low';
+    let won;
+    if (pick.targetPrice) {
+      // Target-based model: did price reach the locked target by window end?
+      won = pick.direction === 'up'
+        ? closePrice >= pick.targetPrice
+        : closePrice <= pick.targetPrice;
     } else {
-      winDir = closePrice > openPrice ? 'up' : closePrice < openPrice ? 'down' : null;
+      // Legacy directional model (backward compat for old predictions)
+      const winDir = closePrice > openPrice ? 'up' : closePrice < openPrice ? 'down' : null;
+      won = winDir !== null && pick.direction === winDir;
     }
-    const result = winDir !== null && pick.direction === winDir ? 'won' : 'lost';
+    const result = won ? 'won' : 'lost';
 
     if (result !== 'won') allWon = false;
 

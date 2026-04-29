@@ -5,14 +5,15 @@ const mongoose = require('mongoose');
 const MARKET_TOKENS = ['BTC', 'ETH', 'SOL', 'BNB', 'MATIC', 'AVAX'];
 
 const pickSchema = new mongoose.Schema({
-  symbol:        { type: String, enum: MARKET_TOKENS,                          required: true },
-  marketType:    { type: String, enum: ['directional', 'volatility'],          default: 'directional' },
-  direction:     { type: String, enum: ['up', 'down', 'high', 'low'],          required: true },
-  threshold:     { type: Number },   // % threshold for volatility picks only
-  window:        { type: String, enum: ['1H', '4H', '24H'],                    required: true },
-  marketId:      { type: String, required: true },  // e.g. 'BTC-1H-...' or 'VOL-BTC-1H-...'
+  symbol:        { type: String, enum: MARKET_TOKENS,                 required: true },
+  direction:     { type: String, enum: ['up', 'down'],                required: true },
+  multiplier:    { type: Number },   // platform multiplier: 2, 5, or 10
+  window:        { type: String, enum: ['1H', '4H', '24H'],           required: true },
+  marketId:      { type: String, required: true },
   roundStart:    { type: Date,   required: true },
   roundEnd:      { type: Date,   required: true },
+  targetPct:     { type: Number },   // % move required to win
+  targetPrice:   { type: Number },   // absolute price target locked at submission
   odds:          { type: Number, required: true },
   entryPriceUSD: { type: Number },
   openPriceUSD:  { type: Number },
