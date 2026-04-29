@@ -2,11 +2,13 @@
 
 const express          = require('express');
 const router           = express.Router();
+const bcrypt           = require('bcryptjs');
 const logger           = require('../utils/logger');
 const User             = require('../models/user');
 const Prediction       = require('../models/Prediction');
 const PriceChange      = require('../models/pricechange');
-const { swapNGNBtoUSDC } = require('../services/NGNBSwap');
+const { swapNGNBtoUSDC }       = require('../services/NGNBSwap');
+const { validateTwoFactorAuth } = require('../services/twofactorAuth');
 
 // ─── Hyperliquid SDK (read-only price oracle, no account/keys required) ───────
 // ESM-only package, loaded lazily via dynamic import.
@@ -288,7 +290,7 @@ router.post('/predict', async (req, res) => {
   const userId = req.user?.id;
   if (!userId) return res.status(401).json({ success: false, error: 'Unauthorized' });
 
-  const { picks: rawPicks, stake, idempotencyKey } = req.body;
+  const { picks: rawPicks, stake, idempotencyKey, passwordpin, twoFactorCode } = req.body;
 
   // ── Input validation ────────────────────────────────────────────────────────
 
@@ -342,16 +344,40 @@ router.post('/predict', async (req, res) => {
       }
     }
 
-    // ── Balance check ───────────────────────────────────────────────────────
-    const user = await User.findById(userId).select('ngnbBalance ngnbPendingBalance').lean();
+    // ── Auth checks (PIN + 2FA) ─────────────────────────────────────────────
+    const user = await User.findById(userId)
+      .select('ngnbBalance ngnbPendingBalance passwordpin twoFactorSecret twoFactorEnabled')
+      .lean();
     if (!user) return res.status(404).json({ success: false, error: 'User not found' });
 
+    if (!user.passwordpin) {
+      return res.status(403).json({ success: false, error: 'PIN_NOT_SET_UP', message: 'Please set up your Password PIN in Profile before placing predictions.' });
+    }
+    if (!passwordpin) {
+      return res.status(400).json({ success: false, error: 'PIN_REQUIRED', message: 'Password PIN is required.' });
+    }
+    const pinValid = await bcrypt.compare(String(passwordpin), user.passwordpin);
+    if (!pinValid) {
+      return res.status(401).json({ success: false, error: 'INVALID_PIN', message: 'Incorrect PIN. Please try again.' });
+    }
+
+    if (user.twoFactorEnabled) {
+      if (!twoFactorCode) {
+        return res.status(400).json({ success: false, error: '2FA_REQUIRED', message: '2FA code is required.' });
+      }
+      if (!validateTwoFactorAuth(user, String(twoFactorCode))) {
+        return res.status(401).json({ success: false, error: 'INVALID_2FA', message: 'Invalid 2FA code. Please try again.' });
+      }
+    }
+
+    // ── Balance check ───────────────────────────────────────────────────────
     const totalRequired = stakeNum + PLATFORM_FEE;
     const available = Math.max(0, (user.ngnbBalance || 0) - (user.ngnbPendingBalance || 0));
     if (available < totalRequired) {
       return res.status(400).json({
         success: false,
-        error: `Insufficient NGNB balance. Available: ₦${available.toFixed(2)}, Required: ₦${totalRequired.toFixed(2)} (stake ₦${stakeNum} + ₦${PLATFORM_FEE} fee)`,
+        error: 'INSUFFICIENT_BALANCE',
+        message: `Insufficient balance. Available: ₦${available.toFixed(2)}, Required: ₦${totalRequired.toFixed(2)} (stake + ₦${PLATFORM_FEE} fee)`,
       });
     }
 
@@ -418,28 +444,20 @@ router.post('/predict', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Balance changed — please retry' });
     }
 
-    // ── Convert NGNB stake → USDC via Obiex (platform-level) ───────────────
+    // ── Convert NGNB stake → USDC via Obiex (best-effort, non-blocking) ────
     // Only the stake portion is swapped — PLATFORM_FEE stays as NGNB revenue.
+    // If the swap fails (e.g. trade pair unavailable), the prediction is still
+    // recorded. The HL cron will hedge at pool level using its own liquidity.
     const swapResult = await swapNGNBtoUSDC(stakeNum);
-
     if (!swapResult.success) {
-      // Swap failed — refund stake + fee before returning an error.
-      await User.findByIdAndUpdate(userId, { $inc: { ngnbBalance: totalRequired } });
-      logger.error('BetaMarket: NGNB→USDC swap failed — NGNB refunded', {
-        userId, stakeNum, platformFee: PLATFORM_FEE, error: swapResult.error,
+      logger.warn('BetaMarket: NGNB→USDC swap failed — proceeding without HL swap', {
+        userId, stakeNum, error: swapResult.error,
       });
-      return res.status(503).json({
-        success: false,
-        error: 'Market temporarily unavailable. Your balance has been restored.',
+    } else {
+      logger.info('BetaMarket: NGNB→USDC swap succeeded', {
+        userId, ngnbStake: stakeNum, usdcAmount: swapResult.usdcAmount, quoteId: swapResult.quoteId,
       });
     }
-
-    logger.info('BetaMarket: NGNB→USDC swap succeeded', {
-      userId,
-      ngnbStake:  stakeNum,
-      usdcAmount: swapResult.usdcAmount,
-      quoteId:    swapResult.quoteId,
-    });
 
     // ── Persist prediction ──────────────────────────────────────────────────
     const prediction = await Prediction.create({
