@@ -61,34 +61,30 @@ async function getCtxMapWithFallback() {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const MARKET_TOKENS = ['BTC', 'ETH', 'SOL', 'BNB', 'MATIC', 'AVAX'];
-const HOUSE_EDGE    = 0.08;
+const MARKET_TOKENS  = ['BTC', 'ETH', 'SOL', 'BNB', 'MATIC', 'AVAX'];
+const LEVERAGE       = 2.0;    // HL perp leverage — sets the base fair odds ceiling
+const HOUSE_EDGE     = 0.06;   // 6% — platform keeps this fraction of every losing stake in expectation
+const PLATFORM_FEE   = 100;    // flat ₦100 NGNB fee per prediction (platform revenue, on top of house edge)
+const MIN_STAKE      = 100;    // ₦100 minimum (plus fee on top)
+const MAX_STAKE      = 10_000_000;
+const MAX_PAYOUT     = 10_000_000;
+const MAX_PICKS      = 6;
 
-const MIN_STAKE     = 1_000;     // ₦1,000 NGNB minimum
-const MAX_STAKE     = 50_000;    // ₦50,000 NGNB per bet
-const MAX_PAYOUT    = 500_000;   // ₦500,000 NGNB per bet (protects the pool)
-const MAX_PICKS     = 6;         // max legs in a parlay
+const WINDOW_MS = { '1H': 3_600_000, '4H': 14_400_000, '24H': 86_400_000 };
 
-const WINDOW_MS     = { '1H': 3_600_000, '4H': 14_400_000, '24H': 86_400_000 };
-
-// Seeded pool sizes (₦) — blended with real stakes so odds look meaningful early on
-const BASE_POOLS = {
-  BTC:   { '1H': { up: 12000, down: 8000  }, '4H': { up: 28000, down: 22000 }, '24H': { up: 65000, down: 55000 } },
-  ETH:   { '1H': { up: 9500,  down: 7500  }, '4H': { up: 22000, down: 18000 }, '24H': { up: 50000, down: 45000 } },
-  SOL:   { '1H': { up: 5000,  down: 8000  }, '4H': { up: 12000, down: 18000 }, '24H': { up: 30000, down: 42000 } },
-  BNB:   { '1H': { up: 7000,  down: 6500  }, '4H': { up: 16000, down: 15000 }, '24H': { up: 38000, down: 36000 } },
-  MATIC: { '1H': { up: 3500,  down: 5500  }, '4H': { up: 8000,  down: 12000 }, '24H': { up: 20000, down: 28000 } },
-  AVAX:  { '1H': { up: 4500,  down: 4000  }, '4H': { up: 10000, down: 9000  }, '24H': { up: 24000, down: 22000 } },
+// % price move required to win a volatility 'high' pick
+const VOLATILITY_THRESHOLDS = {
+  BTC:   { '1H': 1.5, '4H': 3.0, '24H': 5.5 },
+  ETH:   { '1H': 2.0, '4H': 3.8, '24H': 6.5 },
+  SOL:   { '1H': 2.5, '4H': 4.8, '24H': 8.0 },
+  BNB:   { '1H': 1.8, '4H': 3.4, '24H': 6.0 },
+  MATIC: { '1H': 2.2, '4H': 4.2, '24H': 7.0 },
+  AVAX:  { '1H': 2.0, '4H': 3.8, '24H': 6.5 },
 };
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
 
 function validWindow(w) { return WINDOW_MS[w] ? w : '1H'; }
-
-function calcOdds(myPool, otherPool) {
-  const total = myPool + otherPool;
-  return Math.round(((total / myPool) * (1 - HOUSE_EDGE)) * 100) / 100;
-}
 
 function buildCtxMap(metaCtxs) {
   const map = {};
@@ -98,22 +94,55 @@ function buildCtxMap(metaCtxs) {
   return map;
 }
 
-function adjustedPools(base, funding) {
-  const abs = Math.min(Math.abs(funding) * 100, 0.25);
-  return {
-    up:   funding > 0 ? base.up   : Math.round(base.up   * (1 + abs)),
-    down: funding < 0 ? base.down : Math.round(base.down * (1 + abs)),
-  };
+/**
+ * Directional odds — house model with HL funding rate as a probability signal.
+ *
+ * Base fair odds = LEVERAGE (2.0x). House edge is applied first, then a bias
+ * derived from the HL funding rate nudges one side ±10% max.
+ *
+ * Positive funding (longs crowded/paying shorts) → UP slightly less likely →
+ *   UP odds nudge down, DOWN odds nudge up.
+ *
+ * With LEVERAGE=2 and HOUSE_EDGE=0.06, symmetric base odds are 1.88x.
+ * Expected platform margin per ₦100 staked (50/50 outcome): ₦6.
+ */
+function calcDirectionalOdds(funding) {
+  const base = LEVERAGE * (1 - HOUSE_EDGE);              // e.g. 2.0 × 0.94 = 1.88
+  const bias = Math.tanh((funding ?? 0) * 2000) * 0.10;  // ±10% max tilt from funding signal
+  const upOdds   = Math.max(1.05, parseFloat((base * (1 - bias)).toFixed(2)));
+  const downOdds = Math.max(1.05, parseFloat((base * (1 + bias)).toFixed(2)));
+  return { upOdds, downOdds };
+}
+
+/**
+ * Volatility odds — house model with HL mark/oracle spread as a signal.
+ *
+ * Wider spread = market implies a bigger move = BIG odds nudge down,
+ * QUIET odds nudge up. House edge applied at base.
+ */
+function calcVolatilityOdds(markPx, oraclePx, threshold) {
+  const base   = LEVERAGE * (1 - HOUSE_EDGE);
+  const spread = (markPx && oraclePx && oraclePx > 0)
+    ? Math.abs(markPx - oraclePx) / oraclePx * 100
+    : 0;
+  const factor   = Math.min(spread / Math.max(threshold, 0.1), 0.20);
+  const highOdds = Math.max(1.05, parseFloat((base * (1 - factor)).toFixed(2)));
+  const lowOdds  = Math.max(1.05, parseFloat((base * (1 + factor)).toFixed(2)));
+  return { highOdds, lowOdds };
 }
 
 function getRoundBounds(window) {
   const ms = WINDOW_MS[window];
-  const start = Math.floor(Date.now() / ms) * ms;
+  const start = Math.floor(Date.now() / ms) * ms; // current window — timer shows time remaining
   return { roundStart: new Date(start), roundEnd: new Date(start + ms) };
 }
 
 function makeMarketId(symbol, window, roundStart) {
   return `${symbol}-${window}-${roundStart.getTime()}`;
+}
+
+function makeVolMarketId(symbol, window, roundStart) {
+  return `VOL-${symbol}-${window}-${roundStart.getTime()}`;
 }
 
 // ─── DB helpers ───────────────────────────────────────────────────────────────
@@ -130,26 +159,13 @@ async function aggregatePools(marketIds) {
     }},
   ]);
 
+  // Return participant count per marketId (direction-agnostic)
   const map = {};
   for (const r of rows) {
-    const { marketId, direction } = r._id;
-    if (!map[marketId]) map[marketId] = { up: 0, down: 0 };
-    map[marketId][direction] += r.total;
+    const { marketId } = r._id;
+    map[marketId] = (map[marketId] || 0) + 1;
   }
   return map;
-}
-
-function marketPools(symbol, window, funding, realUp, realDown) {
-  const base   = BASE_POOLS[symbol]?.[window] ?? { up: 5000, down: 5000 };
-  const seeded = adjustedPools(base, funding);
-  const pools  = { up: seeded.up + realUp, down: seeded.down + realDown };
-  return {
-    pools,
-    upOdds:  calcOdds(pools.up, pools.down),
-    downOdds: calcOdds(pools.down, pools.up),
-    total:   pools.up + pools.down,
-    upPct:   Math.round((pools.up / (pools.up + pools.down)) * 100),
-  };
 }
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
@@ -184,33 +200,58 @@ router.get('/markets', async (req, res) => {
     ]);
 
     const { roundStart, roundEnd } = getRoundBounds(window);
-    const marketIds  = MARKET_TOKENS.map(s => makeMarketId(s, window, roundStart));
-    const realPools  = await aggregatePools(marketIds);
+    const allMarketIds = [
+      ...MARKET_TOKENS.map(s => makeMarketId(s,    window, roundStart)),
+      ...MARKET_TOKENS.map(s => makeVolMarketId(s, window, roundStart)),
+    ];
+    const participantCounts = await aggregatePools(allMarketIds);
 
     const markets = MARKET_TOKENS.map(symbol => {
-      const ctx     = ctxMap[symbol] || {};
-      const funding = parseFloat(ctx.funding ?? 0);
-      const mId     = makeMarketId(symbol, window, roundStart);
-      const real    = realPools[mId] || { up: 0, down: 0 };
-      const { upOdds, downOdds, total, upPct } =
-        marketPools(symbol, window, funding, real.up, real.down);
+      const ctx       = ctxMap[symbol] || {};
+      const funding   = parseFloat(ctx.funding  ?? 0);
+      const markPx    = ctx.markPx    ? parseFloat(ctx.markPx)    : null;
+      const oraclePx  = ctx.oraclePx  ? parseFloat(ctx.oraclePx)  : null;
+      const mId       = makeMarketId(symbol, window, roundStart);
+      const { upOdds, downOdds } = calcDirectionalOdds(funding);
 
       return {
         id:           mId,
         symbol,
         window,
-        midPrice:     mids[symbol]     ? parseFloat(mids[symbol])     : null,
-        markPrice:    ctx.markPx       ? parseFloat(ctx.markPx)       : null,
-        oraclePrice:  ctx.oraclePx     ? parseFloat(ctx.oraclePx)     : null,
+        marketType:   'directional',
+        midPrice:     mids[symbol] ? parseFloat(mids[symbol]) : null,
+        markPrice:    markPx,
+        oraclePrice:  oraclePx,
         openInterest: ctx.openInterest ? parseFloat(ctx.openInterest) : null,
         dayVolume:    ctx.dayNtlVlm    ? parseFloat(ctx.dayNtlVlm)    : null,
         fundingRate:  funding,
         upOdds,
         downOdds,
-        poolTotal:    total,
-        upPct,
-        downPct:      100 - upPct,
-        participants: Math.round(total / 350),
+        participants: participantCounts[mId] || 0,
+        roundStart:   roundStart.toISOString(),
+        endTime:      roundEnd.getTime(),
+      };
+    });
+
+    const volatilityMarkets = MARKET_TOKENS.map(symbol => {
+      const ctx       = ctxMap[symbol] || {};
+      const markPx    = ctx.markPx   ? parseFloat(ctx.markPx)   : null;
+      const oraclePx  = ctx.oraclePx ? parseFloat(ctx.oraclePx) : null;
+      const threshold = VOLATILITY_THRESHOLDS[symbol]?.[window] ?? 2.0;
+      const vId       = makeVolMarketId(symbol, window, roundStart);
+      const { highOdds, lowOdds } = calcVolatilityOdds(markPx, oraclePx, threshold);
+
+      return {
+        id:           vId,
+        symbol,
+        window,
+        marketType:   'volatility',
+        threshold,
+        midPrice:     mids[symbol] ? parseFloat(mids[symbol]) : null,
+        fundingRate:  ctx.funding  ? parseFloat(ctx.funding)  : 0,
+        highOdds,
+        lowOdds,
+        participants: participantCounts[vId] || 0,
         roundStart:   roundStart.toISOString(),
         endTime:      roundEnd.getTime(),
       };
@@ -218,7 +259,7 @@ router.get('/markets', async (req, res) => {
 
     res.json({
       success: true,
-      data: { markets, window, fetchedAt: new Date().toISOString() },
+      data: { markets, volatilityMarkets, window, fetchedAt: new Date().toISOString() },
     });
   } catch (err) {
     logger.error('BetaMarket /markets error', { error: err.message });
@@ -271,13 +312,20 @@ router.post('/predict', async (req, res) => {
     if (!MARKET_TOKENS.includes(p.symbol)) {
       return res.status(400).json({ success: false, error: `Unsupported symbol: ${p.symbol}` });
     }
-    if (!['up', 'down'].includes(p.direction)) {
-      return res.status(400).json({ success: false, error: `direction must be 'up' or 'down'` });
-    }
     if (!WINDOW_MS[p.window]) {
       return res.status(400).json({ success: false, error: `window must be 1H, 4H, or 24H` });
     }
-    const key = `${p.symbol}-${p.window}`;
+    const mType = p.marketType || 'directional';
+    if (mType === 'volatility') {
+      if (!['high', 'low'].includes(p.direction)) {
+        return res.status(400).json({ success: false, error: `volatility direction must be 'high' or 'low'` });
+      }
+    } else {
+      if (!['up', 'down'].includes(p.direction)) {
+        return res.status(400).json({ success: false, error: `direction must be 'up' or 'down'` });
+      }
+    }
+    const key = `${mType}-${p.symbol}-${p.window}`;
     if (seenMarkets.has(key)) {
       return res.status(400).json({ success: false, error: `Duplicate pick: ${p.symbol} ${p.window}` });
     }
@@ -288,12 +336,6 @@ router.post('/predict', async (req, res) => {
     // ── Idempotency check ───────────────────────────────────────────────────
     // Reject if this key was already used by this user (network retry / double-tap guard)
     if (idempotencyKey) {
-      const existing = await Prediction.findOne({
-        userId,
-        'picks.0': { $exists: true }, // has at least one pick
-        $where: `this.idempotencyKey === ${JSON.stringify(idempotencyKey)}`,
-      }).lean();
-      // Use a dedicated indexed field instead of $where for performance
       const existingKeyed = await Prediction.findOne({ userId, idempotencyKey }).lean();
       if (existingKeyed) {
         return res.status(200).json({ success: true, data: existingKeyed, duplicate: true });
@@ -304,11 +346,12 @@ router.post('/predict', async (req, res) => {
     const user = await User.findById(userId).select('ngnbBalance ngnbPendingBalance').lean();
     if (!user) return res.status(404).json({ success: false, error: 'User not found' });
 
+    const totalRequired = stakeNum + PLATFORM_FEE;
     const available = Math.max(0, (user.ngnbBalance || 0) - (user.ngnbPendingBalance || 0));
-    if (available < stakeNum) {
+    if (available < totalRequired) {
       return res.status(400).json({
         success: false,
-        error: `Insufficient NGNB balance. Available: ₦${available.toFixed(2)}, Required: ₦${stakeNum.toFixed(2)}`,
+        error: `Insufficient NGNB balance. Available: ₦${available.toFixed(2)}, Required: ₦${totalRequired.toFixed(2)} (stake ₦${stakeNum} + ₦${PLATFORM_FEE} fee)`,
       });
     }
 
@@ -327,21 +370,40 @@ router.post('/predict', async (req, res) => {
     const realPools = await aggregatePools(marketIds);
 
     const resolvedPicks = rawPicks.map(p => {
+      const mType             = p.marketType || 'directional';
       const { roundStart, roundEnd } = getRoundBounds(p.window);
-      const mId     = makeMarketId(p.symbol, p.window, roundStart);
-      const ctx     = ctxMap[p.symbol] || {};
-      const funding = parseFloat(ctx.funding ?? 0);
-      const real    = realPools[mId] || { up: 0, down: 0 };
-      const { upOdds, downOdds } = marketPools(p.symbol, p.window, funding, real.up, real.down);
+      const isVol             = mType === 'volatility';
+      const mId               = isVol
+        ? makeVolMarketId(p.symbol, p.window, roundStart)
+        : makeMarketId(p.symbol,    p.window, roundStart);
+      const real              = realPools[mId] || { up: 0, down: 0, high: 0, low: 0 };
+
+      let odds;
+      let threshold = null;
+      if (isVol) {
+        threshold             = VOLATILITY_THRESHOLDS[p.symbol]?.[p.window] ?? 2.0;
+        const ctx             = ctxMap[p.symbol] || {};
+        const markPx          = ctx.markPx   ? parseFloat(ctx.markPx)   : null;
+        const oraclePx        = ctx.oraclePx ? parseFloat(ctx.oraclePx) : null;
+        const { highOdds, lowOdds } = calcVolatilityOdds(markPx, oraclePx, threshold);
+        odds = p.direction === 'high' ? highOdds : lowOdds;
+      } else {
+        const ctx     = ctxMap[p.symbol] || {};
+        const funding = parseFloat(ctx.funding ?? 0);
+        const { upOdds, downOdds } = calcDirectionalOdds(funding);
+        odds = p.direction === 'up' ? upOdds : downOdds;
+      }
 
       return {
         symbol:        p.symbol,
+        marketType:    mType,
         direction:     p.direction,
+        ...(threshold !== null && { threshold }),
         window:        p.window,
         marketId:      mId,
         roundStart,
         roundEnd,
-        odds:          p.direction === 'up' ? upOdds : downOdds,
+        odds,
         entryPriceUSD: mids[p.symbol] ? parseFloat(mids[p.symbol]) : null,
       };
     });
@@ -352,27 +414,26 @@ router.post('/predict', async (req, res) => {
     const potentialPayout = parseFloat(Math.min(rawPayout, MAX_PAYOUT).toFixed(2));
 
     // ── Atomic balance debit (race-condition safe) ──────────────────────────
+    // Deducts stake (goes to HL position) + PLATFORM_FEE (platform revenue)
     const debited = await User.findOneAndUpdate(
-      { _id: userId, ngnbBalance: { $gte: stakeNum } },
-      { $inc: { ngnbBalance: -stakeNum } },
+      { _id: userId, ngnbBalance: { $gte: totalRequired } },
+      { $inc: { ngnbBalance: -totalRequired } },
       { new: false },
     );
     if (!debited) {
-      logger.warn('BetaMarket: balance debit failed (race condition or insufficient funds)', { userId, stakeNum });
+      logger.warn('BetaMarket: balance debit failed (race condition or insufficient funds)', { userId, totalRequired });
       return res.status(400).json({ success: false, error: 'Balance changed — please retry' });
     }
 
     // ── Convert NGNB stake → USDC via Obiex (platform-level) ───────────────
-    // This moves the equivalent Naira value into the platform's Obiex USDC pool,
-    // which will later back a Hyperliquid perp position for the round.
+    // Only the stake portion is swapped — PLATFORM_FEE stays as NGNB revenue.
     const swapResult = await swapNGNBtoUSDC(stakeNum);
 
     if (!swapResult.success) {
-      // Swap failed — refund the NGNB before returning an error.
-      // The user's balance is restored; nothing is recorded in the DB.
-      await User.findByIdAndUpdate(userId, { $inc: { ngnbBalance: stakeNum } });
+      // Swap failed — refund stake + fee before returning an error.
+      await User.findByIdAndUpdate(userId, { $inc: { ngnbBalance: totalRequired } });
       logger.error('BetaMarket: NGNB→USDC swap failed — NGNB refunded', {
-        userId, stakeNum, error: swapResult.error,
+        userId, stakeNum, platformFee: PLATFORM_FEE, error: swapResult.error,
       });
       return res.status(503).json({
         success: false,

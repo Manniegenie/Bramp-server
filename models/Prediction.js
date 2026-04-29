@@ -5,16 +5,18 @@ const mongoose = require('mongoose');
 const MARKET_TOKENS = ['BTC', 'ETH', 'SOL', 'BNB', 'MATIC', 'AVAX'];
 
 const pickSchema = new mongoose.Schema({
-  symbol:        { type: String, enum: MARKET_TOKENS,             required: true },
-  direction:     { type: String, enum: ['up', 'down'],            required: true },
-  window:        { type: String, enum: ['1H', '4H', '24H'],       required: true },
-  marketId:      { type: String, required: true },  // e.g. 'BTC-1H-1714000000000'
+  symbol:        { type: String, enum: MARKET_TOKENS,                          required: true },
+  marketType:    { type: String, enum: ['directional', 'volatility'],          default: 'directional' },
+  direction:     { type: String, enum: ['up', 'down', 'high', 'low'],          required: true },
+  threshold:     { type: Number },   // % threshold for volatility picks only
+  window:        { type: String, enum: ['1H', '4H', '24H'],                    required: true },
+  marketId:      { type: String, required: true },  // e.g. 'BTC-1H-...' or 'VOL-BTC-1H-...'
   roundStart:    { type: Date,   required: true },
   roundEnd:      { type: Date,   required: true },
   odds:          { type: Number, required: true },
-  entryPriceUSD: { type: Number },   // Hyperliquid mid-price when bet was placed (display only)
-  openPriceUSD:  { type: Number },   // Binance price closest to roundStart (used for settlement)
-  closePriceUSD: { type: Number },   // Binance price closest to roundEnd  (populated at settle)
+  entryPriceUSD: { type: Number },
+  openPriceUSD:  { type: Number },
+  closePriceUSD: { type: Number },
   result:        { type: String, enum: ['pending', 'won', 'lost'], default: 'pending' },
 }, { _id: false });
 

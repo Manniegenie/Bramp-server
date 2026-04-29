@@ -75,8 +75,9 @@ async function openPositionsForNearingRounds() {
       continue;
     }
 
-    // Users are net UP → hedge with a SHORT (we profit if price drops = users lose)
+    // Users are net UP → hedge with a SHORT (we profit on net exposure when users lose)
     // Users are net DOWN → hedge with a LONG
+    // The house edge ensures we have positive EV on all bets regardless of HL hedge outcome.
     const hlSide = net > 0 ? 'short' : 'long';
 
     try {
@@ -148,7 +149,13 @@ async function processBet(bet, now) {
       break;
     }
 
-    const winDir = closePrice > openPrice ? 'up' : closePrice < openPrice ? 'down' : null;
+    let winDir;
+    if (pick.marketType === 'volatility') {
+      const movePct = Math.abs(closePrice - openPrice) / openPrice * 100;
+      winDir = movePct >= (pick.threshold ?? 2.0) ? 'high' : 'low';
+    } else {
+      winDir = closePrice > openPrice ? 'up' : closePrice < openPrice ? 'down' : null;
+    }
     const result = winDir !== null && pick.direction === winDir ? 'won' : 'lost';
 
     if (result !== 'won') allWon = false;
