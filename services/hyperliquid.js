@@ -20,6 +20,7 @@ const {
   MAINNET_API_URL,
   TESTNET_API_URL,
 } = require('@nktkas/hyperliquid');
+const { privateKeyToAccount } = require('viem/accounts');
 
 const logger = require('../utils/logger');
 
@@ -43,10 +44,10 @@ function getExchangeClient() {
   const privateKey = process.env.HL_PRIVATE_KEY;
   if (!privateKey) throw new Error('HL_PRIVATE_KEY not set in environment');
 
-  // @nktkas/hyperliquid accepts a plain hex private key string as the wallet param
+  const key = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`;
   _exchange = new ExchangeClient({
     transport: _transport,
-    wallet:    privateKey,
+    wallet:    privateKeyToAccount(key),
   });
   return _exchange;
 }

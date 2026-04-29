@@ -16,7 +16,7 @@ let _hlInfo = null;
 async function getHL() {
   if (!_hlInfo) {
     const { InfoClient, HttpTransport } = await import('@nktkas/hyperliquid');
-    _hlInfo = new InfoClient(new HttpTransport());
+    _hlInfo = new InfoClient({ transport: new HttpTransport() });
   }
   return _hlInfo;
 }
