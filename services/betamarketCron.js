@@ -31,59 +31,61 @@ async function getPriceAtOrBefore(symbol, deadline) {
 // ─── Position opening (run before rounds start) ───────────────────────────────
 
 /**
- * For rounds starting within the next 10 minutes, aggregate the net
- * UP vs DOWN pool per symbol and open a hedging perp on Hyperliquid.
+ * BetaMarket is a vessel for Hyperliquid perps — we route user positions directly to HL.
  *
- * Net long (UP > DOWN): users expect price to rise — HL opens a SHORT hedge
- * Net short (DOWN > UP): users expect price to fall — HL opens a LONG hedge
+ * For each symbol, we aggregate the net leveraged notional across all pending picks
+ * and open ONE net position on HL in the same direction as the net user exposure:
  *
- * This way the platform profits when users lose and is hedged when users win.
+ *   Net long  (users mostly UP)   → open LONG  on HL
+ *   Net short (users mostly DOWN) → open SHORT on HL
+ *
+ * When price moves in users' favour, the HL position profits — that profit funds payouts.
+ * When price moves against users, the HL position loses — user stakes cover those losses.
+ * Platform revenue = ₦100 fee per prediction only.
  */
 async function openPositionsForNearingRounds() {
   const hlService = getHL();
-  if (!hlService) return; // HL not configured — pure parimutuel mode
+  if (!hlService) return;
 
   const now     = new Date();
-  const horizon = new Date(now.getTime() + 10 * 60 * 1000); // 10 min from now
+  const horizon = new Date(now.getTime() + 10 * 60 * 1000);
 
-  // Find pending bets whose FIRST pick round starts within the next 10 minutes
-  // (we use the earliest roundStart as the trigger for parlays)
   const nearingBets = await Prediction.find({
-    status:            'pending',
-    hlPositionSide:    null,          // not yet hedged
+    status:             'pending',
+    hlPositionSide:     null,
     'picks.roundStart': { $lte: horizon, $gte: now },
   }).lean();
 
   if (!nearingBets.length) return;
 
-  // Aggregate net notional per symbol across all nearing bets
-  // For each bet: if direction=up, add +usdcAmount; if direction=down, add -usdcAmount
-  const netBySymbol = {}; // symbol → net USDC (positive = users net UP, negative = users net DOWN)
+  // Net leveraged notional per symbol.
+  // Each pick contributes: margin × leverage, signed by direction.
+  // This is the full HL notional required to match user P&L exposure.
+  const netBySymbol = {};
 
   for (const bet of nearingBets) {
     const usdcPerPick = (bet.usdcAmount ?? 0) / (bet.picks.length || 1);
     for (const pick of bet.picks) {
-      const s = pick.symbol;
-      netBySymbol[s] = (netBySymbol[s] ?? 0) + (pick.direction === 'up' ? usdcPerPick : -usdcPerPick);
+      const s        = pick.symbol;
+      const notional = usdcPerPick * pick.multiplier;
+      netBySymbol[s] = (netBySymbol[s] ?? 0) + (pick.direction === 'up' ? notional : -notional);
     }
   }
 
   for (const [symbol, net] of Object.entries(netBySymbol)) {
     const absNet = Math.abs(net);
     if (absNet < MIN_POSITION_USDC) {
-      logger.info(`betamarketCron: net too small for ${symbol} (${absNet} USDC) — skipping HL hedge`);
+      logger.info(`betamarketCron: net too small for ${symbol} (${absNet} USDC) — skipping`);
       continue;
     }
 
-    // Users are net UP → hedge with a SHORT (we profit on net exposure when users lose)
-    // Users are net DOWN → hedge with a LONG
-    // The house edge ensures we have positive EV on all bets regardless of HL hedge outcome.
-    const hlSide = net > 0 ? 'short' : 'long';
+    // Open in the SAME direction as net user exposure — we are routing their trade, not fading it
+    const hlSide = net > 0 ? 'long' : 'short';
 
     try {
       const { orderId, status } = await hlService.openPosition(symbol, hlSide, absNet);
-      logger.info(`betamarketCron: opened HL ${hlSide} hedge for ${symbol}`, {
-        netUSDC: absNet, orderId, status,
+      logger.info(`betamarketCron: opened HL ${hlSide} for ${symbol}`, {
+        notionalUSDC: absNet, orderId, status,
       });
 
       // Tag all matching bets with the hedge side so we know to close later
@@ -129,9 +131,9 @@ async function settleExpiredRounds() {
 }
 
 async function processBet(bet, now) {
-  let allWon      = true;
   let missingData = false;
   const pickUpdates = [];
+  const stakePerPick = bet.stake / bet.picks.length;
 
   for (const pick of bet.picks) {
     const roundStart = new Date(pick.roundStart);
@@ -149,26 +151,28 @@ async function processBet(bet, now) {
       break;
     }
 
-    let won;
-    if (pick.targetPrice) {
-      // Target-based model: did price reach the locked target by window end?
-      won = pick.direction === 'up'
-        ? closePrice >= pick.targetPrice
-        : closePrice <= pick.targetPrice;
-    } else {
-      // Legacy directional model (backward compat for old predictions)
-      const winDir = closePrice > openPrice ? 'up' : closePrice < openPrice ? 'down' : null;
-      won = winDir !== null && pick.direction === winDir;
-    }
-    const result = won ? 'won' : 'lost';
+    // Raw underlying return for the window
+    const rawReturn = (closePrice - openPrice) / openPrice;
 
-    if (result !== 'won') allWon = false;
+    // Signed return: positive means the user called direction correctly
+    const directedReturn = pick.direction === 'up' ? rawReturn : -rawReturn;
+
+    // Leveraged return: the multiplier IS the leverage
+    const leveragedReturn = directedReturn * pick.multiplier;
+
+    // Floor at -1: user can't lose more than their allocated stake (no margin call beyond stake)
+    const settledReturn = Math.max(-1, leveragedReturn);
+
+    // What this pick returns — includes original stake + P&L
+    const pickPayout = parseFloat((stakePerPick * (1 + settledReturn)).toFixed(2));
 
     pickUpdates.push({
-      marketId:      pick.marketId,
-      result,
-      openPriceUSD:  openPrice,
-      closePriceUSD: closePrice,
+      marketId:        pick.marketId,
+      result:          settledReturn >= 0 ? 'won' : 'lost',
+      actualMultiplier: parseFloat((1 + settledReturn).toFixed(4)), // realized return factor
+      pickPayout,
+      openPriceUSD:    openPrice,
+      closePriceUSD:   closePrice,
     });
   }
 
@@ -177,7 +181,7 @@ async function processBet(bet, now) {
     return;
   }
 
-  // Close the HL hedge position for each hedged symbol before finalising payout
+  // Close HL position now that the window is over
   const hlService = getHL();
   if (hlService && bet.hlPositionSide) {
     const symbols = [...new Set(bet.picks.map(p => p.symbol))];
@@ -186,45 +190,48 @@ async function processBet(bet, now) {
         const { orderId, status } = await hlService.closePosition(symbol);
         logger.info(`betamarketCron: closed HL position for ${symbol}`, { orderId, status });
       } catch (err) {
-        // Non-fatal — log and proceed with user settlement regardless
         logger.error(`betamarketCron: failed to close HL position for ${symbol}`, { error: err.message });
       }
     }
   }
 
-  const betStatus = allWon ? 'won' : 'lost';
+  // Total returned to user = sum of all pick payouts
+  // Stake was already debited at entry — we always return whatever remains (even on full loss it's 0)
+  const actualPayout     = parseFloat(pickUpdates.reduce((s, p) => s + p.pickPayout, 0).toFixed(2));
+  const actualTotalOdds  = parseFloat((actualPayout / bet.stake).toFixed(4));
+  const betStatus        = actualPayout >= bet.stake ? 'won' : 'lost';
 
   const arrayFilters = [];
-  const setOps       = { status: betStatus, settledAt: now };
+  const setOps = {
+    status:          betStatus,
+    settledAt:       now,
+    actualTotalOdds,
+    actualPayout,
+  };
 
   pickUpdates.forEach((pu, i) => {
     arrayFilters.push({ [`elem${i}.marketId`]: pu.marketId });
-    setOps[`picks.$[elem${i}].result`]        = pu.result;
-    setOps[`picks.$[elem${i}].openPriceUSD`]  = pu.openPriceUSD;
-    setOps[`picks.$[elem${i}].closePriceUSD`] = pu.closePriceUSD;
+    setOps[`picks.$[elem${i}].result`]           = pu.result;
+    setOps[`picks.$[elem${i}].actualMultiplier`] = pu.actualMultiplier;
+    setOps[`picks.$[elem${i}].openPriceUSD`]     = pu.openPriceUSD;
+    setOps[`picks.$[elem${i}].closePriceUSD`]    = pu.closePriceUSD;
   });
 
-  await Prediction.findByIdAndUpdate(
-    bet._id,
-    { $set: setOps },
-    { arrayFilters },
-  );
+  await Prediction.findByIdAndUpdate(bet._id, { $set: setOps }, { arrayFilters });
 
-  if (betStatus === 'won') {
-    await User.findByIdAndUpdate(bet.userId, {
-      $inc: { ngnbBalance: bet.potentialPayout },
-    });
-
-    logger.info('BetaMarket: payout credited', {
-      userId:    bet.userId.toString(),
-      betId:     bet._id.toString(),
-      payout:    bet.potentialPayout,
-      totalOdds: bet.totalOdds,
-    });
+  // Always return the remaining capital — stake was already debited at entry
+  if (actualPayout > 0) {
+    await User.findByIdAndUpdate(bet.userId, { $inc: { ngnbBalance: actualPayout } });
   }
 
-  logger.info(`BetaMarket: settled bet ${bet._id} → ${betStatus}`, {
-    picks: pickUpdates.map(p => `${p.marketId}=${p.result} (${p.openPriceUSD}→${p.closePriceUSD})`).join(', '),
+  logger.info(`BetaMarket: settled ${bet._id} → ${betStatus}`, {
+    userId:        bet.userId.toString(),
+    stake:         bet.stake,
+    actualPayout,
+    actualTotalOdds,
+    picks: pickUpdates.map(p =>
+      `${p.marketId} ${p.openPriceUSD}→${p.closePriceUSD} = ${p.result} (${p.pickPayout})`
+    ).join(' | '),
   });
 }
 

@@ -8,8 +8,13 @@ const User             = require('../models/user');
 const Prediction       = require('../models/Prediction');
 const PriceChange      = require('../models/pricechange');
 const { swapNGNBtoUSDC }        = require('../services/NGNBSwap');
+const { withdrawUSDCToArbitrum } = require('../services/ObiexWithdraw');
 const { validateTwoFactorAuth } = require('../services/twofactorAuth');
 const { getOnrampRate }         = require('../services/onramppriceservice');
+
+// Arbitrum address that receives USDC after each NGNB→USDC swap.
+// This address funds the Hyperliquid trading account used for BetaMarket positions.
+const BETAMARKET_USDC_ADDRESS = process.env.BETAMARKET_USDC_ADDRESS;
 
 // ── Hyperliquid price oracle ───────────────────────────────────────────────────
 
@@ -51,47 +56,43 @@ const MARKET_TOKENS = ['BTC', 'ETH', 'SOL', 'BNB', 'MATIC', 'AVAX'];
 // Users pick the one matching their risk appetite — no custom input.
 const PLATFORM_MULTIPLIERS = [1.7, 2, 5, 10];
 
-// Target % move required to win per asset × window × multiplier.
-// Calibrated to approximate win rates:
-//   2x  → ~30% win rate   (moderate, often in reach on active days)
-//   5x  → ~15% win rate   (requires conviction + momentum)
-//   10x → ~8%  win rate   (outlier moves, high-reward believers)
-// Target % move required to win per asset × window × multiplier.
-// Calibrated approximate win rates:
-//   1.7x → ~55% win rate  (small move, accessible — most will win)
-//   2x   → ~35% win rate  (moderate conviction required)
-//   5x   → ~15% win rate  (strong move, high reward)
-//   10x  → ~8%  win rate  (outlier moves only)
-const TARGET_PCT = {
+// Illustrative price-move % shown on each market card.
+// These are reference points only — they show what a typical 1σ move looks like
+// at each leverage tier so users can visualise the position.
+// Settlement does NOT check whether this price was reached.
+// Settlement uses actual HL P&L: (closePrice - openPrice) / openPrice × leverage.
+//
+// Calibrated to ~0.7× realized σ per asset per window.
+const ILLUSTRATIVE_PCT = {
   BTC: {
-    '1H':  { 1.7: 0.6,  2: 1.5,  5: 3.5,  10: 7.0  },
-    '4H':  { 1.7: 1.2,  2: 3.0,  5: 7.0,  10: 14.0 },
-    '24H': { 1.7: 2.0,  2: 5.0,  5: 12.0, 10: 22.0 },
+    '1H':  { 1.7: 0.4,  2: 0.4,  5: 0.7,  10: 1.0  },
+    '4H':  { 1.7: 0.8,  2: 0.8,  5: 1.5,  10: 2.0  },
+    '24H': { 1.7: 2.0,  2: 2.0,  5: 3.5,  10: 5.0  },
   },
   ETH: {
-    '1H':  { 1.7: 0.8,  2: 2.0,  5: 4.5,  10: 9.0  },
-    '4H':  { 1.7: 1.6,  2: 4.0,  5: 9.0,  10: 18.0 },
-    '24H': { 1.7: 3.0,  2: 7.0,  5: 15.0, 10: 28.0 },
+    '1H':  { 1.7: 0.5,  2: 0.5,  5: 0.9,  10: 1.3  },
+    '4H':  { 1.7: 1.0,  2: 1.0,  5: 1.8,  10: 2.6  },
+    '24H': { 1.7: 2.5,  2: 2.5,  5: 4.5,  10: 6.5  },
   },
   SOL: {
-    '1H':  { 1.7: 1.2,  2: 3.0,  5: 7.0,  10: 14.0 },
-    '4H':  { 1.7: 2.5,  2: 6.0,  5: 14.0, 10: 28.0 },
-    '24H': { 1.7: 4.0,  2: 10.0, 5: 22.0, 10: 40.0 },
+    '1H':  { 1.7: 0.7,  2: 0.7,  5: 1.2,  10: 1.8  },
+    '4H':  { 1.7: 1.4,  2: 1.4,  5: 2.5,  10: 3.6  },
+    '24H': { 1.7: 3.5,  2: 3.5,  5: 6.0,  10: 9.0  },
   },
   BNB: {
-    '1H':  { 1.7: 0.8,  2: 2.0,  5: 4.5,  10: 9.0  },
-    '4H':  { 1.7: 1.6,  2: 4.0,  5: 9.0,  10: 18.0 },
-    '24H': { 1.7: 3.0,  2: 7.0,  5: 15.0, 10: 28.0 },
+    '1H':  { 1.7: 0.5,  2: 0.5,  5: 0.9,  10: 1.3  },
+    '4H':  { 1.7: 1.0,  2: 1.0,  5: 1.8,  10: 2.6  },
+    '24H': { 1.7: 2.5,  2: 2.5,  5: 4.5,  10: 6.5  },
   },
   MATIC: {
-    '1H':  { 1.7: 1.0,  2: 2.5,  5: 6.0,  10: 12.0 },
-    '4H':  { 1.7: 2.0,  2: 5.0,  5: 12.0, 10: 24.0 },
-    '24H': { 1.7: 3.5,  2: 9.0,  5: 20.0, 10: 38.0 },
+    '1H':  { 1.7: 0.8,  2: 0.8,  5: 1.4,  10: 2.0  },
+    '4H':  { 1.7: 1.6,  2: 1.6,  5: 2.8,  10: 4.0  },
+    '24H': { 1.7: 4.0,  2: 4.0,  5: 7.0,  10: 10.0 },
   },
   AVAX: {
-    '1H':  { 1.7: 1.0,  2: 2.5,  5: 6.0,  10: 12.0 },
-    '4H':  { 1.7: 2.0,  2: 5.0,  5: 12.0, 10: 24.0 },
-    '24H': { 1.7: 3.5,  2: 9.0,  5: 20.0, 10: 38.0 },
+    '1H':  { 1.7: 0.8,  2: 0.8,  5: 1.4,  10: 2.0  },
+    '4H':  { 1.7: 1.6,  2: 1.6,  5: 2.8,  10: 4.0  },
+    '24H': { 1.7: 4.0,  2: 4.0,  5: 7.0,  10: 10.0 },
   },
 };
 
@@ -117,11 +118,12 @@ function makeMarketId(symbol, window, roundStart) {
   return `${symbol}-${window}-${roundStart.getTime()}`;
 }
 
-// Build all platform multiplier options for a single market.
-// Returns array — one entry per multiplier, each with UP + DOWN target prices.
+// Build display options for each leverage tier.
+// targetPct / targetPriceUp / targetPriceDown are illustrative reference prices —
+// they show users what a typical move looks like at this leverage, NOT a win condition.
 function buildOptions(symbol, window, currentPrice) {
   return PLATFORM_MULTIPLIERS.map(multiplier => {
-    const targetPct = TARGET_PCT[symbol]?.[window]?.[multiplier] ?? 3.0;
+    const targetPct = ILLUSTRATIVE_PCT[symbol]?.[window]?.[multiplier] ?? 1.0;
     return {
       multiplier,
       targetPct,
@@ -348,8 +350,10 @@ router.post('/predict', async (req, res) => {
       const mId          = makeMarketId(p.symbol, p.window, roundStart);
       const currentPrice = mids[p.symbol] ? parseFloat(mids[p.symbol]) : null;
       const multiplier   = Number(p.multiplier);
-      const targetPct    = TARGET_PCT[p.symbol]?.[p.window]?.[multiplier] ?? 3.0;
-      const targetPrice  = currentPrice
+      // Illustrative reference price — shown in the UI, NOT used for settlement.
+      // Settlement uses actual (closePrice - openPrice) / openPrice × multiplier.
+      const targetPct   = ILLUSTRATIVE_PCT[p.symbol]?.[p.window]?.[multiplier] ?? 1.0;
+      const targetPrice = currentPrice
         ? parseFloat((currentPrice * (1 + (p.direction === 'up' ? 1 : -1) * targetPct / 100)).toFixed(2))
         : null;
 
@@ -364,14 +368,26 @@ router.post('/predict', async (req, res) => {
         targetPct,
         targetPrice,
         entryPriceUSD: currentPrice,
-        odds:          multiplier,   // multiplier IS the odds — payout = stake × odds
+        odds:          multiplier,
       };
     });
 
-    // Parlay: total odds = product of all individual multipliers
-    const totalOdds       = resolvedPicks.reduce((acc, p) => acc * p.multiplier, 1);
-    const rawPayout       = stakeNum * totalOdds;
-    const potentialPayout = parseFloat(Math.min(rawPayout, MAX_PAYOUT).toFixed(2));
+    // potentialPayout: sum of per-pick P&L if each pick's asset moves exactly the illustrative %
+    // maxPayout: same but at 3× the illustrative move — gives users a realistic upside range
+    // Neither value is guaranteed — actual settlement uses real HL price data.
+    const stakePerPick    = stakeNum / resolvedPicks.length;
+    const potentialPayout = parseFloat(Math.min(
+      resolvedPicks.reduce((sum, p) =>
+        sum + stakePerPick * (1 + p.multiplier * (p.targetPct / 100)), 0),
+      MAX_PAYOUT
+    ).toFixed(2));
+    const maxPayout = parseFloat(Math.min(
+      resolvedPicks.reduce((sum, p) =>
+        sum + stakePerPick * (1 + p.multiplier * (p.targetPct * 3 / 100)), 0),
+      MAX_PAYOUT
+    ).toFixed(2));
+    // Combined leverage display (product of all multipliers) — informational only
+    const totalOdds = resolvedPicks.reduce((acc, p) => acc * p.multiplier, 1);
 
     // ── Atomic balance debit ──────────────────────────────────────────────────
     const debited = await User.findOneAndUpdate(
@@ -392,6 +408,34 @@ router.post('/predict', async (req, res) => {
       logger.info('BetaMarket: NGNB→USDC swap succeeded', {
         userId, ngnbStake: stakeNum, usdcAmount: swapResult.usdcAmount,
       });
+
+      // Fire-and-forget: withdraw USDC to the platform's Arbitrum address so it
+      // reaches the Hyperliquid account that funds BetaMarket positions.
+      // Runs after response is sent — a withdrawal failure is logged but never
+      // blocks the user's prediction from being recorded.
+      if (BETAMARKET_USDC_ADDRESS && swapResult.usdcAmount) {
+        setImmediate(() => {
+          withdrawUSDCToArbitrum(
+            BETAMARKET_USDC_ADDRESS,
+            swapResult.usdcAmount,
+            'BetaMarket position funding',
+          ).then(r => {
+            if (r.success) {
+              logger.info('BetaMarket: USDC withdrawal to Arbitrum submitted', {
+                userId, usdcAmount: swapResult.usdcAmount, txId: r.transactionId,
+              });
+            } else {
+              logger.error('BetaMarket: USDC withdrawal to Arbitrum failed', {
+                userId, usdcAmount: swapResult.usdcAmount, error: r.error,
+              });
+            }
+          }).catch(err => {
+            logger.error('BetaMarket: USDC withdrawal unexpected error', { userId, error: err.message });
+          });
+        });
+      } else if (!BETAMARKET_USDC_ADDRESS) {
+        logger.warn('BetaMarket: BETAMARKET_USDC_ADDRESS not set — USDC withdrawal skipped', { userId });
+      }
     }
 
     // ── Persist ───────────────────────────────────────────────────────────────
@@ -401,21 +445,21 @@ router.post('/predict', async (req, res) => {
       stake:           stakeNum,
       totalOdds:       parseFloat(totalOdds.toFixed(4)),
       potentialPayout,
+      maxPayout,
       status:          'pending',
       usdcAmount:      swapResult.usdcAmount,
       obiexQuoteId:    swapResult.quoteId,
       ...(idempotencyKey ? { idempotencyKey } : {}),
     });
 
-    logger.info('BetaMarket prediction placed', {
+    logger.info('BetaMarket position opened', {
       userId:       userId.toString(),
       predictionId: prediction._id.toString(),
       picks:        resolvedPicks.map(p =>
-        `${p.symbol} ${p.direction} ${p.window} ${p.multiplier}x target=${p.targetPrice}`
+        `${p.symbol} ${p.direction} ${p.window} ${p.multiplier}x entry=${p.entryPriceUSD}`
       ),
       ngnbStake:    stakeNum,
-      totalOdds,
-      potentialPayout,
+      usdcMargin:   swapResult.usdcAmount,
     });
 
     res.status(201).json({ success: true, data: prediction });

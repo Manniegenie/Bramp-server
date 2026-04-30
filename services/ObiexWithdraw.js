@@ -34,9 +34,10 @@ const MIN_WITHDRAWAL   = 1; // Obiex Arbitrum minimum in USDC
  *
  * @param {string} toAddress  — destination Arbitrum wallet address
  * @param {number} usdcAmount — amount in USDC (must be >= $1)
+ * @param {string} [narration] — optional memo; defaults to 'HL auto top-up'
  * @returns {Promise<{ success: boolean, transactionId?: string, error?: string }>}
  */
-async function withdrawUSDCToArbitrum(toAddress, usdcAmount) {
+async function withdrawUSDCToArbitrum(toAddress, usdcAmount, narration = 'HL auto top-up') {
   if (!toAddress) return { success: false, error: 'MISSING_ADDRESS' };
   if (!Number.isFinite(usdcAmount) || usdcAmount < MIN_WITHDRAWAL) {
     return { success: false, error: `AMOUNT_TOO_LOW: minimum is $${MIN_WITHDRAWAL} USDC` };
@@ -49,7 +50,7 @@ async function withdrawUSDCToArbitrum(toAddress, usdcAmount) {
       address: toAddress,
       network: ARBITRUM_NETWORK,
     },
-    narration: 'HL auto top-up',
+    narration,
   };
 
   try {
