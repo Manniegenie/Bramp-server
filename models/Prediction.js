@@ -9,7 +9,7 @@ const pickSchema = new mongoose.Schema({
   direction:        { type: String, enum: ['up', 'down'],          required: true },
   multiplier:       { type: Number },   // base multiplier chosen at entry (1.7, 2, 5, 10)
   actualMultiplier: { type: Number },   // realized multiplier after settlement (scales with move size)
-  window:           { type: String, enum: ['1H', '4H', '24H'],    required: true },
+  window:           { type: String, enum: ['1H', '4H', '24H', '3M', '6M'], required: true },
   marketId:         { type: String, required: true },
   roundStart:       { type: Date,   required: true },
   roundEnd:         { type: Date,   required: true },
