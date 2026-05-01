@@ -115,8 +115,9 @@ const CURRENCY_NETWORK_TO_SCHEMA = {
   'USDT_BSC': 'USDT_BSC',
   
   // USDC variants
-  'USDC_ETH': 'USDC_ETH',
-  'USDC_BSC': 'USDC_BSC',
+  'USDC_ETH':      'USDC_ETH',
+  'USDC_BSC':      'USDC_BSC',
+  'USDC_ARBITRUM': 'USDC_ARBITRUM',
   
   // BNB variants
   'BNB_ETH': 'BNB_ETH',
