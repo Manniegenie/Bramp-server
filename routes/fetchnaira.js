@@ -24,11 +24,7 @@ router.get('/naira-accounts', async (_req, res) => {
       status: error.status,
     });
 
-    if (error instanceof UpstreamError) {
-      return res.status(error.status || 502).json({ error: error.message });
-    }
-
-    return res.status(500).json({ error: 'Internal server error' });
+    return res.status(502).json({ error: 'Failed to fetch banks' });
   }
 });
 
