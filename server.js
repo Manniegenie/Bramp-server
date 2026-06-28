@@ -644,7 +644,7 @@ app.use("/swapmarkdown", authenticateAdminToken, requireAdmin, swapmarkdownRoute
 app.use("/naira-price", nairaPriceRouter);
 app.use("/addressplan", AddressplanRoutes);
 app.use("/resend-otp", resendOtpRoutes);
-app.use("/fetchnaira", fetchnairaRoutes);
+app.use("/fetchnaira", authenticateToken, fetchnairaRoutes);
 app.use("/rates", ratesRoutes);
 app.use("/accountname", AccountnameRoutes);
 app.use("/news", newsRoutes);
@@ -688,7 +688,6 @@ app.use("/level", authenticateToken, VerificationLevelRoutes);
 app.use("/process", authenticateToken, VerificationProcessRoutes);
 app.use("/sell", authenticateToken, SellRoutes);
 app.use("/swap", LightningSwapRoutes);
-app.use("/fetchnaira", authenticateToken, fetchnairaRoutes);
 app.use("/buy", authenticateToken, BuyRoutes);
 app.use("/chat-history", authenticateToken, ChatbottransactionHistoryRoutes);
 app.use("/smileid-redirect", SmileIDRedirectRoutes);
