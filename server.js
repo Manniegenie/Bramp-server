@@ -644,7 +644,7 @@ app.use("/swapmarkdown", authenticateAdminToken, requireAdmin, swapmarkdownRoute
 app.use("/naira-price", nairaPriceRouter);
 app.use("/addressplan", AddressplanRoutes);
 app.use("/resend-otp", resendOtpRoutes);
-app.use("/fetchnaira", authenticateToken, fetchnairaRoutes);
+app.use("/fetchnaira", fetchnairaRoutes);
 app.use("/rates", ratesRoutes);
 app.use("/accountname", AccountnameRoutes);
 app.use("/news", newsRoutes);
