@@ -12,7 +12,21 @@ router.get('/naira-accounts', async (_req, res) => {
   res.set('Expires', '0');
 
   try {
-    const data = await getNairaBanks();
+    const result = await getNairaBanks();
+
+    // Obiex wraps in { data: [...] }; unwrap and normalize fields for all app versions
+    const raw = result?.data || result;
+    const list = Array.isArray(raw) ? raw : [];
+    const data = list.map(b => {
+      const sortCode = b.sortCode || b.code || b.bank_code || b.sort_code || '';
+      return {
+        name:      b.name || b.bank_name || '',
+        code:      sortCode,
+        bank_code: sortCode,
+        sortCode:  sortCode,
+        uuid:      b.uuid || b.id || '',
+      };
+    }).filter(b => b.name && b.code);
 
     return res.status(200).json({
       success: true,

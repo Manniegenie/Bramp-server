@@ -112,11 +112,28 @@ router.get('/banks', async (req, res) => {
     // Make request to Glyde API
     const response = await axios(requestConfig);
 
+    const raw = response.data.data || response.data;
+    const banks = Array.isArray(raw) ? raw : [];
+
+    // Normalize each bank so every app version finds the fields it needs:
+    // - old app reads bank.code / bank.bank_code (no sortCode fallback)
+    // - new app reads bank.sortCode (with code fallback)
+    const normalizedBanks = banks.map(b => {
+      const sortCode = b.sortCode || b.code || b.bank_code || b.sort_code || '';
+      return {
+        name:      b.name || b.bank_name || '',
+        code:      sortCode,          // old-app compat: explicit code field
+        bank_code: sortCode,          // old-app compat: explicit bank_code field
+        sortCode:  sortCode,          // new-app compat
+        uuid:      b.uuid || b.id || '',
+      };
+    }).filter(b => b.name && b.code);
+
     // Return successful response
     return res.status(200).json({
       status: 200,
       success: true,
-      data: response.data.data || response.data,
+      data: normalizedBanks,
       message: 'Banks retrieved successfully'
     });
 
