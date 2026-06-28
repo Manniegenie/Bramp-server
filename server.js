@@ -260,7 +260,7 @@ app.use(express.urlencoded({ limit: '1mb', extended: true }));
 // General rate limiter for all routes (prevents abuse)
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 200, // 200 requests per 15 minutes per IP
+  max: 500, // 500 requests per 15 minutes per IP
   message: { success: false, error: "Too many requests, please try again later" },
   standardHeaders: true,
   legacyHeaders: false,

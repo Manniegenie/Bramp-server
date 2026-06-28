@@ -52,6 +52,10 @@ const predictionSchema = new mongoose.Schema({
   // Hyperliquid position (populated once the perp trade is opened)
   hlOrderId:       { type: String },   // Hyperliquid order/fill ID
   hlPositionSide:  { type: String, enum: ['long', 'short', null], default: null },
+
+  // Early cashout
+  cashedOut:   { type: Boolean, default: false },
+  cashedOutAt: { type: Date },
 }, {
   timestamps: true,
   collection: 'predictions',

@@ -48,12 +48,25 @@ router.get('/naira-accounts', async (_req, res) => {
 
     return res.status(200).json({ banks, count: banks.length });
   } catch (err) {
+    const obiexStatus = err?.response?.status;
+    const obiexData = err?.response?.data;
     logger.error('Banks fetch failed', {
       message: err?.message,
-      status: err?.response?.status,
-      data: err?.response?.data,
+      obiexStatus,
+      obiexData,
+      code: err?.code,
     });
-    return res.status(502).json({ banks: [], count: 0, error: 'Failed to fetch banks' });
+
+    if (obiexStatus === 401 || obiexStatus === 403) {
+      return res.status(502).json({ banks: [], count: 0, error: 'Obiex auth failed — check API key/secret', detail: obiexStatus });
+    }
+    if (err?.code === 'ECONNABORTED' || err?.code === 'ETIMEDOUT') {
+      return res.status(504).json({ banks: [], count: 0, error: 'Obiex API timed out' });
+    }
+    if (obiexStatus) {
+      return res.status(502).json({ banks: [], count: 0, error: `Obiex returned ${obiexStatus}`, detail: obiexData });
+    }
+    return res.status(502).json({ banks: [], count: 0, error: 'Failed to fetch banks', detail: err?.message });
   }
 });
 

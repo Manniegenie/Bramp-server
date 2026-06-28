@@ -16,6 +16,18 @@ const { getOnrampRate }         = require('../services/onramppriceservice');
 // This address funds the Hyperliquid trading account used for BetaMarket positions.
 const BETAMARKET_USDC_ADDRESS = process.env.BETAMARKET_USDC_ADDRESS;
 
+// ── Hyperliquid perps trading client (optional — only if HL_PRIVATE_KEY set) ──
+
+let _hlPerps = null;
+function getHLPerps() {
+  if (_hlPerps) return _hlPerps;
+  if (!process.env.HL_PRIVATE_KEY) return null;
+  try { _hlPerps = require('../services/hyperliquid'); } catch (e) {
+    logger.warn('betamarket: hyperliquid.js not loadable', { error: e.message });
+  }
+  return _hlPerps;
+}
+
 // ── Hyperliquid price oracle ───────────────────────────────────────────────────
 
 let _hlInfo = null;
@@ -122,6 +134,16 @@ const WINDOW_MS = {
   '3M':  90  * 24 * 3_600_000,  // 90 days
   '6M':  180 * 24 * 3_600_000,  // 180 days
 };
+
+// ── Price-at-time helper (same logic as settlement cron) ─────────────────────
+
+async function getPriceAtOrBefore(symbol, deadline) {
+  const doc = await PriceChange.findOne({
+    symbol:    symbol.toUpperCase(),
+    timestamp: { $lte: deadline },
+  }).sort({ timestamp: -1 }).lean();
+  return doc ? doc.price : null;
+}
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
 
@@ -505,6 +527,180 @@ router.get('/my-bets', async (req, res) => {
     logger.error('BetaMarket /my-bets error', { error: err.message });
     res.status(500).json({ success: false, error: 'Failed to fetch bets' });
   }
+});
+
+/**
+ * GET /betamarket/prices?symbols=BTC,ETH,SOL
+ * Lightweight live-price endpoint for cashout P&L polling on the frontend.
+ */
+router.get('/prices', async (req, res) => {
+  const raw     = req.query.symbols;
+  const symbols = raw
+    ? raw.split(',').map(s => s.trim().toUpperCase()).filter(s => MARKET_TOKENS.includes(s))
+    : MARKET_TOKENS;
+
+  try {
+    const { mids } = await getMidsWithFallback(symbols);
+    const prices   = {};
+    for (const s of symbols) {
+      if (mids[s] != null) prices[s] = parseFloat(mids[s]);
+    }
+    res.json({ success: true, data: prices });
+  } catch (err) {
+    logger.error('BetaMarket /prices error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to fetch prices' });
+  }
+});
+
+/**
+ * POST /betamarket/cashout
+ *
+ * Early settlement at live price. Available once cumulative P&L has reached
+ * 50% of the illustrative P&L target (potentialPayout − stake).
+ *
+ * Body: { predictionId, passwordpin }
+ */
+router.post('/cashout', async (req, res) => {
+  const userId = req.user?.id;
+  if (!userId) return res.status(401).json({ success: false, error: 'Unauthorized' });
+
+  const { predictionId, passwordpin } = req.body;
+  if (!predictionId || !passwordpin) {
+    return res.status(400).json({ success: false, error: 'predictionId and passwordpin required' });
+  }
+
+  // ── PIN check ──────────────────────────────────────────────────────────────
+  const user = await User.findById(userId).select('passwordpin').lean();
+  if (!user) return res.status(404).json({ success: false, error: 'User not found' });
+
+  const pinValid = await bcrypt.compare(String(passwordpin), user.passwordpin);
+  if (!pinValid) {
+    return res.status(401).json({ success: false, error: 'INVALID_PIN', message: 'Incorrect PIN.' });
+  }
+
+  const now = new Date();
+
+  // ── Lock prediction atomically ─────────────────────────────────────────────
+  const bet = await Prediction.findOneAndUpdate(
+    { _id: predictionId, userId, status: 'pending' },
+    { $set: { status: 'settling' } },
+    { new: true },
+  ).lean();
+
+  if (!bet) {
+    return res.status(404).json({ success: false, error: 'Position not found or already settled' });
+  }
+
+  // ── All rounds must have started ───────────────────────────────────────────
+  if (!bet.picks.every(p => new Date(p.roundStart) <= now)) {
+    await Prediction.findByIdAndUpdate(bet._id, { $set: { status: 'pending' } });
+    return res.status(400).json({ success: false, error: 'ROUND_NOT_STARTED', message: 'Position has not started yet.' });
+  }
+
+  // ── Fetch live prices ──────────────────────────────────────────────────────
+  const symbols = [...new Set(bet.picks.map(p => p.symbol))];
+  let mids;
+  try {
+    ({ mids } = await getMidsWithFallback(symbols));
+  } catch (err) {
+    await Prediction.findByIdAndUpdate(bet._id, { $set: { status: 'pending' } });
+    return res.status(503).json({ success: false, error: 'PRICE_UNAVAILABLE', message: 'Live price feed unavailable. Try again shortly.' });
+  }
+
+  // ── Calculate P&L per pick using round-open price ─────────────────────────
+  const stakePerPick = bet.stake / bet.picks.length;
+  const pickUpdates  = [];
+
+  for (const pick of bet.picks) {
+    const openPrice  = await getPriceAtOrBefore(pick.symbol, new Date(pick.roundStart));
+    const closePrice = mids[pick.symbol] ? parseFloat(mids[pick.symbol]) : null;
+
+    if (!openPrice || !closePrice) {
+      await Prediction.findByIdAndUpdate(bet._id, { $set: { status: 'pending' } });
+      return res.status(400).json({ success: false, error: 'PRICE_DATA_MISSING', message: `Price data missing for ${pick.symbol}.` });
+    }
+
+    const rawReturn      = (closePrice - openPrice) / openPrice;
+    const directedReturn = pick.direction === 'up' ? rawReturn : -rawReturn;
+    const leveragedReturn = directedReturn * pick.multiplier;
+    const settledReturn  = Math.max(-1, leveragedReturn);
+    const pickPayout     = parseFloat((stakePerPick * (1 + settledReturn)).toFixed(2));
+
+    pickUpdates.push({
+      marketId:         pick.marketId,
+      result:           settledReturn >= 0 ? 'won' : 'lost',
+      actualMultiplier: parseFloat((1 + settledReturn).toFixed(4)),
+      pickPayout,
+      openPriceUSD:     openPrice,
+      closePriceUSD:    closePrice,
+    });
+  }
+
+  // ── Enforce 50% of illustrative P&L threshold (server-side guard) ─────────
+  const totalCurrentPayout = parseFloat(pickUpdates.reduce((s, p) => s + p.pickPayout, 0).toFixed(2));
+  const illustrativePnl    = bet.potentialPayout - bet.stake;
+  const currentPnl         = totalCurrentPayout - bet.stake;
+
+  if (currentPnl < illustrativePnl * 0.5) {
+    await Prediction.findByIdAndUpdate(bet._id, { $set: { status: 'pending' } });
+    return res.status(400).json({
+      success: false,
+      error:   'CASHOUT_THRESHOLD_NOT_MET',
+      message: 'Cashout requires at least 50% of the illustrative P&L target.',
+    });
+  }
+
+  // ── Close HL position ──────────────────────────────────────────────────────
+  const hlPerps = getHLPerps();
+  if (hlPerps && bet.hlPositionSide) {
+    for (const symbol of symbols) {
+      try {
+        await hlPerps.closePosition(symbol);
+        logger.info(`BetaMarket cashout: closed HL position for ${symbol}`);
+      } catch (err) {
+        logger.error(`BetaMarket cashout: failed to close HL position for ${symbol}`, { error: err.message });
+      }
+    }
+  }
+
+  // ── Persist settlement ─────────────────────────────────────────────────────
+  const actualTotalOdds = parseFloat((totalCurrentPayout / bet.stake).toFixed(4));
+  const betStatus       = totalCurrentPayout >= bet.stake ? 'won' : 'lost';
+
+  const arrayFilters = [];
+  const setOps = {
+    status:          betStatus,
+    settledAt:       now,
+    actualTotalOdds,
+    actualPayout:    totalCurrentPayout,
+    cashedOut:       true,
+    cashedOutAt:     now,
+  };
+
+  pickUpdates.forEach((pu, i) => {
+    arrayFilters.push({ [`elem${i}.marketId`]: pu.marketId });
+    setOps[`picks.$[elem${i}].result`]           = pu.result;
+    setOps[`picks.$[elem${i}].actualMultiplier`] = pu.actualMultiplier;
+    setOps[`picks.$[elem${i}].openPriceUSD`]     = pu.openPriceUSD;
+    setOps[`picks.$[elem${i}].closePriceUSD`]    = pu.closePriceUSD;
+  });
+
+  const settled = await Prediction.findByIdAndUpdate(
+    bet._id, { $set: setOps }, { arrayFilters, new: true },
+  ).lean();
+
+  if (totalCurrentPayout > 0) {
+    await User.findByIdAndUpdate(bet.userId, { $inc: { ngnbBalance: totalCurrentPayout } });
+  }
+
+  logger.info(`BetaMarket: cashed out ${bet._id} → ${betStatus}`, {
+    userId:         bet.userId.toString(),
+    stake:          bet.stake,
+    actualPayout:   totalCurrentPayout,
+    actualTotalOdds,
+  });
+
+  res.json({ success: true, data: settled });
 });
 
 module.exports = router;

@@ -15,6 +15,20 @@ const {
 // Import offramp price service (NGNB rate)
 const { getCurrentRate } = require('../services/offramppriceservice');
 
+// 60-second in-memory cache for price responses, keyed by sorted query string
+const _priceCacheMap = new Map(); // key -> { response, cachedAt }
+const PRICE_CACHE_TTL = 60 * 1000; // 60 seconds
+
+function getPriceCacheKey(query) {
+  // Build a stable key from cacheable query params only (no original, no limit)
+  const sorted = Object.entries(query)
+    .filter(([k]) => k !== 'original' && k !== 'limit')
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([k, v]) => `${k}=${v}`)
+    .join('&');
+  return sorted;
+}
+
 // Helper: parse symbols query param into an array of validated tokens
 function parseSymbolsParam(symbolsParam) {
   if (!symbolsParam) return Object.keys(SUPPORTED_TOKENS);
@@ -29,6 +43,18 @@ function parseSymbolsParam(symbolsParam) {
 // GET /prices?symbols=BTC,ETH&original=true&changes=true&limit=10
 router.get('/', async (req, res) => {
   const start = Date.now();
+
+  // Serve from cache for cacheable requests (no original, no limit flags)
+  const isCacheable = !req.query.original && !req.query.limit;
+  const cacheKey = isCacheable ? getPriceCacheKey(req.query) : null;
+  if (cacheKey) {
+    const hit = _priceCacheMap.get(cacheKey);
+    if (hit && (Date.now() - hit.cachedAt) < PRICE_CACHE_TTL) {
+      res.set('Cache-Control', 'public, max-age=60');
+      return res.status(200).json({ ...hit.response, meta: { ...(hit.response.meta || {}), fromCache: true, durationMs: 0 } });
+    }
+  }
+
   try {
     // parse query params
     const symbolsParam = req.query.symbols;
@@ -143,9 +169,12 @@ router.get('/', async (req, res) => {
       }
     };
 
-    // Set cache-control header (short caching; frontend can decide)
-    // Note: we do not cache server-side here — this just hints clients
-    res.set('Cache-Control', 'public, max-age=10'); // 10 seconds
+    // Store in server-side cache
+    if (cacheKey) {
+      _priceCacheMap.set(cacheKey, { response, cachedAt: Date.now() });
+    }
+
+    res.set('Cache-Control', 'public, max-age=60'); // 60 seconds
 
     return res.status(200).json(response);
   } catch (err) {
