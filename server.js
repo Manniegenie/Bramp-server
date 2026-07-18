@@ -550,6 +550,7 @@ const adminBannerRoutes = require("./adminRoutes/banners");
 const blockuserRoutes = require("./adminRoutes/blockuser");
 const Pushnotification = require("./adminRoutes/pushnotification");
 const AdminKYCRoutes = require("./adminRoutes/kyc");
+const KYCBypassRoutes = require("./adminRoutes/kyc-bypass");
 const scheduledNotificationRoutes = require("./adminRoutes/scheduledNotifications");
 const scheduledGiftCardNotificationRoutes = require("./adminRoutes/scheduledGiftCardNotifications");
 const nairamarkupRoutes = require("./adminRoutes/nairamarkup");
@@ -616,6 +617,7 @@ app.use("/analytics", authenticateAdminToken, requireModerator, marketingStatsRo
 app.use("/analytics", authenticateAdminToken, requireModerator, analyticsRoutes);
 app.use("/2FA-Disable", authenticateAdminToken, requireModerator, AdminDisableTwoFARoutes);
 app.use("/admin-kyc", authenticateAdminToken, requireModerator, AdminKYCRoutes);
+app.use("/admin/kyc-bypass", authenticateAdminToken, requireAdmin, KYCBypassRoutes); // demo-account KYC bypass: admin+ only
 
 // SUPER ADMIN ONLY ROUTES (highest permissions)
 app.use("/deleteuser", authenticateAdminToken, requireSuperAdmin, deleteuserRoutes);

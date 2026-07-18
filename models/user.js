@@ -60,6 +60,15 @@ const userSchema = new mongoose.Schema({
   // KYC Levels
   kycLevel: { type: Number, default: 0, min: 0, max: 3, enum: [0, 1, 2, 3] },
   kycStatus: { type: String, default: 'not_verified', enum: ['not_verified', 'pending', 'approved', 'rejected', 'under_review'] },
+
+  // KYC bypass for demo/test accounts — set only via the admin kyc-bypass route.
+  // When enabled, kyccheckservice skips level and limit checks entirely.
+  kycBypass: {
+    enabled: { type: Boolean, default: false },
+    reason: { type: String, default: null },
+    setBy: { type: String, default: null },
+    setAt: { type: Date, default: null }
+  },
   kyc: {
     level1: {
       status: { type: String, default: 'not_submitted', enum: ['not_submitted', 'pending', 'approved', 'rejected'] },

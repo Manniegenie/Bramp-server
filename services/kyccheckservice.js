@@ -29,6 +29,10 @@ class KYCLimitService {
         return this.createErrorResponse('USER_NOT_FOUND', 'User not found');
       }
 
+      if (this.hasKycBypass(user)) {
+        return this.createBypassResponse(user, 'NGNB', amount);
+      }
+
       const ngnbLimits = user.getNgnbLimits();
       logger.info(`📋 User KYC Level ${user.kycLevel} NGNB limits: Daily ₦${ngnbLimits.daily.toLocaleString()}, Monthly ₦${ngnbLimits.monthly.toLocaleString()}`);
 
@@ -103,6 +107,10 @@ class KYCLimitService {
       const user = await this.getUser(userId);
       if (!user) {
         return this.createErrorResponse('USER_NOT_FOUND', 'User not found');
+      }
+
+      if (this.hasKycBypass(user)) {
+        return this.createBypassResponse(user, 'CRYPTO', amount, currency);
       }
 
       const cryptoLimits = user.getCryptoLimits();
@@ -190,6 +198,10 @@ class KYCLimitService {
         return this.createErrorResponse('USER_NOT_FOUND', 'User not found');
       }
 
+      if (this.hasKycBypass(user)) {
+        return this.createBypassResponse(user, 'UTILITY', amount);
+      }
+
       const utilityLimits = user.getUtilityLimits();
       logger.info(`📋 User KYC Level ${user.kycLevel} Utility limits: Daily ₦${utilityLimits.daily.toLocaleString()}, Monthly ₦${utilityLimits.monthly.toLocaleString()}`);
 
@@ -248,6 +260,24 @@ class KYCLimitService {
         error: error.message
       });
     }
+  }
+
+  /**
+   * Demo/test accounts with an admin-set bypass skip KYC level and limit checks
+   */
+  hasKycBypass(user) {
+    return user.kycBypass?.enabled === true;
+  }
+
+  createBypassResponse(user, transactionType, amount, currency = null) {
+    logger.info(`🎭 KYC bypass active for user ${user._id} (${user.email}) — skipping ${transactionType} limit checks`);
+    return this.createSuccessResponse('KYC_BYPASS_ACTIVE', 'KYC checks bypassed for demo account', {
+      kycLevel: user.kycLevel,
+      transactionType,
+      requestedAmount: amount,
+      ...(currency && { currency }),
+      bypass: true
+    });
   }
 
   /**
