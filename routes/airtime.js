@@ -270,7 +270,7 @@ router.post('/purchase', async (req, res) => {
 
     if (!validateTwoFactorAuth(user, twoFactorCode)) {
       logger.warn('🚫 2FA validation failed for airtime purchase', { userId, errorType: 'INVALID_2FA' });
-      return res.status(401).json({ success: false, error: 'INVALID_2FA_CODE', message: 'Invalid two-factor authentication code' });
+      return res.status(403).json({ success: false, error: 'INVALID_2FA_CODE', message: 'Invalid two-factor authentication code' });
     }
 
     logger.info('✅ 2FA validation successful for airtime purchase', { userId });

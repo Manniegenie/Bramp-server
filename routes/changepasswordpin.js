@@ -88,7 +88,7 @@ router.post(
       // Validate 2FA code
       if (!validateTwoFactorAuth(user, String(twoFactorCode || '').trim())) {
         logger.warn('🚫 2FA validation failed for change-pin', { userId, errorType: 'INVALID_2FA' });
-        return res.status(401).json({
+        return res.status(403).json({
           success: false,
           error: 'INVALID_2FA_CODE',
           message: 'Invalid two-factor authentication code'

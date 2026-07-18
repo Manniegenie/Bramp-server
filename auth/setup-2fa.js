@@ -11,27 +11,47 @@ router.get('/setup-2fa', async (req, res) => {
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    const secret = speakeasy.generateSecret({
-      name: `Bramp (${user.email})`,
+    // Block re-setup if 2FA is already active — user must disable it first.
+    // Allowing this silently replaces the stored secret while the authenticator
+    // app still holds the old one, causing all future codes to fail.
+    if (user.is2FAEnabled) {
+      return res.status(409).json({
+        error: '2FA is already enabled. Disable it first before setting up again.',
+      });
+    }
+
+    // Reuse in-progress secret so repeated calls to this endpoint before
+    // verification don't rotate the secret out from under the user.
+    let base32Secret;
+    if (user.twoFASecret) {
+      base32Secret = user.twoFASecret;
+    } else {
+      const secret = speakeasy.generateSecret({
+        name: `Bramp (${user.email})`,
+      });
+      base32Secret = secret.base32;
+      user.twoFASecret = base32Secret;
+      user.is2FAVerified = false;
+      await user.save();
+    }
+
+    // Standard otpauth URL format: otpauth://totp/ISSUER:LABEL?secret=BASE32&issuer=ISSUER
+    // The ISSUER:LABEL colon-separated format is required by Google Authenticator, Authy, etc.
+    const otpAuthUrl = `otpauth://totp/Bramp:${encodeURIComponent(user.email)}?secret=${base32Secret}&issuer=Bramp`;
+    const qrCodeDataURL = await qrcode.toDataURL(otpAuthUrl, {
+      errorCorrectionLevel: 'M',
+      type: 'image/png',
+      width: 300,
+      margin: 2,
+      color: { dark: '#000000', light: '#FFFFFF' },
     });
 
-    user.twoFASecret = secret.base32;
-    user.is2FAEnabled = false;
-    user.is2FAVerified = false;
-    await user.save();
-
-    const otpAuthUrl = secret.otpauth_url;
-    const qrCodeDataURL = await qrcode.toDataURL(otpAuthUrl);
-
-    console.log('2FA setup completed for user:', {
-      userId: user._id,
-      email: user.email
-    });
+    console.log('2FA setup served for user:', { userId: user._id, email: user.email });
 
     res.json({
       message: 'Scan this QR code with your Authenticator app',
       qrCodeDataURL,
-      manualEntryKey: secret.base32,
+      manualEntryKey: base32Secret,
     });
   } catch (err) {
     console.error('Error generating 2FA secret:', err);
@@ -42,8 +62,9 @@ router.get('/setup-2fa', async (req, res) => {
 // Step 2: Verify token and enable 2FA
 router.post('/verify-2fa', async (req, res) => {
   try {
-    const { token } = req.body;
-    if (!token || typeof token !== 'string' || token.length !== 6) {
+    // Coerce to string so clients sending the code as a JSON number still work
+    const token = String(req.body?.token ?? '').trim();
+    if (!/^\d{6}$/.test(token)) {
       return res.status(400).json({ error: 'Valid 6-digit token is required' });
     }
 
@@ -60,12 +81,15 @@ router.post('/verify-2fa', async (req, res) => {
       secret: user.twoFASecret,
       encoding: 'base32',
       token,
-      window: 2, // Allow for clock drift
+      window: 3, // ±90s clock tolerance, matches services/twofactorAuth.js
     });
 
     if (!verified) {
       console.log('2FA verification failed for user:', user._id);
-      return res.status(401).json({ error: 'Invalid 2FA token' });
+      // 403, not 401 — the app's apiClient treats 401 as an expired session
+      // and responds with a token refresh + blind retry instead of showing
+      // the user an "invalid code" error.
+      return res.status(403).json({ error: 'Invalid 2FA token' });
     }
 
     user.is2FAEnabled = true;
@@ -110,9 +134,9 @@ router.get('/2fa-status', async (req, res) => {
 // Disable 2FA (requires token verification)
 router.post('/disable-2fa', async (req, res) => {
   try {
-    const { token } = req.body;
+    const token = String(req.body?.token ?? '').trim();
 
-    if (!token || typeof token !== 'string' || token.length !== 6) {
+    if (!/^\d{6}$/.test(token)) {
       return res.status(400).json({ error: 'Valid 6-digit 2FA token is required to disable 2FA' });
     }
 
@@ -128,12 +152,13 @@ router.post('/disable-2fa', async (req, res) => {
       secret: user.twoFASecret,
       encoding: 'base32',
       token,
-      window: 2,
+      window: 3, // ±90s clock tolerance, matches services/twofactorAuth.js
     });
 
     if (!verified) {
       console.log('2FA verification failed for disable request:', user._id);
-      return res.status(401).json({ error: 'Invalid 2FA token. Please enter the correct code from your authenticator app.' });
+      // 403, not 401 — see verify-2fa above
+      return res.status(403).json({ error: 'Invalid 2FA token. Please enter the correct code from your authenticator app.' });
     }
 
     // Disable 2FA after successful verification

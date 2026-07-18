@@ -502,7 +502,7 @@ router.post('/internal', async (req, res) => {
 
     if (!validateTwoFactorAuth(senderUser, twoFactorCode)) {
       logger.warn('Invalid 2FA attempt for internal transfer', { senderUserId });
-      return res.status(401).json({
+      return res.status(403).json({
         success: false,
         error: 'INVALID_2FA',
         message: 'Invalid two-factor authentication code'

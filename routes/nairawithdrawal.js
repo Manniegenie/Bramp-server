@@ -254,7 +254,7 @@ router.post('/withdrawal/ngnb', async (req, res) => {
     }
     if (!validateTwoFactorAuth(user, twoFactorCode)) {
       logger.warn('NGNB withdrawal blocked: invalid 2FA', { userId });
-      return res.status(401).json({ success: false, message: 'Invalid two-factor authentication code.' });
+      return res.status(403).json({ success: false, message: 'Invalid two-factor authentication code.' });
     }
 
     // 4. PIN check

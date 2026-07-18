@@ -667,7 +667,7 @@ router.post('/crypto', async (req, res) => {
 
     if (!validateTwoFactorAuth(user, twoFactorCode)) {
       logger.warn('Invalid 2FA attempt for crypto withdrawal', { userId });
-      return res.status(401).json({
+      return res.status(403).json({
         success: false,
         message: 'Invalid two-factor authentication code'
       });

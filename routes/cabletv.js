@@ -125,7 +125,7 @@ router.post('/purchase', async (req, res) => {
 
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-    if (!validateTwoFactorAuth(user, twoFactorCode)) return res.status(401).json({ success: false, error: 'INVALID_2FA_CODE', message: 'Invalid 2FA code' });
+    if (!validateTwoFactorAuth(user, twoFactorCode)) return res.status(403).json({ success: false, error: 'INVALID_2FA_CODE', message: 'Invalid 2FA code' });
     if (!await comparePasswordPin(passwordpin, user.passwordpin)) return res.status(401).json({ success: false, error: 'INVALID_PASSWORDPIN', message: 'Invalid password PIN' });
 
     // KYC Validation (UPDATED)

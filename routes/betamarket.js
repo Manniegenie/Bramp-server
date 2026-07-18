@@ -367,7 +367,7 @@ router.post('/predict', async (req, res) => {
     if (user.twoFactorEnabled) {
       if (!twoFactorCode) return res.status(400).json({ success: false, error: '2FA_REQUIRED' });
       if (!validateTwoFactorAuth(user, String(twoFactorCode))) {
-        return res.status(401).json({ success: false, error: 'INVALID_2FA', message: 'Invalid 2FA code. Please try again.' });
+        return res.status(403).json({ success: false, error: 'INVALID_2FA', message: 'Invalid 2FA code. Please try again.' });
       }
     }
 

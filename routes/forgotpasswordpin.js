@@ -232,7 +232,7 @@ router.post('/change-pin', async (req, res) => {
 
     if (!validateTwoFactorAuth(user, twoFactorCode)) {
       logger.warn('🚫 2FA validation failed for forgot pin completion', { userId: user._id });
-      return res.status(401).json({
+      return res.status(403).json({
         success: false,
         error: 'INVALID_2FA_CODE',
         message: 'Invalid two-factor authentication code'

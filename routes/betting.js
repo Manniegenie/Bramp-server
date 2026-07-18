@@ -212,7 +212,7 @@ router.post('/fund', async (req, res) => {
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
     if (!user.twoFASecret || !user.is2FAEnabled) return res.status(400).json({ success: false, message: '2FA is not enabled. Please enable 2FA.' });
-    if (!validateTwoFactorAuth(user, twoFactorCode)) return res.status(401).json({ success: false, error: 'INVALID_2FA_CODE', message: 'Invalid 2FA code' });
+    if (!validateTwoFactorAuth(user, twoFactorCode)) return res.status(403).json({ success: false, error: 'INVALID_2FA_CODE', message: 'Invalid 2FA code' });
 
     // Step 5: Validate PIN
     if (!user.passwordpin) return res.status(400).json({ success: false, message: 'Password PIN not set. Please set it first.' });
