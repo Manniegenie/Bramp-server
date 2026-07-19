@@ -1,13 +1,18 @@
 require('dotenv').config();
 const AfricasTalking = require('africastalking');
 
-// Initialize Africa's Talking SDK
-const africastalking = AfricasTalking({
-  apiKey: process.env.AT_API_KEY,
-  username: process.env.AT_USERNAME, // e.g., 'Bramp' or 'sandbox'
-});
-
-const sms = africastalking.SMS;
+// Initialize the SDK lazily. Constructing it with undefined credentials
+// throws a validation error at module load, which crashes the whole server
+// on boot when AT creds aren't configured. Only build the client when creds
+// are present; sendVerificationCode() already guards the missing-creds case.
+let sms = null;
+if (process.env.AT_API_KEY && process.env.AT_USERNAME) {
+  const africastalking = AfricasTalking({
+    apiKey: process.env.AT_API_KEY,
+    username: process.env.AT_USERNAME, // e.g., 'Bramp' or 'sandbox'
+  });
+  sms = africastalking.SMS;
+}
 
 /**
  * Send verification code via SMS
