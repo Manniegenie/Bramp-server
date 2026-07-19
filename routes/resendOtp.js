@@ -2,7 +2,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const PendingUser = require('../models/pendinguser');
-const { sendVerificationCode } = require('../utils/verifyAT');
+const { sendOtpEmail } = require('../services/EmailService');
 const logger = require('../utils/logger');
 const validator = require('validator');
 
@@ -63,10 +63,10 @@ router.post('/resend-otp', otpResendLimiter, async (req, res) => {
     const createdAt = new Date();
     const expiresAt = new Date(createdAt.getTime() + 10 * 60 * 1000); // HARD-CODED 10 minutes
 
-    const sendResult = await sendVerificationCode(normalizedPhone, otp);
-
-    if (!sendResult.success) {
-      logger.error('Failed to resend OTP', { phone: normalizedPhone, error: sendResult.error });
+    try {
+      await sendOtpEmail(pendingUser.email, pendingUser.firstname, otp);
+    } catch (otpErr) {
+      logger.error('Failed to resend OTP email', { email: (pendingUser.email || '').slice(0, 3) + '****', error: otpErr.message });
       return res.status(500).json({ message: 'Failed to send verification code.' });
     }
 

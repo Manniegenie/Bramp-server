@@ -2,7 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const PendingUser = require('../models/pendinguser');
-const { sendVerificationCode } = require('../utils/verifyAT');
+const { sendOtpEmail } = require('../services/EmailService');
 const logger = require('../utils/logger');
 
 function generateOTP(length = 6) {
@@ -37,12 +37,11 @@ router.post('/resend-otp', async (req, res) => {
     const createdAt = new Date();
     const expiresAt = new Date(createdAt.getTime() + 10 * 60 * 1000); // 10 minutes
 
-    // Send SMS (Africa's Talking expects no leading +)
-    const smsPhone = normalizedPhone.startsWith('+') ? normalizedPhone.slice(1) : normalizedPhone;
-    const sendResult = await sendVerificationCode(smsPhone, otp);
-    
-    if (!sendResult?.success) {
-      logger.error('Failed to send OTP', { phone: smsPhone, error: sendResult?.error });
+    // Send OTP via email
+    try {
+      await sendOtpEmail(pendingUser.email, pendingUser.firstname, otp);
+    } catch (otpErr) {
+      logger.error('Failed to send OTP email', { email: (pendingUser.email || '').slice(0, 3) + '****', error: otpErr.message });
       return res.status(500).json({ success: false, message: 'Failed to send verification code.' });
     }
 

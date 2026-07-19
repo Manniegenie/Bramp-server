@@ -4,8 +4,7 @@ const router = express.Router();
 
 const PendingUser = require('../models/pendinguser');
 const User = require('../models/user');
-const { sendVerificationCode } = require('../utils/verifyAT');
-const { sendSignupEmail } = require('../services/EmailService');
+const { sendSignupEmail, sendOtpEmail } = require('../services/EmailService');
 const logger = require('../utils/logger');
 const validator = require('validator');
 const facebookConversionsAPI = require('../services/FacebookConversionsAPI');
@@ -110,11 +109,11 @@ router.post('/add-user', async (req, res) => {
     const createdAt = new Date();
     const expiresAt = new Date(createdAt.getTime() + 10 * 60 * 1000);
 
-    // send SMS (Africa's Talking expects no leading +)
-    const normalizedPhone = phonenumber.startsWith('+') ? phonenumber.slice(1) : phonenumber;
-    const sendResult = await sendVerificationCode(normalizedPhone, otp);
-    if (!sendResult?.success) {
-      logger.error('Failed to send OTP', { phone: normalizedPhone, error: sendResult?.error });
+    // send OTP via email
+    try {
+      await sendOtpEmail(email, firstname, otp);
+    } catch (otpErr) {
+      logger.error('Failed to send OTP email', { email: email.slice(0, 3) + '****', error: otpErr.message });
       return res.status(500).json({ success: false, message: 'Failed to send verification code.' });
     }
 
