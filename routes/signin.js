@@ -27,15 +27,13 @@ const validateJWTSecrets = () => {
 router.post(
   "/signin-pin",
   [
-    body("phonenumber")
+    body("email")
       .trim()
       .notEmpty()
-      .withMessage("Phone number is required.")
-      .custom((value) => {
-        const phoneRegex = /^\+?\d{10,15}$/;
-        if (!phoneRegex.test(value)) throw new Error("Invalid phone number format. Use format like +2348100000000 or 2348100000000.");
-        return true;
-      }),
+      .withMessage("Email is required.")
+      .isEmail()
+      .withMessage("Invalid email address.")
+      .normalizeEmail(),
     body("passwordpin")
       .trim()
       .customSanitizer((value) => String(value).padStart(6, '0'))
@@ -46,17 +44,17 @@ router.post(
   ],
   async (req, res) => {
     const startTime = Date.now();
-    logger.info("PIN sign-in request initiated", { phonenumber: req.body.phonenumber?.slice(0, 5) + "****" });
+    logger.info("PIN sign-in request initiated", { email: req.body.email });
 
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ success: false, message: "Validation failed.", errors: errors.array() });
     }
 
-    const { phonenumber, passwordpin } = req.body;
+    const { email, passwordpin } = req.body;
 
     try {
-      const user = await User.findOne({ phonenumber }).lean(false);
+      const user = await User.findOne({ email: String(email).toLowerCase().trim() }).lean(false);
       if (!user) return res.status(404).json({ success: false, message: "User not found." });
 
       // Check if account is locked
