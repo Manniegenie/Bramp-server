@@ -14,10 +14,6 @@ module.exports = {
     authToken: process.env.TWILIO_AUTH_TOKEN,
     senderverifyServiceSidId: process.env.TWILIO_VERIFY_SERVICE_SID
   },
-  FIREBLOCKS_API_KEY: process.env.FIREBLOCKS_API_KEY,
-  FIREBLOCKS_KEY_PATH: process.env.FIREBLOCKS_KEY_PATH,
-  VAULT_ACCOUNT_ID: process.env.VAULT_ACCOUNT_ID,
-
   obiex: {
     apiKey: process.env.OBIEX_API_KEY,
     apiSecret: process.env.OBIEX_API_SECRET,
