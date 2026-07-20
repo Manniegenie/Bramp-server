@@ -25,18 +25,18 @@ function sanitizeInput(input) {
 
 // POST: /initiate - Send OTP via email (no auth required - identified by phone number)
 router.post('/initiate', async (req, res) => {
-  let { phonenumber } = req.body;
+  let { email } = req.body;
 
-  if (!phonenumber) {
-    return res.status(400).json({ message: 'Phone number is required.' });
+  if (!email) {
+    return res.status(400).json({ message: 'Email is required.' });
   }
 
-  phonenumber = sanitizeInput(phonenumber);
+  email = sanitizeInput(String(email).toLowerCase());
 
   try {
-    const user = await User.findOne({ phonenumber });
+    const user = await User.findOne({ email });
     if (!user) {
-      logger.warn('User not found for forgot pin', { phonenumber: phonenumber.slice(0, 6) + '****' });
+      logger.warn('User not found for forgot pin', { email: email.slice(0, 6) + '****' });
       return res.status(404).json({ message: 'User not found.' });
     }
 
@@ -112,16 +112,16 @@ router.post('/initiate', async (req, res) => {
 
 // POST: /verify-otp - Verify OTP only
 router.post('/verify-otp', async (req, res) => {
-  let { otp, phonenumber } = req.body;
+  let { otp, email } = req.body;
 
-  if (!phonenumber) {
-    return res.status(400).json({ message: 'Phone number is required.' });
+  if (!email) {
+    return res.status(400).json({ message: 'Email is required.' });
   }
   if (!otp) {
     return res.status(400).json({ message: 'Please provide OTP.' });
   }
 
-  phonenumber = sanitizeInput(phonenumber);
+  email = sanitizeInput(String(email).toLowerCase());
   otp = sanitizeInput(otp);
 
   if (!/^\d{6}$/.test(otp)) {
@@ -129,7 +129,7 @@ router.post('/verify-otp', async (req, res) => {
   }
 
   try {
-    const user = await User.findOne({ phonenumber });
+    const user = await User.findOne({ email });
     if (!user) {
       return res.status(404).json({ message: 'User not found.' });
     }
@@ -176,10 +176,10 @@ router.post('/verify-otp', async (req, res) => {
 
 // POST: /change-pin - Verify 2FA and change pin
 router.post('/change-pin', async (req, res) => {
-  let { newPin, confirmPin, twoFactorCode, phonenumber } = req.body;
+  let { newPin, confirmPin, twoFactorCode, email } = req.body;
 
-  if (!phonenumber) {
-    return res.status(400).json({ message: 'Phone number is required.' });
+  if (!email) {
+    return res.status(400).json({ message: 'Email is required.' });
   }
   if (!newPin || !confirmPin || !twoFactorCode) {
     return res.status(400).json({ message: 'Please provide all required fields.' });
@@ -188,7 +188,7 @@ router.post('/change-pin', async (req, res) => {
     return res.status(400).json({ message: 'Two-factor authentication code is required.' });
   }
 
-  phonenumber = sanitizeInput(phonenumber);
+  email = sanitizeInput(String(email).toLowerCase());
   newPin = sanitizeInput(newPin);
   confirmPin = sanitizeInput(confirmPin);
   twoFactorCode = sanitizeInput(twoFactorCode);
@@ -201,7 +201,7 @@ router.post('/change-pin', async (req, res) => {
   }
 
   try {
-    const user = await User.findOne({ phonenumber });
+    const user = await User.findOne({ email });
     if (!user) {
       return res.status(404).json({ message: 'User not found.' });
     }
