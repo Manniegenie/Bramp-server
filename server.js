@@ -910,15 +910,22 @@ const startServer = async () => {
         });
       }, 5000);
 
-      // Start scheduled notification services
-      try {
-        const scheduledNotificationService = require('./services/scheduledNotificationService');
-        const scheduledGiftCardNotificationService = require('./services/scheduledGiftCardNotificationService');
-        scheduledNotificationService.start();
-        scheduledGiftCardNotificationService.start();
-        console.log("📢 Scheduled notification services started");
-      } catch (notifErr) {
-        console.error("⚠️  Error starting scheduled notification services:", notifErr.message);
+      // Start scheduled notification services.
+      // These push to real user devices; staging shares push tokens with prod,
+      // so set ENABLE_SCHEDULED_NOTIFICATIONS=false on staging to avoid
+      // double-sending. Prod leaves it unset (default on).
+      if (process.env.ENABLE_SCHEDULED_NOTIFICATIONS !== 'false') {
+        try {
+          const scheduledNotificationService = require('./services/scheduledNotificationService');
+          const scheduledGiftCardNotificationService = require('./services/scheduledGiftCardNotificationService');
+          scheduledNotificationService.start();
+          scheduledGiftCardNotificationService.start();
+          console.log("📢 Scheduled notification services started");
+        } catch (notifErr) {
+          console.error("⚠️  Error starting scheduled notification services:", notifErr.message);
+        }
+      } else {
+        console.log("🔕 Scheduled notifications disabled on this instance (ENABLE_SCHEDULED_NOTIFICATIONS=false)");
       }
 
       // Start BetaMarket prediction settlement + position crons
