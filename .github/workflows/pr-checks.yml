@@ -1,0 +1,94 @@
+name: PR Checks — Security & QA
+
+on:
+  pull_request:
+    branches: [main, staging]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-syntax-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Syntax check every JS file (catches broken merges/edits)
+        run: find . -name "*.js" -not -path "./node_modules/*" -print0 | xargs -0 -n1 node -c
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan diff for committed secrets/keys
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Flag newly introduced vulnerable/malicious dependencies
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
+  static-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Semgrep security scan
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: >-
+            p/security-audit
+            p/secrets
+            p/owasp-top-ten
+            p/javascript
+            p/nodejs
+
+  red-flag-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan added lines for high-risk patterns
+        run: |
+          git diff "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}" -- '*.js' > /tmp/pr.diff || true
+          ADDED=$(grep -E '^\+' /tmp/pr.diff | grep -v '^\+\+\+' || true)
+
+          FLAGGED=0
+          check() {
+            local pattern="$1" label="$2"
+            local hits
+            hits=$(echo "$ADDED" | grep -nE "$pattern" || true)
+            if [ -n "$hits" ]; then
+              echo "::error::Potential red flag — $label"
+              echo "$hits"
+              FLAGGED=1
+            fi
+          }
+
+          check '\beval\(' "use of eval()"
+          check '\bchild_process\b' "child_process usage (shell exec)"
+          check '\bnew Function\(' "dynamic Function() construction"
+          check '\.(webhookAuth|authenticateToken|requireNotBlocked|adminAuth)\s*=\s*\(?[^)]*\)?\s*=>\s*\{?\s*next\(\)\s*\}?' "auth middleware appears bypassed / turned into a no-op"
+          check '(disable|skip|bypass)[A-Za-z_]*(2fa|pin|auth|kyc)' "possible auth/KYC bypass flag"
+          check '(sk_live_|BEGIN (RSA|EC|PGP) PRIVATE KEY)' "possible hardcoded live credential/private key"
+          check 'process\.env\.NODE_ENV\s*!==?\s*.production.\s*\?\s*true' "suspicious NODE_ENV-based logic flip"
+
+          if [ "$FLAGGED" -eq 1 ]; then
+            echo ""
+            echo "One or more high-risk patterns were added in this PR. Manual security review required before merge."
+            exit 1
+          fi
+          echo "No red-flag patterns detected in added lines."
