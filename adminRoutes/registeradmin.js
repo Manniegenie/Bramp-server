@@ -6,7 +6,7 @@ const AdminUser = require("../models/admin");
 const logger = require("../utils/logger");
 const { sendAdminWelcomeEmail } = require("../services/EmailService");
 
-// POST: /admin/register - Register new admin
+// POST: /admin/register - Register new admin (super_admin only via mount guard)
 router.post(
   "/register",
   [
