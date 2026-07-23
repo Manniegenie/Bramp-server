@@ -163,7 +163,7 @@ const corsOptions = {
     return cb(new Error(`CORS: origin not allowed → ${origin}`));
   },
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-  allowedHeaders: ["Content-Type", "Authorization", "x-obiex-signature"],
+  allowedHeaders: ["Content-Type", "Authorization", "x-obiex-signature", "X-2FA-Token"],
   exposedHeaders: ["Content-Length", "Content-Type"],
   credentials: true,
   optionsSuccessStatus: 204,
@@ -551,6 +551,7 @@ const blockuserRoutes = require("./adminRoutes/blockuser");
 const Pushnotification = require("./adminRoutes/pushnotification");
 const AdminKYCRoutes = require("./adminRoutes/kyc");
 const KYCBypassRoutes = require("./adminRoutes/kyc-bypass");
+const adminRequire2FA = require("./middleware/adminRequire2FA");
 const scheduledNotificationRoutes = require("./adminRoutes/scheduledNotifications");
 const scheduledGiftCardNotificationRoutes = require("./adminRoutes/scheduledGiftCardNotifications");
 const nairamarkupRoutes = require("./adminRoutes/nairamarkup");
@@ -609,7 +610,7 @@ app.use("/admin/scheduled-giftcard-notifications", authenticateAdminToken, requi
 app.use("/admin/2FA", authenticateAdminToken, requireModerator, Admin2FARoutes);
 app.use("/fetch-wallet", authenticateAdminToken, requireModerator, fetchwalletRoutes);
 app.use("/fetch", authenticateAdminToken, requireModerator, fetchtransactionRoutes);
-app.use("/pending", authenticateAdminToken, requireModerator, clearpendingRoutes);
+app.use("/pending", authenticateAdminToken, requireModerator, adminRequire2FA, clearpendingRoutes);
 app.use("/fetching", authenticateAdminToken, requireModerator, fetchrefreshtoken);
 app.use("/fetchuser", authenticateAdminToken, requireModerator, fetchuserRoutes);
 app.use("/usermanagement", authenticateAdminToken, requireModerator, requireUserManagement, usermanagementRoutes);
@@ -620,9 +621,9 @@ app.use("/admin-kyc", authenticateAdminToken, requireModerator, AdminKYCRoutes);
 app.use("/admin/kyc-bypass", authenticateAdminToken, requireAdmin, KYCBypassRoutes); // demo-account KYC bypass: admin+ only
 
 // SUPER ADMIN ONLY ROUTES (highest permissions)
-app.use("/deleteuser", authenticateAdminToken, requireSuperAdmin, deleteuserRoutes);
-app.use("/fund", authenticateAdminToken, requireSuperAdmin, FunduserRoutes);
-app.use("/unlockaccount", authenticateAdminToken, requireSuperAdmin, unlockaccountRoutes);
+app.use("/deleteuser", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, deleteuserRoutes);
+app.use("/fund", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, FunduserRoutes);
+app.use("/unlockaccount", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, unlockaccountRoutes);
 app.use("/delete-pin", authenticateAdminToken, requireSuperAdmin, deletepinRoutes);
 // IMPORTANT: /admin must be LAST to avoid catching /admin/* routes above
 app.use("/admin", adminRegisterRoutes);
@@ -632,7 +633,7 @@ app.use("/set-fee", authenticateAdminToken, requireAdmin, SetfeeRoutes);
 app.use("/onramp", authenticateAdminToken, requireAdmin, markupRouter);
 app.use("/offramp", markdownRouter);
 app.use("/obiex-rate", authenticateAdminToken, requireAdmin, ObiexRateRoutes);
-app.use("/updateuseraddress", authenticateAdminToken, requireAdmin, updateuseraddressRoutes);
+app.use("/updateuseraddress", authenticateAdminToken, requireAdmin, adminRequire2FA, updateuseraddressRoutes);
 app.use("/bramp-wallets", generatebrampwalletsRoutes);
 app.use("/migration", authenticateAdminToken, requireAdmin, migrationRoutes);
 app.use("/marker", authenticateAdminToken, requireAdmin, pricemarkdownRoutes);
