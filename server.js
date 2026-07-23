@@ -626,7 +626,7 @@ app.use("/fund", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, Fun
 app.use("/unlockaccount", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, unlockaccountRoutes);
 app.use("/delete-pin", authenticateAdminToken, requireSuperAdmin, deletepinRoutes);
 // IMPORTANT: /admin must be LAST to avoid catching /admin/* routes above
-app.use("/admin", adminRegisterRoutes);
+app.use("/admin", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, adminRegisterRoutes);
 
 // ADMIN LEVEL ROUTES (admin + super_admin)
 app.use("/set-fee", authenticateAdminToken, requireAdmin, SetfeeRoutes);
