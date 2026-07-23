@@ -20,10 +20,11 @@ async function savePushCredentials({ userId, deviceId, expoPushToken, fcmToken, 
 
   if (userId) {
     user = await User.findById(userId);
+    // Stale/invalid userId (e.g. a session from before a DB reset): don't fail
+    // the whole registration — fall through to device-based registration so the
+    // push token is still stored against the device.
     if (!user) {
-      const error = new Error('User not found.');
-      error.status = 404;
-      throw error;
+      console.warn('Push register: userId not found, falling back to deviceId', { userId });
     }
   }
 
@@ -31,7 +32,7 @@ async function savePushCredentials({ userId, deviceId, expoPushToken, fcmToken, 
     user = await User.findOne({ deviceId });
   }
 
-  if (!user && deviceId && !userId) {
+  if (!user && deviceId) {
     user = new User({
       deviceId,
       expoPushToken: expoPushToken || undefined,
