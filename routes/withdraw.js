@@ -9,6 +9,7 @@ const CryptoFeeMarkup = require('../models/cryptofee');
 const { validateObiexConfig, attachObiexAuth } = require('../utils/obiexAuth');
 const { validateTwoFactorAuth } = require('../services/twofactorAuth');
 const { validateCryptoTransaction } = require('../services/kyccheckservice');
+const { sendWithdrawalNotification } = require('../services/notificationService');
 const logger = require('../utils/logger');
 const config = require('./config');
 
@@ -909,6 +910,13 @@ router.post('/crypto', async (req, res) => {
       security_validations: 'All passed (2FA + PIN + KYC + Balance)',
       balance_update_method: 'internal_direct'
     });
+
+    // Push notification (non-blocking) — crypto withdrawal initiated, awaiting confirmation
+    sendWithdrawalNotification(userId, amount, currency, 'pending', {
+      reference: obiexResult.data.reference,
+      transactionId: transaction._id.toString(),
+      fee: feeInCrypto,
+    }).catch(e => logger.warn('Push notification failed', { error: e.message }));
 
     res.status(200).json({
       success: true,

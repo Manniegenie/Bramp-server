@@ -6,6 +6,7 @@ const User = require('../models/user');
 const Transaction = require('../models/transaction');
 const { validateTwoFactorAuth } = require('../services/twofactorAuth');
 const { validateTransactionLimit } = require('../services/kyccheckservice');
+const { sendWithdrawalNotification, sendDepositNotification } = require('../services/notificationService');
 const logger = require('../utils/logger');
 
 // Supported tokens configuration
@@ -701,6 +702,18 @@ router.post('/internal', async (req, res) => {
       security_validations: 'All passed (2FA + PIN + KYC + Balance)',
       balance_update_method: 'direct_atomic'
     });
+
+    // Push notifications (non-blocking) — internal transfer is instant/completed.
+    // Notify sender (debit) and recipient (credit).
+    sendWithdrawalNotification(senderUserId, amount, currency, 'completed', {
+      reference: transactionResult.transferReference,
+      recipient: recipient.username,
+    }).catch(e => logger.warn('Sender push notification failed', { error: e.message }));
+
+    sendDepositNotification(recipient.id, amount, currency, 'confirmed', {
+      reference: transactionResult.transferReference,
+      from: 'Internal transfer',
+    }).catch(e => logger.warn('Recipient push notification failed', { error: e.message }));
 
     res.status(200).json({
       success: true,
