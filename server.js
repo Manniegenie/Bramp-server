@@ -1,4 +1,27 @@
 require("dotenv").config();
+
+// Nomba virtual-account deposits: fail fast in production if config is missing.
+// Non-production just warns, so local/dev boot isn't blocked before sandbox
+// creds are set up.
+(function validateNombaEnv() {
+  const required = [
+    'NOMBA_BASE_URL',
+    'NOMBA_CLIENT_ID',
+    'NOMBA_CLIENT_SECRET',
+    'NOMBA_ACCOUNT_ID',
+    'NOMBA_WEBHOOK_SECRET',
+    'NOMBA_ENV',
+  ];
+  const missing = required.filter((key) => !process.env[key]);
+  if (missing.length === 0) return;
+
+  const message = `Nomba config missing: ${missing.join(', ')}. Set these in .env before deposits will work.`;
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(message);
+  }
+  console.warn(`⚠️  ${message}`);
+})();
+
 const express = require("express");
 const mongoose = require("mongoose");
 const helmet = require("helmet");
@@ -241,7 +264,7 @@ app.use((req, res, next) => {
 });
 
 // Raw body capture middleware for webhook signature validation
-app.use(['/Chatbotwebhook', '/webhook', '/billwebhook', '/ngnbwebhook', '/whatsapp', '/tawk'], (req, res, next) => {
+app.use(['/Chatbotwebhook', '/webhook', '/billwebhook', '/ngnbwebhook', '/whatsapp', '/tawk', '/Nombadeposit/webhook'], (req, res, next) => {
   let data = '';
   req.setEncoding('utf8');
   req.on('data', chunk => {
@@ -462,6 +485,7 @@ const usernameRoutes = require("./routes/username");
 const balanceRoutes = require("./routes/balance");
 const webhookRoutes = require("./routes/obiexwebhooktrx");
 const depositRoutes = require("./routes/deposit");
+const NombadepositRoutes = require("./routes/Nombadeposit");
 const deleteuserRoutes = require("./adminRoutes/deleteuser");
 const SetfeeRoutes = require("./adminRoutes/cryptofee");
 const verifyotpRoutes = require("./routes/verifyotp");
@@ -552,6 +576,7 @@ const Pushnotification = require("./adminRoutes/pushnotification");
 const AdminKYCRoutes = require("./adminRoutes/kyc");
 const KYCBypassRoutes = require("./adminRoutes/kyc-bypass");
 const adminRequire2FA = require("./middleware/adminRequire2FA");
+const AdminNombadepositRoutes = require("./adminRoutes/Nombadeposit");
 const scheduledNotificationRoutes = require("./adminRoutes/scheduledNotifications");
 const scheduledGiftCardNotificationRoutes = require("./adminRoutes/scheduledGiftCardNotifications");
 const nairamarkupRoutes = require("./adminRoutes/nairamarkup");
@@ -623,6 +648,7 @@ app.use("/admin/kyc-bypass", authenticateAdminToken, requireAdmin, KYCBypassRout
 // SUPER ADMIN ONLY ROUTES (highest permissions)
 app.use("/deleteuser", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, deleteuserRoutes);
 app.use("/fund", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, FunduserRoutes);
+app.use("/admin/Nombadeposit", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, AdminNombadepositRoutes);
 app.use("/unlockaccount", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, unlockaccountRoutes);
 app.use("/delete-pin", authenticateAdminToken, requireSuperAdmin, deletepinRoutes);
 // IMPORTANT: /admin must be LAST to avoid catching /admin/* routes above
@@ -658,6 +684,10 @@ app.use("/logout", authenticateToken, logoutRoutes);
 app.use("/username", authenticateToken, usernameRoutes);
 app.use("/balance", authenticateToken, balanceRoutes);
 app.use("/deposit", authenticateToken, depositRoutes);
+// Mounted bare (no router-level auth): /account needs a user token, /webhook
+// must NOT have one (Nomba can't send one) — each route applies its own auth
+// internally. See routes/Nombadeposit.js.
+app.use("/Nombadeposit", NombadepositRoutes);
 app.use("/wallet", authenticateToken, walletRoutes);
 app.use("/withdraw", authenticateToken, withdrawRoutes);
 app.use("/validate-balance", authenticateToken, validatewithdrawRoutes);
@@ -927,6 +957,22 @@ const startServer = async () => {
         }
       } else {
         console.log("🔕 Scheduled notifications disabled on this instance (ENABLE_SCHEDULED_NOTIFICATIONS=false)");
+      }
+
+      // Nomba deposit sweep (every 10 min) + daily reconciliation (02:10 Africa/Lagos).
+      // Independent of ENABLE_SCHEDULED_NOTIFICATIONS — this reconciles money, not
+      // push notifications. Set ENABLE_NOMBA_JOBS=false to disable per-instance
+      // (e.g. on staging, if it shares a Nomba sandbox account with prod).
+      if (process.env.ENABLE_NOMBA_JOBS !== 'false') {
+        try {
+          const nombaReconciliation = require('./services/nomba/reconciliation');
+          nombaReconciliation.start();
+          console.log("💰 Nomba deposit sweep + reconciliation jobs started");
+        } catch (nombaJobErr) {
+          console.error("⚠️  Error starting Nomba jobs:", nombaJobErr.message);
+        }
+      } else {
+        console.log("🔕 Nomba jobs disabled on this instance (ENABLE_NOMBA_JOBS=false)");
       }
 
       // Start BetaMarket prediction settlement + position crons
