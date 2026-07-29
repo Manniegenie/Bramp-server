@@ -27,6 +27,46 @@ const logger = require('../../utils/logger');
 const DUPLICATE_KEY_ERROR = 11000;
 
 /**
+ * Fraud/compliance check: deposits must come from an account bearing the
+ * account holder's own name (per compliance requirement — prevents third-party
+ * funding being laundered through a Bramp wallet). Bank transfer sender names
+ * arrive in inconsistent formats (surname-first, extra middle names/initials,
+ * punctuation), so this is a token-containment match, not exact-string:
+ * every token in the KYC legal name must appear somewhere in the sender name.
+ *
+ * Returns:
+ *   'match'      — every legal-name token found in the sender name
+ *   'mismatch'   — sender name present but doesn't contain the legal name
+ *   'unverified' — no sender name on the payload at all (Nomba may omit it
+ *                  for some transaction types — see webhookProcessor.js's
+ *                  extraction caveats). Does NOT block crediting; logged for
+ *                  visibility so this can be tightened once payload shapes
+ *                  are confirmed live.
+ */
+function normalizeNameTokens(str) {
+  return String(str || '')
+    .toUpperCase()
+    .replace(/[^A-Z\s]/g, ' ')
+    .split(/\s+/)
+    .filter((t) => t.length > 1); // drop initials/punctuation remnants
+}
+
+function matchSenderName(senderName, legalName) {
+  if (!senderName || !String(senderName).trim()) {
+    return 'unverified';
+  }
+  const legalTokens = normalizeNameTokens(legalName);
+  const senderTokens = new Set(normalizeNameTokens(senderName));
+
+  if (legalTokens.length === 0) {
+    return 'unverified'; // nothing to check against
+  }
+
+  const allPresent = legalTokens.every((t) => senderTokens.has(t));
+  return allPresent ? 'match' : 'mismatch';
+}
+
+/**
  * @param {object} params
  * @param {string} params.nombaTransactionRef - Nomba's transaction reference (idempotency key)
  * @param {string} params.virtualAccountNumber - the account number the funds landed on
@@ -56,6 +96,24 @@ async function creditNombaDeposit({
     return { outcome: 'unknown_account' };
   }
 
+  const nameCheckResult = matchSenderName(senderName, virtualAccount.accountName);
+
+  let status = 'pending';
+  let flagReason;
+  if (virtualAccount.status === 'suspended') {
+    status = 'flagged';
+    flagReason = 'suspended_account';
+  } else if (nameCheckResult === 'mismatch') {
+    // Fraud/compliance: hold, do not credit. Deposits must come from an
+    // account bearing the holder's own name.
+    status = 'flagged';
+    flagReason = 'sender_name_mismatch';
+  } else if (nameCheckResult === 'unverified') {
+    logger.info('Nomba deposit: sender name unverifiable — crediting anyway (see nameCheckResult caveats)', {
+      nombaTransactionRef, userId: virtualAccount.userId,
+    });
+  }
+
   // Step 1: claim the ref. Unique index is the idempotency + concurrency guard —
   // this is the only place a duplicate/replay/concurrent-duplicate webhook stops.
   let deposit;
@@ -69,7 +127,9 @@ async function creditNombaDeposit({
       senderAccountNumber,
       senderBank,
       senderName,
-      status: virtualAccount.status === 'suspended' ? 'flagged' : 'pending',
+      nameCheckResult,
+      flagReason,
+      status,
     });
   } catch (err) {
     if (err.code === DUPLICATE_KEY_ERROR) {
@@ -81,9 +141,13 @@ async function creditNombaDeposit({
   }
 
   if (deposit.status === 'flagged') {
-    logger.warn('Nomba deposit: landed on a suspended virtual account — flagged, not credited', {
+    const logFn = flagReason === 'sender_name_mismatch' ? logger.error : logger.warn;
+    logFn(`${flagReason === 'sender_name_mismatch' ? 'ALERT: ' : ''}Nomba deposit flagged, not credited`, {
       nombaTransactionRef,
       userId: virtualAccount.userId,
+      flagReason,
+      senderName,
+      accountName: virtualAccount.accountName,
     });
     return { outcome: 'flagged', deposit };
   }

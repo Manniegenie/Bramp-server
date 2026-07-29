@@ -143,6 +143,12 @@ async function runReconciliation({ startDate, endDate } = {}) {
     if (result.outcome === 'credited') {
       missedCount++;
       missedKobo += fields.amountKobo;
+    } else if (result.outcome === 'flagged') {
+      // Correctly held (suspended account / sender-name mismatch) — not a
+      // reconciliation failure, just surfaced for review.
+      logger.warn('Nomba reconciliation: found a flagged (not credited) deposit in Nomba listing', {
+        ref: fields.nombaTransactionRef, flagReason: result.deposit?.flagReason,
+      });
     } else if (result.outcome !== 'duplicate') {
       logger.error('ALERT: Nomba reconciliation — failed to credit a missed deposit found in Nomba listing', {
         ref: fields.nombaTransactionRef, outcome: result.outcome, error: result.error,

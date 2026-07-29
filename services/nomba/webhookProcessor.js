@@ -117,6 +117,12 @@ async function processWebhookEvent(eventDoc) {
       eventDoc.processingStatus = 'processed';
     } else if (result.outcome === 'duplicate') {
       eventDoc.processingStatus = 'skipped_duplicate';
+    } else if (result.outcome === 'flagged') {
+      // Correctly handled, not a failure — a suspended account or a
+      // sender-name mismatch was correctly detected and correctly held for
+      // manual review. Terminal: the sweeper must NOT keep retrying this.
+      eventDoc.processingStatus = 'processed';
+      eventDoc.error = `Flagged, not credited: ${result.deposit?.flagReason || 'unknown reason'}`;
     } else {
       eventDoc.processingStatus = 'failed';
       eventDoc.error = result.error || result.outcome;

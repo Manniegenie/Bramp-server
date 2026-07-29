@@ -18,6 +18,7 @@ const NombaDeposit = require('../models/nombaDeposit');
 const NombaWebhookEvent = require('../models/nombaWebhookEvent');
 const { nombaClient } = require('../services/nomba/client');
 const { runReconciliation, runSweep } = require('../services/nomba/reconciliation');
+const { creditPendingDeposit } = require('../services/nomba/depositCredit');
 const logger = require('../utils/logger');
 
 function paginationParams(req) {
@@ -88,6 +89,44 @@ router.get('/virtual-accounts/:userId', async (req, res) => {
   } catch (err) {
     logger.error('Admin Nomba: virtual account lookup failed', { error: err.message });
     return res.status(500).json({ success: false, message: 'Server error while fetching virtual account.' });
+  }
+});
+
+// POST /deposits/:id/approve — manually release a flagged deposit (e.g. a
+// sender-name mismatch that was reviewed and confirmed legitimate — bank
+// transfer names are inconsistently formatted and can false-positive).
+// Credits through the SAME creditPendingDeposit function the webhook and
+// reconciliation use — no separate/parallel credit path, even for this.
+router.post('/deposits/:id/approve', async (req, res) => {
+  try {
+    const deposit = await NombaDeposit.findById(req.params.id);
+    if (!deposit) {
+      return res.status(404).json({ success: false, message: 'Deposit not found.' });
+    }
+    if (deposit.status !== 'flagged') {
+      return res.status(400).json({ success: false, message: `Deposit is '${deposit.status}', not 'flagged' — nothing to approve.` });
+    }
+
+    deposit.status = 'pending';
+    deposit.reviewedBy = req.admin?.id || req.admin?._id;
+    deposit.reviewedAt = new Date();
+    deposit.reviewNotes = req.body?.notes || undefined;
+    await deposit.save();
+
+    const result = await creditPendingDeposit(deposit);
+    if (result.outcome !== 'credited') {
+      logger.error('Admin Nomba: manual approval failed to credit', { depositId: deposit._id, outcome: result.outcome, error: result.error });
+      return res.status(500).json({ success: false, message: 'Approved but crediting failed. Check logs.', outcome: result.outcome });
+    }
+
+    logger.info('Admin Nomba: flagged deposit manually approved and credited', {
+      depositId: deposit._id, adminId: req.admin?.id || req.admin?._id,
+    });
+
+    return res.status(200).json({ success: true, message: 'Deposit approved and credited.', data: result.deposit });
+  } catch (err) {
+    logger.error('Admin Nomba: approve deposit failed', { depositId: req.params.id, error: err.message });
+    return res.status(500).json({ success: false, message: 'Server error while approving deposit.' });
   }
 });
 
