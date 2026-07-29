@@ -17,3 +17,5 @@ quicktest.js
 flow_private.pem
 logs/
 *.log
+# Local server/infra notes — never commit
+Cred.txt
