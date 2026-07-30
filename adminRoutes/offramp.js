@@ -60,8 +60,8 @@ router.post('/offramp-rate', async (req, res) => {
         if (!userIds.length) return;
 
         await sendBulkNotifications(userIds, {
-          title: `${direction} Sell Rate Updated`,
-          body: `New off-ramp rate: ${formattedRate}/USD${formattedPrev}. Open the app to sell crypto at the latest rate.`,
+          title: `${direction} Rate Updated`,
+          body: `New NGN sell rate: ${formattedRate}/USD${formattedPrev}. Deposit crypto on the app now to get started.`,
           sound: 'default',
           priority: 'high',
           data: {
