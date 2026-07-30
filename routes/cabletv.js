@@ -2,7 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const User = require('../models/user');
 const BillTransaction = require('../models/billstransaction');
-const { vtuAuth } = require('../auth/billauth');
+const { payBetaAuth } = require('../auth/paybetaAuth');
 const { validateUserBalance } = require('../services/balance');
 const { validateTwoFactorAuth } = require('../services/twofactorAuth');
 const { validateUtilityTransaction } = require('../services/kyccheckservice'); // <-- UPDATED
@@ -10,9 +10,9 @@ const logger = require('../utils/logger');
 const crypto = require('crypto');
 
 const router = express.Router();
-const EBILLS_BASE_URL = process.env.EBILLS_BASE_URL || 'https://ebills.africa/wp-json';
 
-// Cable TV services
+// Cable TV services — matches PayBeta's service mapping exactly (verified against
+// ZeusODX-server's routes/cabletv.js), so no dynamic provider lookup needed here.
 const CABLE_TV_SERVICES = ['dstv', 'gotv', 'startimes', 'showmax'];
 const VALID_SUBSCRIPTION_TYPES = ['change', 'renew'];
 
@@ -56,22 +56,37 @@ async function checkForPendingTransactions(userId, customOrderId, customRequestI
   return pendingTransactions.length > 0;
 }
 
-// Get package price
+// Get package price from PayBeta's bouquet list, matched by code (== variation_id)
 async function getPackagePrice(service_id, variation_id) {
-  const variationsResponse = await vtuAuth.makeRequest('GET', `/api/v2/variations/tv/${service_id}`, null, { timeout: 15000, baseURL: EBILLS_BASE_URL });
-  if (variationsResponse.code !== 'success') throw new Error('Failed to fetch package variations');
-  const selectedPackage = variationsResponse.data.find(pkg => pkg.variation_id === variation_id);
+  const isShowmax = service_id.toLowerCase() === 'showmax';
+  const response = isShowmax
+    ? await payBetaAuth.makeRequest('GET', '/v2/showmax/bouquet', null, { timeout: 15000 })
+    : await payBetaAuth.makeRequest('POST', '/v2/cable/bouquet', { service: service_id }, { timeout: 15000 });
+  if (response.status !== 'successful') throw new Error('Failed to fetch package variations');
+  const packages = response.data?.packages || [];
+  const selectedPackage = packages.find(pkg => pkg.code === variation_id);
   if (!selectedPackage) throw new Error(`Package with variation_id ${variation_id} not found`);
-  return { price: parseFloat(selectedPackage.price), name: selectedPackage.name };
+  return { price: parseFloat(selectedPackage.price), name: selectedPackage.description };
 }
 
-// Verify customer
+// Verify customer via PayBeta and resolve the expected charge amount
 async function validateCustomerAndGetAmount(customer_id, service_id, variation_id, subscription_type) {
-  const payload = { customer_id: customer_id.trim(), service_id };
-  if (variation_id) payload.variation_id = variation_id;
-  const verificationResponse = await vtuAuth.makeRequest('POST', '/api/v2/verify-customer', payload, { timeout: 15000, baseURL: EBILLS_BASE_URL });
-  if (verificationResponse.code !== 'success') throw new Error(`Customer verification failed: ${verificationResponse.message}`);
-  let expectedAmount = null; const customerInfo = verificationResponse.data;
+  const verificationResponse = await payBetaAuth.makeRequest('POST', '/v2/cable/validate', {
+    service: service_id, smartCardNumber: customer_id.trim()
+  }, { timeout: 15000 });
+  if (verificationResponse.status !== 'successful') throw new Error(`Customer verification failed: ${verificationResponse.message}`);
+
+  const raw = verificationResponse.data || {};
+  const customerInfo = {
+    customer_name: raw.customerName,
+    status: raw.status,
+    current_bouquet: raw.currentBouquet,
+    renewal_amount: raw.renewalAmount,
+    due_date: raw.dueDate,
+    balance: raw.balance
+  };
+
+  let expectedAmount = null;
   if (subscription_type === 'renew' && customerInfo.renewal_amount) expectedAmount = parseFloat(customerInfo.renewal_amount);
   else { const pkg = await getPackagePrice(service_id, variation_id); expectedAmount = pkg.price; customerInfo.package_info = pkg; }
   return { customerInfo, expectedAmount, isValid: true };
@@ -100,18 +115,35 @@ function validateAmountMatchesPackage(userAmount, expectedAmount) {
 }
 function validateNGNBLimits(amount) { if (amount < 500) return { isValid: false, error: 'NGNB_MINIMUM_NOT_MET', message: 'Minimum NGNB is 500' }; if (amount > 50000) return { isValid: false, error: 'NGNB_MAXIMUM_EXCEEDED', message: 'Maximum NGNB is 50,000' }; return { isValid: true }; }
 
-// Call eBills API
-async function callEBillsCableTVAPI({ customer_id, service_id, variation_id, subscription_type, amount, request_id }) {
-  const payload = { request_id, customer_id: customer_id.trim(), service_id, variation_id, subscription_type, amount: parseInt(amount) };
-  const response = await vtuAuth.makeRequest('POST', '/api/v2/tv', payload, { timeout: 45000, baseURL: EBILLS_BASE_URL });
-  if (response.code !== 'success') throw new Error(`eBills Cable TV API error: ${response.message || 'Unknown error'}`);
-  return response;
+// PayBeta responds synchronously — see the note in routes/airtime.js.
+async function callPayBetaCableTVAPI({ customer_id, service_id, variation_id, amount, request_id, customer_name }) {
+  const isShowmax = service_id.toLowerCase() === 'showmax';
+  const reference = request_id.length > 40 ? request_id.substring(0, 40) : request_id;
+
+  const payload = isShowmax
+    ? { service: service_id, smartCardNumber: customer_id.trim(), amount: parseFloat(amount), packageCode: variation_id, customerName: customer_name || 'CUSTOMER', reference }
+    : { service: service_id, smartCardNumber: customer_id.trim(), amount: Math.round(amount), packageCode: variation_id, customerName: customer_name || 'CUSTOMER', reference };
+  const endpoint = isShowmax ? '/v2/showmax/purchase' : '/v2/cable/purchase';
+
+  const response = await payBetaAuth.makeRequest('POST', endpoint, payload, { timeout: 45000 });
+  if (response.status !== 'successful') throw new Error(`Cable TV service error: ${response.message || 'Unknown error'}`);
+
+  return {
+    code: 'success',
+    data: {
+      status: 'completed-api',
+      order_id: response.data.transactionId,
+      product_name: response.data.biller || 'Cable TV',
+      service_name: response.data.biller,
+      amount_charged: response.data.chargedAmount
+    }
+  };
 }
 
 // --- Main Endpoint ---
 router.post('/purchase', async (req, res) => {
   const startTime = Date.now();
-  let balanceActionTaken = false, balanceActionType = null, transactionCreated = false, pendingTransaction = null, ebillsResponse = null;
+  let balanceActionTaken = false, balanceActionType = null, transactionCreated = false, pendingTransaction = null, payBetaResponse = null;
   try {
     const userId = req.user.id;
     const validation = validateCableTVRequest(req.body);
@@ -148,15 +180,14 @@ router.post('/purchase', async (req, res) => {
     const transactionData = { orderId: uniqueOrderId, status: 'initiated-api', productName: 'Cable TV', billType: 'cable_tv', amount: ngnbAmount, paymentCurrency: currency, requestId: uniqueRequestId, userId, metaData: { customer_id, service_id, variation_id, subscription_type } };
     pendingTransaction = await BillTransaction.create(transactionData); transactionCreated = true;
 
-    // Call eBills
-    ebillsResponse = await callEBillsCableTVAPI({ customer_id, service_id, variation_id, subscription_type, amount: ngnbAmount, request_id: uniqueRequestId });
-    const ebillsStatus = ebillsResponse.data.status;
+    payBetaResponse = await callPayBetaCableTVAPI({ customer_id, service_id, variation_id, amount: ngnbAmount, request_id: uniqueRequestId, customer_name: customerValidation.customerInfo?.customer_name });
+    const providerStatus = payBetaResponse.data.status;
 
-    if (ebillsStatus === 'completed-api') { await updateUserBalance(userId, currency, -ngnbAmount); await updateUserPortfolioBalance(userId); balanceActionTaken = true; balanceActionType = 'updated'; }
-    else if (['initiated-api', 'processing-api'].includes(ebillsStatus)) { await reserveUserBalance(userId, currency, ngnbAmount); await BillTransaction.findByIdAndUpdate(pendingTransaction._id, { balanceReserved: true }); balanceActionTaken = true; balanceActionType = 'reserved'; }
+    if (providerStatus === 'completed-api') { await updateUserBalance(userId, currency, -ngnbAmount); await updateUserPortfolioBalance(userId); balanceActionTaken = true; balanceActionType = 'updated'; }
+    else if (['initiated-api', 'processing-api'].includes(providerStatus)) { await reserveUserBalance(userId, currency, ngnbAmount); await BillTransaction.findByIdAndUpdate(pendingTransaction._id, { balanceReserved: true }); balanceActionTaken = true; balanceActionType = 'reserved'; }
 
-    const finalTransaction = await BillTransaction.findByIdAndUpdate(pendingTransaction._id, { $set: { orderId: ebillsResponse.data.order_id.toString(), status: ebillsStatus } }, { new: true });
-    return res.status(200).json({ success: true, message: `Cable TV purchase status: ${ebillsStatus}`, transaction: finalTransaction });
+    const finalTransaction = await BillTransaction.findByIdAndUpdate(pendingTransaction._id, { $set: { orderId: payBetaResponse.data.order_id.toString(), status: providerStatus } }, { new: true });
+    return res.status(200).json({ success: true, message: `Cable TV purchase status: ${providerStatus}`, transaction: finalTransaction });
 
   } catch (error) {
     if (balanceActionTaken && balanceActionType === 'reserved') await releaseReservedBalance(req.user.id, 'NGNB', validation?.sanitized?.amount || 0);

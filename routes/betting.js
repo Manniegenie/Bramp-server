@@ -2,7 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const User = require('../models/user');
 const BillTransaction = require('../models/billstransaction');
-const { vtuAuth } = require('../auth/billauth');
+const { payBetaAuth } = require('../auth/paybetaAuth');
 const { validateUserBalance } = require('../services/balance');
 const { validateTwoFactorAuth } = require('../services/twofactorAuth');
 const { validateUtilityTransaction } = require('../services/kyccheckservice'); // <-- UPDATED
@@ -10,14 +10,11 @@ const logger = require('../utils/logger');
 const crypto = require('crypto');
 
 const router = express.Router();
-const EBILLS_BASE_URL = process.env.EBILLS_BASE_URL || 'https://ebills.africa/wp-json';
 
-// Valid betting service providers
-const BETTING_SERVICES = [
-  '1xBet', 'BangBet', 'Bet9ja', 'BetKing', 'BetLand', 'BetLion',
-  'BetWay', 'CloudBet', 'LiveScoreBet', 'MerryBet', 'NaijaBet',
-  'NairaBet', 'SupaBet'
-];
+// PayBeta's betting platform slugs are fetched dynamically (GET /providers below)
+// rather than hardcoded — eBills' PascalCase list ('1xBet', 'BetLion', ...) doesn't
+// match PayBeta's lowercase slugs 1:1 (e.g. no BetLion on PayBeta; LiveScoreBet is
+// just "livescore"), so there's no safe static mapping between the two.
 
 // Supported tokens - aligned with user schema
 const SUPPORTED_TOKENS = {
@@ -126,10 +123,7 @@ function validateBettingRequest(body) {
   else sanitized.customer_id = String(body.customer_id).trim();
 
   if (!body.service_id) errors.push('Service ID is required');
-  else {
-    sanitized.service_id = String(body.service_id).trim();
-    if (!BETTING_SERVICES.includes(sanitized.service_id)) errors.push(`Invalid service ID. Must be one of: ${BETTING_SERVICES.join(', ')}`);
-  }
+  else sanitized.service_id = String(body.service_id).toLowerCase().trim();
 
   if (!body.amount) errors.push('Amount is required');
   else {
@@ -162,31 +156,60 @@ function validateNGNBLimits(amount) {
   return { isValid: true };
 }
 
-// Call eBills Betting API
-async function callEBillsBettingAPI({ customer_id, service_id, amount, request_id, userId }) {
+/**
+ * GET /providers — betting platforms available on PayBeta (dynamic, not hardcoded).
+ */
+router.get('/providers', async (req, res) => {
   try {
-    const payload = { request_id, customer_id: customer_id.trim(), service_id, amount: parseInt(amount) };
-    const response = await vtuAuth.makeRequest('POST', '/api/v2/betting', payload, {
-      timeout: 45000,
-      baseURL: EBILLS_BASE_URL,
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }
-    });
-    if (response.code !== 'success') throw new Error(`eBills Betting API error: ${response.message || 'Unknown error'}`);
-    return response;
+    const response = await payBetaAuth.makeRequest('GET', '/v2/gaming/providers');
+    if (response.status !== 'successful') throw new Error(response.message || 'Failed to fetch providers');
+
+    const providers = (response.data || []).map(p => ({
+      id: p.slug || String(p.name || '').toLowerCase(),
+      name: p.name,
+    }));
+
+    return res.status(200).json({ success: true, data: { providers } });
   } catch (error) {
-    logger.error('❌ eBills betting funding failed:', { request_id, userId, error: error.message, status: error.response?.status, ebillsError: error.response?.data });
-    throw new Error(`eBills Betting API error: ${error.message}`);
+    logger.error('Failed to fetch betting providers', { error: error.message });
+    return res.status(503).json({ success: false, message: 'Betting providers are temporarily unavailable. Please try again later.' });
+  }
+});
+
+// PayBeta responds synchronously — see the note in routes/airtime.js.
+async function callPayBetaBettingAPI({ customer_id, service_id, amount, request_id, userId, customer_name }) {
+  try {
+    const reference = request_id.length > 40 ? request_id.substring(0, 40) : request_id;
+    const payload = { service: service_id, customerId: customer_id.trim(), amount: Math.round(amount), customerName: customer_name || 'CUSTOMER', reference };
+    const response = await payBetaAuth.makeRequest('POST', '/v2/gaming/purchase', payload, { timeout: 45000 });
+    if (response.status !== 'successful') throw new Error(`Betting service error: ${response.message || 'Unknown error'}`);
+
+    return {
+      code: 'success',
+      data: {
+        status: 'completed-api',
+        order_id: response.data.transactionId,
+        product_name: response.data.biller || 'Betting',
+        service_name: response.data.biller,
+        amount_charged: response.data.chargedAmount
+      }
+    };
+  } catch (error) {
+    logger.error('❌ PayBeta betting funding failed:', { request_id, userId, error: error.message, status: error.response?.status, payBetaError: error.response?.data });
+    throw new Error(`Betting service error: ${error.message}`);
   }
 }
 
 // --- Main Endpoint ---
+// Frontend calls POST /betting/fund (bettingService.js) — the previous /purchase
+// naming mismatch in this session's earlier utility port meant this was 404ing.
 router.post('/fund', async (req, res) => {
   const startTime = Date.now();
   let balanceActionTaken = false;
   let balanceActionType = null;
   let transactionCreated = false;
   let pendingTransaction = null;
-  let ebillsResponse = null;
+  let payBetaResponse = null;
 
   try {
     const requestBody = req.body;
@@ -266,20 +289,20 @@ router.post('/fund', async (req, res) => {
 
     // Step 10: Call eBills API
     try {
-      ebillsResponse = await callEBillsBettingAPI({ customer_id, service_id, amount, request_id: uniqueRequestId, userId });
+      payBetaResponse = await callPayBetaBettingAPI({ customer_id, service_id, amount, request_id: uniqueRequestId, userId });
     } catch (apiError) {
       await BillTransaction.findByIdAndUpdate(pendingTransaction._id, { status: 'failed', processingErrors: [{ error: apiError.message, timestamp: new Date(), phase: 'ebills_betting_api_call' }] });
-      return res.status(500).json({ success: false, error: 'EBILLS_BETTING_API_ERROR', message: apiError.message });
+      return res.status(500).json({ success: false, error: 'PAYBETA_BETTING_API_ERROR', message: apiError.message });
     }
 
     // Step 11: Handle balance reservation or direct update
-    const ebillsStatus = ebillsResponse.data.status;
-    if (ebillsStatus === 'completed-api') {
+    const providerStatus = payBetaResponse.data.status;
+    if (providerStatus === 'completed-api') {
       await updateUserBalance(userId, currency, -amount);
       await updateUserPortfolioBalance(userId);
       balanceActionTaken = true;
       balanceActionType = 'updated';
-    } else if (['initiated-api', 'processing-api'].includes(ebillsStatus)) {
+    } else if (['initiated-api', 'processing-api'].includes(providerStatus)) {
       await reserveUserBalance(userId, currency, amount);
       await BillTransaction.findByIdAndUpdate(pendingTransaction._id, { balanceReserved: true });
       balanceActionTaken = true;
@@ -288,10 +311,10 @@ router.post('/fund', async (req, res) => {
 
     // Step 12: Update transaction with eBills data
     const updatedTransactionData = {
-      orderId: ebillsResponse.data.order_id.toString(),
-      status: ebillsResponse.data.status,
-      productName: ebillsResponse.data.product_name,
-      metaData: { ...initialTransactionData.metaData, service_name: ebillsResponse.data.service_name, amount_charged: ebillsResponse.data.amount_charged }
+      orderId: payBetaResponse.data.order_id.toString(),
+      status: payBetaResponse.data.status,
+      productName: payBetaResponse.data.product_name,
+      metaData: { ...initialTransactionData.metaData, service_name: payBetaResponse.data.service_name, amount_charged: payBetaResponse.data.amount_charged }
     };
     if (balanceActionType === 'reserved') updatedTransactionData.balanceReserved = true;
     else if (balanceActionType === 'updated') { updatedTransactionData.balanceReserved = false; updatedTransactionData.balanceCompleted = true; }
@@ -300,8 +323,8 @@ router.post('/fund', async (req, res) => {
     // Step 13: Respond to client
     return res.status(200).json({
       success: true,
-      message: `Betting funding status: ${ebillsResponse.data.status}`,
-      data: { order_id: ebillsResponse.data.order_id, status: ebillsResponse.data.status, amount },
+      message: `Betting funding status: ${payBetaResponse.data.status}`,
+      data: { order_id: payBetaResponse.data.order_id, status: payBetaResponse.data.status, amount },
       transaction: finalTransaction
     });
 

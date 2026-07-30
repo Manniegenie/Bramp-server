@@ -1,24 +1,15 @@
 const express = require('express');
-const { vtuAuth } = require('../auth/billauth');
+const { payBetaAuth } = require('../auth/paybetaAuth');
 const logger = require('../utils/logger');
 
 const router = express.Router();
 
-// Define valid service IDs for each category
-const ELECTRICITY_SERVICES = [
-  'ikeja-electric', 'eko-electric', 'kano-electric', 'portharcourt-electric',
-  'jos-electric', 'ibadan-electric', 'kaduna-electric', 'abuja-electric',
-  'enugu-electric', 'benin-electric', 'aba-electric', 'yola-electric'
-];
-
+// Electricity and betting providers are fetched dynamically from PayBeta (see
+// routes/electricity.js and routes/betting.js /providers) rather than hardcoded here —
+// only cable TV has a fixed, verified-accurate provider set. Category is inferred from
+// shape (electricity always carries a prepaid/postpaid variation_id; cable_tv is one of
+// the 4 known slugs; anything else is treated as betting, the dynamic catch-all).
 const CABLE_TV_SERVICES = ['dstv', 'gotv', 'startimes', 'showmax'];
-
-const BETTING_SERVICES = [
-  '1xBet', 'BangBet', 'Bet9ja', 'BetKing', 'BetLand', 'BetLion',
-  'BetWay', 'CloudBet', 'LiveScoreBet', 'MerryBet', 'NaijaBet',
-  'NairaBet', 'SupaBet'
-];
-
 const VALID_METER_TYPES = ['prepaid', 'postpaid'];
 
 /**
@@ -26,37 +17,21 @@ const VALID_METER_TYPES = ['prepaid', 'postpaid'];
  */
 function validateVerificationRequest(body) {
   const errors = [];
-  
-  // Check required fields
+
   if (!body.customer_id) {
     errors.push('Customer ID is required');
   } else if (typeof body.customer_id !== 'string' || body.customer_id.trim().length === 0) {
     errors.push('Customer ID must be a non-empty string');
   }
-  
-  if (!body.service_id) {
+
+  if (!body.service_id || typeof body.service_id !== 'string' || !body.service_id.trim()) {
     errors.push('Service ID is required');
-  } else {
-    const allValidServices = [...ELECTRICITY_SERVICES, ...CABLE_TV_SERVICES, ...BETTING_SERVICES];
-    if (!allValidServices.includes(body.service_id)) {
-      errors.push(`Invalid service ID. Must be one of: ${allValidServices.join(', ')}`);
-    }
   }
-  
-  // Check if variation_id is required for electricity services
-  if (ELECTRICITY_SERVICES.includes(body.service_id)) {
-    if (!body.variation_id) {
-      errors.push('Variation ID (meter type) is required for electricity services');
-    } else if (!VALID_METER_TYPES.includes(body.variation_id)) {
-      errors.push('Variation ID must be "prepaid" or "postpaid" for electricity services');
-    }
+
+  if (body.variation_id && !VALID_METER_TYPES.includes(body.variation_id)) {
+    errors.push('Variation ID must be "prepaid" or "postpaid" when provided');
   }
-  
-  // variation_id should not be provided for non-electricity services
-  if (!ELECTRICITY_SERVICES.includes(body.service_id) && body.variation_id) {
-    errors.push('Variation ID should not be provided for non-electricity services');
-  }
-  
+
   return {
     isValid: errors.length === 0,
     errors
@@ -66,91 +41,76 @@ function validateVerificationRequest(body) {
 /**
  * Determine service category
  */
-function getServiceCategory(service_id) {
-  if (ELECTRICITY_SERVICES.includes(service_id)) return 'electricity';
-  if (CABLE_TV_SERVICES.includes(service_id)) return 'cable_tv';
-  if (BETTING_SERVICES.includes(service_id)) return 'betting';
-  return 'unknown';
+function getServiceCategory(service_id, variation_id) {
+  if (variation_id && VALID_METER_TYPES.includes(variation_id)) return 'electricity';
+  if (CABLE_TV_SERVICES.includes(String(service_id).toLowerCase())) return 'cable_tv';
+  return 'betting';
 }
 
 /**
- * Call eBills API for customer verification - FIXED: Removed explicit headers
+ * Call PayBeta for customer verification, branching by category — each PayBeta
+ * validate endpoint has a different payload/response shape.
  */
-async function callEBillsVerificationAPI({ customer_id, service_id, variation_id, requestId, userId }) {
+async function callPayBetaVerificationAPI({ customer_id, service_id, variation_id, serviceCategory, requestId, userId }) {
   try {
-    const verificationPayload = {
-      customer_id: customer_id.trim(),
-      service_id
-    };
-    
-    // Add variation_id only for electricity services
-    if (ELECTRICITY_SERVICES.includes(service_id)) {
-      verificationPayload.variation_id = variation_id;
+    let response;
+    let normalized;
+
+    if (serviceCategory === 'electricity') {
+      response = await payBetaAuth.makeRequest('POST', '/v2/electricity/validate', {
+        service: service_id.toLowerCase(),
+        meterNumber: customer_id.trim(),
+        meterType: variation_id.toLowerCase()
+      }, { timeout: 15000 });
+
+      if (response.status !== 'successful') throw new Error(response.message || 'Customer verification failed');
+      const d = response.data || {};
+      normalized = {
+        customer_name: d.customerName,
+        customer_address: d.customerAddress,
+        min_purchase_amount: d.minimuVendAmount || d.minimumAmount || 0,
+        max_purchase_amount: 100000,
+        customer_arrears: 0,
+        outstanding: 0
+      };
+    } else if (serviceCategory === 'cable_tv') {
+      response = await payBetaAuth.makeRequest('POST', '/v2/cable/validate', {
+        service: service_id.toLowerCase(),
+        smartCardNumber: customer_id.trim()
+      }, { timeout: 15000 });
+
+      if (response.status !== 'successful') throw new Error(response.message || 'Customer verification failed');
+      const d = response.data || {};
+      normalized = {
+        customer_name: d.customerName,
+        status: d.status,
+        current_bouquet: d.currentBouquet,
+        renewal_amount: d.renewalAmount || 0,
+        due_date: d.dueDate,
+        balance: d.balance || 0
+      };
+    } else {
+      response = await payBetaAuth.makeRequest('POST', '/v2/gaming/validate', {
+        service: service_id.toLowerCase(),
+        customerId: customer_id.trim()
+      }, { timeout: 15000 });
+
+      if (response.status !== 'successful') throw new Error(response.message || 'Customer verification failed');
+      const d = response.data || {};
+      normalized = {
+        customer_name: d.customerName,
+        customer_username: d.customerName,
+        minimum_amount: d.minimumAmount || 100,
+        maximum_amount: 100000
+      };
     }
 
-    logger.info(`🔍 [${requestId}] Making eBills customer verification request:`, {
-      requestId,
-      userId,
-      customer_id: customer_id?.substring(0, 4) + '***', // Mask for privacy
-      service_id,
-      variation_id: variation_id || 'not_applicable',
-      endpoint: '/api/v2/verify-customer'
-    });
-
-    // 🔑 FIXED: Let VTUAuth handle all headers automatically - removed explicit headers
-    const response = await vtuAuth.makeRequest('POST', '/api/v2/verify-customer', verificationPayload, {
-      timeout: 30000 // 30 seconds timeout for verification
-    });
-
-    logger.info(`📡 [${requestId}] eBills verification API response:`, {
-      requestId,
-      userId,
-      customer_id: customer_id?.substring(0, 4) + '***',
-      service_id,
-      code: response.code,
-      message: response.message,
-      hasData: !!response.data
-    });
-
-    // Handle eBills API response structure - consistent with other utilities
-    if (response.code !== 'success') {
-      throw new Error(`eBills Customer Verification API error: ${response.message || 'Unknown error'}`);
-    }
-
-    return response;
-
+    return { code: 'success', data: normalized };
   } catch (error) {
-    logger.error(`❌ [${requestId}] eBills customer verification failed:`, {
-      requestId,
-      userId,
-      customer_id: customer_id?.substring(0, 4) + '***',
-      service_id,
-      error: error.message,
-      status: error.response?.status,
-      statusText: error.response?.statusText,
-      ebillsError: error.response?.data
+    logger.error(`❌ [${requestId}] PayBeta customer verification failed:`, {
+      requestId, userId, service_id, serviceCategory, error: error.message
     });
-
-    // Enhanced error messages for common issues - consistent with other utilities
-    if (error.message.includes('IP Address')) {
-      throw new Error('IP address not whitelisted with eBills. Please contact support.');
-    }
-
-    if (error.message.includes('timeout')) {
-      throw new Error('Customer verification request timed out. Please try again.');
-    }
-
-    if (error.response?.status === 422) {
-      const validationErrors = error.response.data?.errors || {};
-      const errorMessages = Object.values(validationErrors).flat();
-      throw new Error(`Validation error: ${errorMessages.join(', ')}`);
-    }
-
-    if (error.response?.status === 401 || error.response?.status === 403) {
-      throw new Error('Authentication failed with eBills API. Please contact support.');
-    }
-
-    throw new Error(`eBills Customer Verification API error: ${error.message}`);
+    throw new Error(`Customer Verification API error: ${error.message}`);
   }
 }
 
@@ -204,8 +164,8 @@ router.post('/customer', async (req, res) => {
     }
     
     const { customer_id, service_id, variation_id } = requestBody;
-    const serviceCategory = getServiceCategory(service_id);
-    
+    const serviceCategory = getServiceCategory(service_id, variation_id);
+
     logger.info(`📊 [${requestId}] Service details determined`, {
       requestId,
       userId,
@@ -214,19 +174,20 @@ router.post('/customer', async (req, res) => {
       serviceCategory,
       variation_id: variation_id || 'not_provided'
     });
-    
-    // Step 4: Call eBills API using the consistent pattern
-    let ebillsResponse;
+
+    // Step 4: Call PayBeta using the consistent pattern
+    let payBetaResponse;
     try {
-      ebillsResponse = await callEBillsVerificationAPI({
+      payBetaResponse = await callPayBetaVerificationAPI({
         customer_id,
         service_id,
         variation_id,
+        serviceCategory,
         requestId,
         userId
       });
     } catch (apiError) {
-      logger.error(`eBills verification API call failed:`, {
+      logger.error(`PayBeta verification API call failed:`, {
         requestId,
         userId,
         customer_id: customer_id?.substring(0, 4) + '***',
@@ -269,7 +230,7 @@ router.post('/customer', async (req, res) => {
     }
     
     // Step 5: Process successful verification response
-    const customerData = ebillsResponse.data;
+    const customerData = payBetaResponse.data;
     
     // Enhance response with service category and additional info
     const enhancedResponse = {
