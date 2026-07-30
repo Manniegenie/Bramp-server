@@ -392,7 +392,7 @@ router.get('/summary', async (req, res) => {
       is2FAEnabled: user.is2FAEnabled,
       is2FAVerified: user.is2FAVerified,
       bvnVerified: user.bvnVerified,
-      bankAccounts: user.bankAccounts || [],
+      recentBankRecipients: user.recentBankRecipients || [],
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
       lastBalanceUpdate: user.lastBalanceUpdate,

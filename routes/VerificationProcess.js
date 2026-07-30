@@ -50,9 +50,8 @@ router.get('/status', async (req, res) => {
 function calculateFiatSteps(user) {
   let completedSteps = 0;
   
-  // Step 1: Has bank account
-  const activeBankAccounts = user.getActiveBankAccounts();
-  if (activeBankAccounts.length > 0) {
+  // Step 1: Has sent to a bank account at least once
+  if ((user.recentBankRecipients || []).length > 0) {
     completedSteps++;
   }
   

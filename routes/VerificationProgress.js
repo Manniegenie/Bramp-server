@@ -50,7 +50,7 @@ router.get('/status', async (req, res) => {
 });
 
 function buildFiatProgress(user) {
-  const activeBankAccounts = user.getActiveBankAccounts?.() || [];
+  const recentRecipients = user.recentBankRecipients || [];
 
   const steps = [
     {
@@ -61,9 +61,9 @@ function buildFiatProgress(user) {
     },
     {
       id: 'bank_account',
-      label: 'Add bank account',
-      completed: activeBankAccounts.length > 0,
-      completedAt: activeBankAccounts.length > 0 ? activeBankAccounts[0]?.addedAt || null : null,
+      label: 'Send to a bank account',
+      completed: recentRecipients.length > 0,
+      completedAt: recentRecipients.length > 0 ? recentRecipients[0]?.lastUsedAt || null : null,
     }
   ];
 

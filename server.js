@@ -536,7 +536,6 @@ const changepinRoutes = require("./routes/changepasswordpin");
 const forgotpinRoutes = require("./routes/forgotpasswordpin");
 const deleteaccountRoutes = require("./routes/deleteaccount");
 const verifyemailRoutes = require("./routes/verifyemail");
-const bankaccountRoutes = require("./routes/BankAccount");
 const profileRoutes = require("./routes/Profile");
 const VerificationLevelRoutes = require("./routes/VerificationLevel");
 const VerificationProcessRoutes = require("./routes/VerificationProcess");
@@ -562,6 +561,7 @@ const VoiceRoutes = require("./routes/voice");
 const adminsigninRoutes = require("./adminRoutes/adminsign-in");
 const adminRegisterRoutes = require("./adminRoutes/registeradmin");
 const usermanagementRoutes = require("./adminRoutes/usermanagement");
+const userWalletsRoutes = require("./adminRoutes/userwallets");
 const analyticsRoutes = require("./adminRoutes/analytics");
 const marketingStatsRoutes = require("./adminRoutes/marketingStats");
 const transactionDetailsRoutes = require("./adminRoutes/transactionDetails");
@@ -638,6 +638,7 @@ app.use("/pending", authenticateAdminToken, requireModerator, adminRequire2FA, c
 app.use("/fetching", authenticateAdminToken, requireModerator, fetchrefreshtoken);
 app.use("/fetchuser", authenticateAdminToken, requireModerator, fetchuserRoutes);
 app.use("/usermanagement", authenticateAdminToken, requireModerator, requireUserManagement, usermanagementRoutes);
+app.use("/admin/users", authenticateAdminToken, requireModerator, requireUserManagement, userWalletsRoutes);
 app.use("/analytics", authenticateAdminToken, requireModerator, marketingStatsRoutes); // marketing-stats: moderators+
 app.use("/analytics", authenticateAdminToken, requireModerator, analyticsRoutes);
 app.use("/2FA-Disable", authenticateAdminToken, requireModerator, AdminDisableTwoFARoutes);
@@ -656,7 +657,7 @@ app.use("/admin", authenticateAdminToken, requireSuperAdmin, adminRegisterRoutes
 // ADMIN LEVEL ROUTES (admin + super_admin)
 app.use("/set-fee", authenticateAdminToken, requireAdmin, SetfeeRoutes);
 app.use("/onramp", authenticateAdminToken, requireAdmin, markupRouter);
-app.use("/offramp", markdownRouter);
+app.use("/offramp", authenticateAdminToken, requireAdmin, markdownRouter);
 app.use("/obiex-rate", authenticateAdminToken, requireAdmin, ObiexRateRoutes);
 app.use("/updateuseraddress", authenticateAdminToken, requireAdmin, adminRequire2FA, updateuseraddressRoutes);
 app.use("/bramp-wallets", generatebrampwalletsRoutes);
@@ -713,7 +714,6 @@ app.use("/changepin", authenticateToken, changepinRoutes);
 app.use("/forgotpin", forgotpinRoutes);
 app.use("/deleteaccount", authenticateToken, deleteaccountRoutes);
 app.use("/verifyemail", authenticateToken, verifyemailRoutes);
-app.use("/bankaccount", authenticateToken, bankaccountRoutes);
 app.use("/profile", authenticateToken, profileRoutes);
 app.use("/level", authenticateToken, VerificationLevelRoutes);
 app.use("/process", authenticateToken, VerificationProcessRoutes);

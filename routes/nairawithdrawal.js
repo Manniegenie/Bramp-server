@@ -321,6 +321,15 @@ router.post('/withdrawal/ngnb', async (req, res) => {
         amountToProvider: withdrawalResult.amountToProvider,
       });
 
+      // Record this recipient for the "Saved Accounts" quick-select list (non-blocking,
+      // best-effort — a failure here should never affect the withdrawal response).
+      User.recordBankRecipient(userId, {
+        accountNumber: account_number,
+        accountName: account_name,
+        bankName: bank_name,
+        bankCode: bank_code,
+      }).catch(e => logger.warn('Failed to record recent bank recipient', { userId, error: e.message }));
+
       // Notifications (non-blocking)
       const displayName = user.username || user.firstname || 'User';
       sendWithdrawalNotification(userId, amount, 'NGNB', 'pending', {
@@ -360,6 +369,25 @@ router.post('/withdrawal/ngnb', async (req, res) => {
     processingUsers.delete(userId);
     logger.error('NGNB withdrawal error', { userId, error: err.message });
     return res.status(500).json({ success: false, message: 'An error occurred. Please try again.' });
+  }
+});
+
+/**
+ * GET /recipients/recent
+ * Last 10 bank transfer recipients, most-recently-used first — powers the
+ * "Saved Accounts" quick-select list in the Send Payment modal.
+ */
+router.get('/recipients/recent', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const user = await User.findById(userId).select('recentBankRecipients');
+    return res.status(200).json({
+      success: true,
+      data: { recipients: user?.recentBankRecipients || [] }
+    });
+  } catch (err) {
+    logger.error('Error fetching recent bank recipients', { error: err.message });
+    return res.status(500).json({ success: false, message: 'Failed to fetch recent recipients' });
   }
 });
 

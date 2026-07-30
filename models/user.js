@@ -38,22 +38,17 @@ const userSchema = new mongoose.Schema({
   avatarUrl: { type: String, default: null },
   avatarLastUpdated: { type: Date, default: null },
 
-  // Bank Accounts (Limited to 10 per user)
-  bankAccounts: {
+  // Recently used bank transfer recipients (auto-recorded on each successful
+  // NGNB withdrawal — most-recent-first, capped at 10). Replaces the old
+  // manually-managed bankAccounts list.
+  recentBankRecipients: {
     type: [{
       accountName: { type: String, required: true },
       bankName: { type: String, required: true },
+      bankCode: { type: String, default: null },
       accountNumber: { type: String, required: true },
-      addedAt: { type: Date, default: Date.now },
-      isVerified: { type: Boolean, default: false },
-      isActive: { type: Boolean, default: true }
+      lastUsedAt: { type: Date, default: Date.now }
     }],
-    validate: {
-      validator: function (accounts) {
-        return accounts.length <= 10;
-      },
-      message: 'Maximum of 10 bank accounts allowed per user'
-    },
     default: []
   },
 
@@ -319,42 +314,24 @@ userSchema.methods.clearPinChangeOtp = function () {
   return this.save();
 };
 
-// Bank Account Methods
-userSchema.methods.addBankAccount = function (accountData) {
-  if (this.bankAccounts.length >= 10) {
-    throw new Error('Maximum of 10 bank accounts allowed per user');
-  }
-
-  const existingAccount = this.bankAccounts.find(
-    account => account.accountNumber === accountData.accountNumber && account.isActive
-  );
-
-  if (existingAccount) {
-    throw new Error('Bank account with this account number already exists');
-  }
-
-  this.bankAccounts.push({
-    accountName: accountData.accountName,
-    bankName: accountData.bankName,
-    accountNumber: accountData.accountNumber,
-    addedAt: new Date(),
-    isVerified: false,
-    isActive: true
+// Records (or bumps to the top of) a recent bank transfer recipient.
+// Static rather than an instance method so callers can update via a
+// targeted findByIdAndUpdate without needing the full document loaded
+// (nairawithdrawal.js only selects a handful of fields for the withdrawal path).
+userSchema.statics.recordBankRecipient = async function (userId, { accountNumber, accountName, bankName, bankCode }) {
+  const bankCodeValue = bankCode || null;
+  await this.findByIdAndUpdate(userId, {
+    $pull: { recentBankRecipients: { accountNumber, bankCode: bankCodeValue } }
   });
-  return this.save();
-};
-
-userSchema.methods.removeBankAccount = function (accountId) {
-  this.bankAccounts.id(accountId).remove();
-  return this.save();
-};
-
-userSchema.methods.getActiveBankAccounts = function () {
-  return this.bankAccounts.filter(account => account.isActive);
-};
-
-userSchema.methods.getBankAccountsCount = function () {
-  return this.bankAccounts.filter(account => account.isActive).length;
+  await this.findByIdAndUpdate(userId, {
+    $push: {
+      recentBankRecipients: {
+        $each: [{ accountNumber, accountName, bankName, bankCode: bankCodeValue, lastUsedAt: new Date() }],
+        $position: 0,
+        $slice: 10
+      }
+    }
+  });
 };
 
 userSchema.methods.canAddBankAccount = function () {
