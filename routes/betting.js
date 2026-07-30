@@ -12,11 +12,11 @@ const crypto = require('crypto');
 const router = express.Router();
 const EBILLS_BASE_URL = process.env.EBILLS_BASE_URL || 'https://ebills.africa/wp-json';
 
-// Valid betting service providers
+// Valid betting service providers — matches eBills' official 14-provider list
 const BETTING_SERVICES = [
   '1xBet', 'BangBet', 'Bet9ja', 'BetKing', 'BetLand', 'BetLion',
   'BetWay', 'CloudBet', 'LiveScoreBet', 'MerryBet', 'NaijaBet',
-  'NairaBet', 'SupaBet'
+  'NairaBet', 'SportyBet', 'SupaBet'
 ];
 
 // Supported tokens - aligned with user schema
@@ -136,7 +136,7 @@ function validateBettingRequest(body) {
     const numericAmount = Number(body.amount);
     if (isNaN(numericAmount) || numericAmount <= 0) errors.push('Amount must be a positive number');
     else if (numericAmount > 100000) errors.push('Amount above maximum. Maximum is ₦100,000');
-    else if (numericAmount < 1000) errors.push('Amount below minimum. Minimum is ₦1,000');
+    else if (numericAmount < 200) errors.push('Amount below minimum. Minimum is ₦200');
     else sanitized.amount = numericAmount;
   }
 
@@ -155,7 +155,7 @@ function validateBettingRequest(body) {
 
 // NGNB limits
 function validateNGNBLimits(amount) {
-  const MIN_NGNB = 1000;
+  const MIN_NGNB = 200;
   const MAX_NGNB = 100000;
   if (amount < MIN_NGNB) return { isValid: false, error: 'NGNB_MINIMUM_NOT_MET', message: `Minimum NGNB betting funding amount is ${MIN_NGNB} NGNB.` };
   if (amount > MAX_NGNB) return { isValid: false, error: 'NGNB_MAXIMUM_EXCEEDED', message: `Maximum NGNB betting funding amount is ${MAX_NGNB} NGNB.` };
