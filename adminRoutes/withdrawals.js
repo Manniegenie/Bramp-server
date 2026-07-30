@@ -45,7 +45,9 @@ router.post('/:transactionId/resolve', async (req, res) => {
       return res.status(400).json({ success: false, message: "status must be 'SUCCESSFUL' or 'FAILED'" });
     }
 
-    const result = await resolveWithdrawalCallback({ transactionId, status: normalizedStatus, narration });
+    // The path param might be the local withdrawal reference OR Obiex's actual
+    // transaction id — resolveWithdrawalCallback's fallback matching checks both.
+    const result = await resolveWithdrawalCallback({ transactionId, reference: transactionId, status: normalizedStatus, narration });
 
     logger.info('Admin withdrawals: manual resolution applied', {
       transactionId, status: normalizedStatus, adminId: req.admin?.id || req.admin?._id, result: result.body,

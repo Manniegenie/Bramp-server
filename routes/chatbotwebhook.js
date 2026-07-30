@@ -156,9 +156,28 @@ const FINAL_SUCCESS = new Set(['SUCCESSFUL', 'SUCCESS', 'COMPLETED', 'CONFIRMED'
  *
  * Returns { httpStatus, body }.
  */
-async function resolveWithdrawalCallback({ transactionId, status, narration }) {
+async function resolveWithdrawalCallback({ transactionId, status, narration, reference }) {
+  // Match on whichever identifier the caller actually has. obiexTransactionId is
+  // only reliably set if debitNaira()'s response included an id (see
+  // processProviderWithdrawal in nairawithdrawal.js) — if Obiex's webhook later
+  // sends a transactionId that doesn't match what we captured at initiation (or
+  // it was never captured), fall back to the local withdrawal reference, which
+  // is always set and is also echoed in webhook payloads as `reference`.
+  const orConditions = [];
+  if (transactionId) {
+    orConditions.push({ obiexTransactionId: transactionId }, { 'metadata.providerReference': transactionId });
+  }
+  if (reference) {
+    orConditions.push({ reference }, { obiexTransactionId: reference }, { 'metadata.providerReference': reference });
+  }
+
+  if (orConditions.length === 0) {
+    logger.warn('NGNB withdrawal webhook: no transactionId or reference provided');
+    return { httpStatus: 400, body: { success: false, error: 'missing_identifier' } };
+  }
+
   const tx = await Transaction.findOne({
-    obiexTransactionId: transactionId,
+    $or: orConditions,
     type: 'WITHDRAWAL',
     currency: { $in: ['NGNB', 'NGNX'] },
   });
@@ -332,7 +351,7 @@ router.post('/transaction', webhookAuth, async (req, res) => {
 
     // --- WITHDRAWAL callbacks ---
     if (type === 'WITHDRAWAL') {
-      const result = await resolveWithdrawalCallback({ transactionId, status, narration });
+      const result = await resolveWithdrawalCallback({ transactionId, status, narration, reference });
       return res.status(result.httpStatus).json(result.body);
     }
 
