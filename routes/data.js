@@ -2,7 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const User = require('../models/user');
 const BillTransaction = require('../models/billstransaction');
-const { payBetaAuth } = require('../auth/paybetaAuth');
+const { vtuAuth } = require('../auth/billauth');
 const { validateUserBalance } = require('../services/balance');
 const { validateTwoFactorAuth } = require('../services/twofactorAuth');
 const { validateUtilityTransaction } = require('../services/kyccheckservice'); // UPDATED
@@ -10,10 +10,10 @@ const logger = require('../utils/logger');
 const crypto = require('crypto');
 
 const router = express.Router();
+const EBILLS_BASE_URL = process.env.EBILLS_BASE_URL || 'https://ebills.africa/wp-json';
 
 const DATA_SERVICES = ['mtn', 'glo', 'airtel', '9mobile'];
 const AIRTIME_SERVICES = ['mtn', 'glo', 'airtel', '9mobile'];
-const DATA_SERVICE_MAP = { mtn: 'mtn_data', airtel: 'airtel_data', glo: 'glo_data', '9mobile': '9mobile_data' };
 
 const SUPPORTED_TOKENS = { BTC: {}, ETH: {}, SOL: {}, USDT: {}, USDC: {}, BNB: {}, MATIC: {}, AVAX: {}, NGNB: {} };
 const TOKEN_FIELD_MAPPING = { BTC: 'btc', ETH: 'eth', SOL: 'sol', USDT: 'usdt', USDC: 'usdc', BNB: 'bnb', MATIC: 'matic', AVAX: 'avax', NGNB: 'ngnb' };
@@ -39,16 +39,13 @@ function generateUniqueOrderId(type) { return `${type}_order_${Date.now()}_${cry
 function generateUniqueRequestId(userId, type) { return `${type}_req_${userId}_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`; }
 function validatePhoneNumber(phone) { return /^\d{10,16}$/.test(phone.replace(/\D/g, '')); }
 
-// Fetch data plan price from PayBeta's bundle list, matched by code (== variation_id)
+// Fetch data plan
 async function getDataPlanPrice(service_id, variation_id) {
-  const payBetaService = DATA_SERVICE_MAP[service_id];
-  if (!payBetaService) throw new Error(`Unsupported service: ${service_id}`);
-  const res = await payBetaAuth.makeRequest('POST', '/v2/data-bundle/list', { service: payBetaService }, { timeout: 15000 });
-  if (res.status !== 'successful') throw new Error('Failed to fetch plan');
-  const packages = res.data?.packages || [];
-  const plan = packages.find(p => p.code === variation_id);
+  const res = await vtuAuth.makeRequest('GET', `/api/v2/variations/data/${service_id}`, null, { timeout: 15000, baseURL: EBILLS_BASE_URL });
+  if (res.code !== 'success') throw new Error('Failed to fetch plan');
+  const plan = res.data.find(p => p.variation_id === variation_id);
   if (!plan) throw new Error(`Data plan ${variation_id} not found`);
-  return { price: parseFloat(plan.price), name: plan.description };
+  return { price: parseFloat(plan.price), name: plan.name, validity: plan.validity, data_allowance: plan.data_allowance };
 }
 
 // Validate customer & plan
@@ -92,39 +89,18 @@ async function checkForPendingTransactions(userId, orderId, requestId) {
   return pending.length > 0;
 }
 
-// NOTE: service_type is always 'data' from the real app — routes/airtime.js (POST
-// /airtime/purchase) is the actual airtime endpoint the frontend calls. This function
-// only implements the data path; airtime is left unsupported here rather than duplicating
-// routes/airtime.js's PayBeta integration for a branch nothing reaches.
-async function callPayBetaDataAPI({ phone_number, amount, service_id, variation_id, service_type, request_id }) {
-  if (service_type !== 'data') throw new Error(`Unsupported service_type: ${service_type}`);
-
-  const payBetaService = DATA_SERVICE_MAP[service_id];
-  if (!payBetaService) throw new Error(`Unsupported service: ${service_id}`);
-
-  const reference = request_id.length > 40 ? request_id.substring(0, 40) : request_id;
-  const payload = { service: payBetaService, amount: Math.round(amount), phoneNumber: phone_number.trim(), code: variation_id, reference };
-
-  const response = await payBetaAuth.makeRequest('POST', '/v2/data-bundle/purchase', payload, { timeout: 60000 });
-  if (response.status !== 'successful') throw new Error(response.message || 'Data service error');
-
-  return {
-    code: 'success',
-    data: {
-      status: 'completed-api',
-      order_id: response.data.transactionId,
-      phone: response.data.customerId || phone_number,
-      amount: response.data.amount,
-      amount_charged: response.data.chargedAmount,
-      product_name: response.data.biller || 'Data',
-      service_name: response.data.biller
-    }
-  };
+async function callEBillsDataAirtimeAPI({ phone_number, amount, service_id, variation_id, service_type, request_id }) {
+  const endpoint = service_type === 'data' ? '/api/v2/data' : '/api/v2/airtime';
+  const payload = { request_id, phone: phone_number, service_id, amount: parseInt(amount) };
+  if (service_type === 'data' && variation_id) payload.variation_id = variation_id;
+  const res = await vtuAuth.makeRequest('POST', endpoint, payload, { timeout: 45000, baseURL: EBILLS_BASE_URL });
+  if (res.code !== 'success') throw new Error(res.message || 'eBills API error');
+  return res;
 }
 
 // --- Main endpoint ---
 router.post('/purchase', async (req, res) => {
-  let balanceActionTaken = false, balanceActionType = null, transactionCreated = false, pendingTransaction = null, payBetaResponse = null;
+  let balanceActionTaken = false, balanceActionType = null, transactionCreated = false, pendingTransaction = null, ebillsResponse = null;
   try {
     const userId = req.user.id;
     const validation = validateDataAirtimeRequest(req.body);
@@ -160,14 +136,14 @@ router.post('/purchase', async (req, res) => {
     const txData = { orderId: uniqueOrderId, status: 'initiated-api', productName: service_type, billType: service_type, amount: ngnbAmount, paymentCurrency: currency, requestId: uniqueRequestId, userId, metaData: { phone_number, service_id, variation_id, service_type } };
     pendingTransaction = await BillTransaction.create(txData); transactionCreated = true;
 
-    payBetaResponse = await callPayBetaDataAPI({ phone_number, amount: ngnbAmount, service_id, variation_id, service_type, request_id: uniqueRequestId });
-    const providerStatus = payBetaResponse.data.status;
+    ebillsResponse = await callEBillsDataAirtimeAPI({ phone_number, amount: ngnbAmount, service_id, variation_id, service_type, request_id: uniqueRequestId });
+    const ebillsStatus = ebillsResponse.data.status;
 
-    if (providerStatus === 'completed-api') { await updateUserBalance(userId, currency, -ngnbAmount); await updateUserPortfolioBalance(userId); balanceActionTaken = true; balanceActionType = 'updated'; }
-    else if (['initiated-api', 'processing-api'].includes(providerStatus)) { await reserveUserBalance(userId, currency, ngnbAmount); await BillTransaction.findByIdAndUpdate(pendingTransaction._id, { balanceReserved: true }); balanceActionTaken = true; balanceActionType = 'reserved'; }
+    if (ebillsStatus === 'completed-api') { await updateUserBalance(userId, currency, -ngnbAmount); await updateUserPortfolioBalance(userId); balanceActionTaken = true; balanceActionType = 'updated'; }
+    else if (['initiated-api', 'processing-api'].includes(ebillsStatus)) { await reserveUserBalance(userId, currency, ngnbAmount); await BillTransaction.findByIdAndUpdate(pendingTransaction._id, { balanceReserved: true }); balanceActionTaken = true; balanceActionType = 'reserved'; }
 
-    const finalTransaction = await BillTransaction.findByIdAndUpdate(pendingTransaction._id, { $set: { orderId: payBetaResponse.data.order_id, status: providerStatus } }, { new: true });
-    return res.status(200).json({ success: true, message: `Purchase ${providerStatus}`, transaction: finalTransaction });
+    const finalTransaction = await BillTransaction.findByIdAndUpdate(pendingTransaction._id, { $set: { orderId: ebillsResponse.data.order_id, status: ebillsStatus } }, { new: true });
+    return res.status(200).json({ success: true, message: `Purchase ${ebillsStatus}`, transaction: finalTransaction });
 
   } catch (error) {
     if (balanceActionTaken && balanceActionType === 'reserved') await releaseReservedBalance(req.user.id, 'NGNB', req.body.amount || 0);

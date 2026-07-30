@@ -2,7 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const User = require('../models/user');
 const BillTransaction = require('../models/billstransaction');
-const { payBetaAuth } = require('../auth/paybetaAuth');
+const { vtuAuth } = require('../auth/billauth');
 const { validateUserBalance } = require('../services/balance');
 const { validateTwoFactorAuth } = require('../services/twofactorAuth');
 const { validateUtilityTransaction } = require('../services/kyccheckservice'); // <-- UPDATED
@@ -186,42 +186,24 @@ function validateAirtimeRequest(body) {
   return { isValid: errors.length === 0, errors, sanitized };
 }
 
-const AIRTIME_SERVICE_MAP = { mtn: 'mtn_vtu', airtel: 'airtel_vtu', glo: 'glo_vtu', '9mobile': '9mobile_vtu' };
-
-// PayBeta responds synchronously — 'successful' means the airtime has actually been
-// delivered, there is no pending/processing intermediate state to reconcile via webhook
-// (unlike eBills' completed-api/initiated-api/processing-api three-state model).
-async function callPayBetaAPI({ phone, amount, service_id, request_id, userId }) {
+async function callEBillsAPI({ phone, amount, service_id, request_id, userId }) {
   try {
-    const payBetaService = AIRTIME_SERVICE_MAP[service_id];
-    if (!payBetaService) throw new Error(`Unsupported service: ${service_id}`);
-
-    const reference = request_id.length > 40 ? request_id.substring(0, 40) : request_id;
-    const payload = { service: payBetaService, phoneNumber: phone, amount: Math.round(amount), reference };
-
-    logger.info('Making PayBeta airtime purchase request:', { phone, amount, service_id, payBetaService, request_id, endpoint: '/v2/airtime/purchase' });
-    const response = await payBetaAuth.makeRequest('POST', '/v2/airtime/purchase', payload, { timeout: 45000 });
-    logger.info(`PayBeta API response for ${request_id}:`, { status: response.status, message: response.message, reference: response.data?.reference, transactionId: response.data?.transactionId });
-
-    if (response.status !== 'successful') throw new Error(`Airtime service error: ${response.message || 'Unknown error'}`);
-
-    return {
-      code: 'success',
-      data: {
-        status: 'completed-api',
-        order_id: response.data.transactionId,
-        phone: response.data.customerId || phone,
-        amount: response.data.amount,
-        amount_charged: response.data.chargedAmount,
-        product_name: response.data.biller || 'Airtime',
-        service_name: response.data.biller,
-        initial_balance: response.data.previousBalance,
-        final_balance: response.data.currentBalance
-      }
-    };
+    const payload = { phone, amount, service_id, request_id };
+    logger.info('Making eBills airtime purchase request:', { phone, amount, service_id, request_id, endpoint: '/api/v2/airtime' });
+    const response = await vtuAuth.makeRequest('POST', '/api/v2/airtime', payload, { timeout: 45000 });
+    logger.info(`eBills API response for ${request_id}:`, { code: response.code, message: response.message, status: response.data?.status, order_id: response.data?.order_id });
+    if (response.code !== 'success') throw new Error(`eBills API error: ${response.message || 'Unknown error'}`);
+    return response;
   } catch (error) {
-    logger.error('❌ PayBeta airtime purchase failed:', { request_id, userId, error: error.message, status: error.response?.status, payBetaError: error.response?.data });
-    throw new Error(`Airtime service error: ${error.message}`);
+    logger.error('❌ eBills airtime purchase failed:', { request_id, userId, error: error.message, status: error.response?.status, ebillsError: error.response?.data });
+    if (error.message.includes('IP Address')) throw new Error('IP address not whitelisted with eBills. Please contact support.');
+    if (error.message.includes('insufficient')) throw new Error('Insufficient balance with eBills provider. Please contact support.');
+    if (error.response?.status === 422) {
+      const validationErrors = error.response.data?.errors || {};
+      const errorMessages = Object.values(validationErrors).flat();
+      throw new Error(`Validation error: ${errorMessages.join(', ')}`);
+    }
+    throw new Error(`eBills API error: ${error.message}`);
   }
 }
 
@@ -266,7 +248,7 @@ router.post('/purchase', async (req, res) => {
   let balanceActionType = null;
   let transactionCreated = false;
   let pendingTransaction = null;
-  let payBetaResponse = null;
+  let ebillsResponse = null;
 
   try {
     const requestBody = req.body;
@@ -381,7 +363,7 @@ router.post('/purchase', async (req, res) => {
     logger.info(`📋 Bill transaction ${uniqueOrderId}: initiated-api | airtime | ${amount} NGNB | ✅ 2FA | ✅ PIN | ✅ KYC | ⚠️ Balance Pending`);
 
     try {
-      payBetaResponse = await callPayBetaAPI({ phone, amount, service_id, request_id: finalRequestId, userId });
+      ebillsResponse = await callEBillsAPI({ phone, amount, service_id, request_id: finalRequestId, userId });
     } catch (apiError) {
       await BillTransaction.findByIdAndUpdate(pendingTransaction._id, {
         status: 'failed',
@@ -392,12 +374,12 @@ router.post('/purchase', async (req, res) => {
         }]
       });
 
-      return res.status(500).json({ success: false, error: 'PAYBETA_API_ERROR', message: apiError.message });
+      return res.status(500).json({ success: false, error: 'EBILLS_API_ERROR', message: apiError.message });
     }
 
-    const providerStatus = payBetaResponse.data.status;
+    const ebillsStatus = ebillsResponse.data.status;
 
-    if (providerStatus === 'completed-api') {
+    if (ebillsStatus === 'completed-api') {
       logger.info(`✅ Transaction completed immediately, updating balance directly for ${finalRequestId}`);
       try {
         await updateUserBalance(userId, currency, -amount);
@@ -412,7 +394,7 @@ router.post('/purchase', async (req, res) => {
           currency,
           amount,
           error: balanceError.message,
-          paybeta_order_id: payBetaResponse.data?.order_id
+          ebills_order_id: ebillsResponse.data?.order_id
         });
 
         await BillTransaction.findByIdAndUpdate(pendingTransaction._id, {
@@ -421,24 +403,24 @@ router.post('/purchase', async (req, res) => {
             error: `Balance update failed for completed transaction: ${balanceError.message}`,
             timestamp: new Date(),
             phase: 'balance_update',
-            paybeta_order_id: payBetaResponse.data?.order_id
+            ebills_order_id: ebillsResponse.data?.order_id
           }]
         });
 
         return res.status(500).json({
           success: false,
           error: 'BALANCE_UPDATE_FAILED',
-          message: 'PayBeta transaction succeeded but balance update failed. Please contact support immediately.',
+          message: 'eBills transaction succeeded but balance update failed. Please contact support immediately.',
           details: {
-            paybeta_order_id: payBetaResponse.data?.order_id,
-            paybeta_status: payBetaResponse.data?.status,
+            ebills_order_id: ebillsResponse.data?.order_id,
+            ebills_status: ebillsResponse.data?.status,
             amount: amount,
             phone: phone
           }
         });
       }
-    } else if (['initiated-api', 'processing-api'].includes(providerStatus)) {
-      logger.info(`⏳ Transaction pending (${providerStatus}), reserving balance for ${finalRequestId}`);
+    } else if (['initiated-api', 'processing-api'].includes(ebillsStatus)) {
+      logger.info(`⏳ Transaction pending (${ebillsStatus}), reserving balance for ${finalRequestId}`);
       try {
         await reserveUserBalance(userId, currency, amount);
         await pendingTransaction.markBalanceReserved();
@@ -446,54 +428,54 @@ router.post('/purchase', async (req, res) => {
         balanceActionType = 'reserved';
         logger.info(`✅ Balance reserved: ${amount} ${currency} for user ${userId}`);
       } catch (balanceError) {
-        logger.error('CRITICAL: Balance reservation failed after successful PayBeta API call:', {
+        logger.error('CRITICAL: Balance reservation failed after successful eBills API call:', {
           request_id: finalRequestId,
           userId,
           currency,
           amount,
           error: balanceError.message,
-          paybeta_order_id: payBetaResponse.data?.order_id
+          ebills_order_id: ebillsResponse.data?.order_id
         });
 
         await BillTransaction.findByIdAndUpdate(pendingTransaction._id, {
           status: 'failed',
           processingErrors: [{
-            error: `Balance reservation failed after PayBeta success: ${balanceError.message}`,
+            error: `Balance reservation failed after eBills success: ${balanceError.message}`,
             timestamp: new Date(),
             phase: 'balance_reservation',
-            paybeta_order_id: payBetaResponse.data?.order_id
+            ebills_order_id: ebillsResponse.data?.order_id
           }]
         });
 
         return res.status(500).json({
           success: false,
           error: 'BALANCE_RESERVATION_FAILED',
-          message: 'PayBeta transaction succeeded but balance reservation failed. Please contact support immediately.',
+          message: 'eBills transaction succeeded but balance reservation failed. Please contact support immediately.',
           details: {
-            paybeta_order_id: payBetaResponse.data?.order_id,
-            paybeta_status: payBetaResponse.data?.status,
+            ebills_order_id: ebillsResponse.data?.order_id,
+            ebills_status: ebillsResponse.data?.status,
             amount: amount,
             phone: phone
           }
         });
       }
     } else {
-      logger.warn(`Unexpected PayBeta status: ${providerStatus} for ${finalRequestId}`);
+      logger.warn(`Unexpected eBills status: ${ebillsStatus} for ${finalRequestId}`);
     }
 
     const updateData = {
-      orderId: payBetaResponse.data.order_id.toString(),
-      status: payBetaResponse.data.status,
-      productName: payBetaResponse.data.product_name,
+      orderId: ebillsResponse.data.order_id.toString(),
+      status: ebillsResponse.data.status,
+      productName: ebillsResponse.data.product_name,
       metaData: {
         ...initialTransactionData.metaData,
-        service_name: payBetaResponse.data.service_name,
-        amount_charged: payBetaResponse.data.amount_charged,
+        service_name: ebillsResponse.data.service_name,
+        amount_charged: ebillsResponse.data.amount_charged,
         balance_action_taken: balanceActionTaken,
         balance_action_type: balanceActionType,
         balance_action_at: new Date(),
-        paybeta_initial_balance: payBetaResponse.data.initial_balance,
-        paybeta_final_balance: payBetaResponse.data.final_balance
+        ebills_initial_balance: ebillsResponse.data.initial_balance,
+        ebills_final_balance: ebillsResponse.data.final_balance
       }
     };
 
@@ -504,16 +486,16 @@ router.post('/purchase', async (req, res) => {
     }
 
     const finalTransaction = await BillTransaction.findByIdAndUpdate(pendingTransaction._id, updateData, { new: true });
-    logger.info(`📋 Transaction updated: ${payBetaResponse.data.order_id} | ${payBetaResponse.data.status} | Balance: ${balanceActionType || 'none'}`);
+    logger.info(`📋 Transaction updated: ${ebillsResponse.data.order_id} | ${ebillsResponse.data.status} | Balance: ${balanceActionType || 'none'}`);
 
     // NEW: Send email notification for completed transactions
-    if (payBetaResponse.data.status === 'completed-api') {
+    if (ebillsResponse.data.status === 'completed-api') {
       // Send email notification asynchronously
       const emailTransactionDetails = {
-        amount: payBetaResponse.data.amount,
-        phone: payBetaResponse.data.phone,
+        amount: ebillsResponse.data.amount,
+        phone: ebillsResponse.data.phone,
         network: service_id.toUpperCase(),
-        order_id: payBetaResponse.data.order_id,
+        order_id: ebillsResponse.data.order_id,
         request_id: finalRequestId
       };
       
@@ -526,25 +508,25 @@ router.post('/purchase', async (req, res) => {
         success: true,
         message: 'Airtime purchase completed successfully',
         data: {
-          order_id: payBetaResponse.data.order_id,
-          status: payBetaResponse.data.status,
-          phone: payBetaResponse.data.phone,
-          amount: payBetaResponse.data.amount,
-          service_name: payBetaResponse.data.service_name,
+          order_id: ebillsResponse.data.order_id,
+          status: ebillsResponse.data.status,
+          phone: ebillsResponse.data.phone,
+          amount: ebillsResponse.data.amount,
+          service_name: ebillsResponse.data.service_name,
           request_id: finalRequestId,
           balance_action: 'updated_directly'
         }
       });
-    } else if (['initiated-api', 'processing-api'].includes(payBetaResponse.data.status)) {
+    } else if (['initiated-api', 'processing-api'].includes(ebillsResponse.data.status)) {
       return res.status(202).json({
         success: true,
         message: 'Airtime purchase is being processed',
         data: {
-          order_id: payBetaResponse.data.order_id,
-          status: payBetaResponse.data.status,
-          phone: payBetaResponse.data.phone,
-          amount: payBetaResponse.data.amount,
-          service_name: payBetaResponse.data.service_name,
+          order_id: ebillsResponse.data.order_id,
+          status: ebillsResponse.data.status,
+          phone: ebillsResponse.data.phone,
+          amount: ebillsResponse.data.amount,
+          service_name: ebillsResponse.data.service_name,
           request_id: finalRequestId,
           balance_action: 'reserved'
         },
@@ -553,8 +535,8 @@ router.post('/purchase', async (req, res) => {
     } else {
       return res.status(200).json({
         success: true,
-        message: `Airtime purchase status: ${payBetaResponse.data.status}`,
-        data: { ...payBetaResponse.data, request_id: finalRequestId, balance_action: balanceActionType || 'none' }
+        message: `Airtime purchase status: ${ebillsResponse.data.status}`,
+        data: { ...ebillsResponse.data, request_id: finalRequestId, balance_action: balanceActionType || 'none' }
       });
     }
   } catch (error) {
