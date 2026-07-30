@@ -576,6 +576,7 @@ const AdminKYCRoutes = require("./adminRoutes/kyc");
 const KYCBypassRoutes = require("./adminRoutes/kyc-bypass");
 const adminRequire2FA = require("./middleware/adminRequire2FA");
 const AdminNombadepositRoutes = require("./adminRoutes/Nombadeposit");
+const AdminWithdrawalsRoutes = require("./adminRoutes/withdrawals");
 const scheduledNotificationRoutes = require("./adminRoutes/scheduledNotifications");
 const scheduledGiftCardNotificationRoutes = require("./adminRoutes/scheduledGiftCardNotifications");
 const nairamarkupRoutes = require("./adminRoutes/nairamarkup");
@@ -649,6 +650,7 @@ app.use("/admin/kyc-bypass", authenticateAdminToken, requireAdmin, KYCBypassRout
 app.use("/deleteuser", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, deleteuserRoutes);
 app.use("/fund", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, FunduserRoutes);
 app.use("/admin/Nombadeposit", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, AdminNombadepositRoutes);
+app.use("/admin/withdrawals", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, AdminWithdrawalsRoutes);
 app.use("/unlockaccount", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, unlockaccountRoutes);
 app.use("/delete-pin", authenticateAdminToken, requireSuperAdmin, deletepinRoutes);
 // IMPORTANT: /admin must be LAST to avoid catching /admin/* routes above

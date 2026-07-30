@@ -145,11 +145,18 @@ const FINAL_FAILED  = new Set(['FAILED', 'REJECTED']);
 const FINAL_SUCCESS = new Set(['SUCCESSFUL', 'SUCCESS', 'COMPLETED', 'CONFIRMED']);
 
 /**
- * Handle Obiex withdrawal callbacks for NGNB.
- * Balance was already deducted at initiation — refund on failure, confirm on success.
- * Idempotent: re-delivery of the same status is a no-op.
+ * Resolve an Obiex withdrawal callback for NGNB — refund on failure, confirm
+ * on success. Idempotent: re-delivery of the same status is a no-op.
+ *
+ * Pure logic, no Express res dependency, so it can be called both from the
+ * live webhook route AND from an admin endpoint for manually reconciling a
+ * withdrawal whose webhook never arrived/was never processed (e.g. while
+ * OBIEX_WEBHOOK_SECRET was unset and every callback was crashing before
+ * reaching this code at all) — same code path, no parallel logic.
+ *
+ * Returns { httpStatus, body }.
  */
-async function handleWithdrawalWebhook({ transactionId, status, narration }, res) {
+async function resolveWithdrawalCallback({ transactionId, status, narration }) {
   const tx = await Transaction.findOne({
     obiexTransactionId: transactionId,
     type: 'WITHDRAWAL',
@@ -159,13 +166,13 @@ async function handleWithdrawalWebhook({ transactionId, status, narration }, res
   if (!tx) {
     // Could be a withdrawal for a different route/currency — acknowledge and move on
     logger.warn('NGNB withdrawal webhook: transaction not found', { transactionId });
-    return res.status(200).json({ success: true, ignored: true });
+    return { httpStatus: 200, body: { success: true, ignored: true } };
   }
 
   // Idempotency: already in a terminal state
   if (FINAL_FAILED.has(tx.status) || FINAL_SUCCESS.has(tx.status)) {
     logger.info('NGNB withdrawal webhook: already terminal, skipping', { transactionId, status: tx.status });
-    return res.status(200).json({ success: true, message: 'Already processed' });
+    return { httpStatus: 200, body: { success: true, message: 'Already processed' } };
   }
 
   if (FINAL_FAILED.has(status)) {
@@ -210,7 +217,7 @@ async function handleWithdrawalWebhook({ transactionId, status, narration }, res
       }
     }).catch(() => {});
 
-    return res.status(200).json({ success: true, refunded: true });
+    return { httpStatus: 200, body: { success: true, refunded: true } };
   }
 
   if (FINAL_SUCCESS.has(status)) {
@@ -240,12 +247,12 @@ async function handleWithdrawalWebhook({ transactionId, status, narration }, res
       }
     }).catch(() => {});
 
-    return res.status(200).json({ success: true });
+    return { httpStatus: 200, body: { success: true } };
   }
 
   // Non-terminal status (e.g. PROCESSING) — acknowledge without changing anything
   logger.info('NGNB withdrawal webhook: non-terminal status, no action', { transactionId, status });
-  return res.status(200).json({ success: true, queued: true });
+  return { httpStatus: 200, body: { success: true, queued: true } };
 }
 
 router.post('/transaction', webhookAuth, async (req, res) => {
@@ -325,7 +332,8 @@ router.post('/transaction', webhookAuth, async (req, res) => {
 
     // --- WITHDRAWAL callbacks ---
     if (type === 'WITHDRAWAL') {
-      return handleWithdrawalWebhook({ transactionId, status, narration }, res);
+      const result = await resolveWithdrawalCallback({ transactionId, status, narration });
+      return res.status(result.httpStatus).json(result.body);
     }
 
     if (type !== 'DEPOSIT') {
@@ -466,3 +474,4 @@ router.post('/transaction', webhookAuth, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.resolveWithdrawalCallback = resolveWithdrawalCallback;

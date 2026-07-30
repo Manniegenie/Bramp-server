@@ -9,7 +9,12 @@ module.exports = function (req, res, next) {
   }
 
   const secret = process.env.OBIEX_WEBHOOK_SECRET;
-  
+
+  if (!secret) {
+    console.error('Webhook Auth - OBIEX_WEBHOOK_SECRET is not configured');
+    return res.status(503).json({ error: 'Webhook verification is not configured' });
+  }
+
   const computedSignature = crypto
     .createHmac('sha512', secret)
     .update(rawBody)
