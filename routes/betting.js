@@ -195,7 +195,7 @@ router.post('/fund', async (req, res) => {
 
     // Step 1: Validate request
     const validation = validateBettingRequest(requestBody);
-    if (!validation.isValid) return res.status(400).json({ success: false, message: 'Validation failed', errors: validation.errors });
+    if (!validation.isValid) return res.status(400).json({ success: false, error: 'VALIDATION_ERROR', message: 'Validation failed', errors: validation.errors });
 
     const { customer_id, service_id, amount, twoFactorCode, passwordpin } = validation.sanitized;
     const currency = 'NGNB';
@@ -210,7 +210,7 @@ router.post('/fund', async (req, res) => {
 
     // Step 4: Validate user + 2FA
     const user = await User.findById(userId);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    if (!user) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND', message: 'User not found' });
     if (!user.twoFASecret || !user.is2FAEnabled) return res.status(400).json({ success: false, message: '2FA is not enabled. Please enable 2FA.' });
     if (!validateTwoFactorAuth(user, twoFactorCode)) return res.status(403).json({ success: false, error: 'INVALID_2FA_CODE', message: 'Invalid 2FA code' });
 

@@ -104,34 +104,34 @@ router.post('/purchase', async (req, res) => {
   try {
     const userId = req.user.id;
     const validation = validateDataAirtimeRequest(req.body);
-    if (!validation.isValid) return res.status(400).json({ success: false, errors: validation.errors });
+    if (!validation.isValid) return res.status(400).json({ success: false, error: 'VALIDATION_ERROR', errors: validation.errors });
     const { phone_number, service_id, service_type, variation_id, amount, twoFactorCode, passwordpin } = validation.sanitized;
     const currency = 'NGNB';
     const uniqueOrderId = generateUniqueOrderId(service_type);
     const uniqueRequestId = generateUniqueRequestId(userId, service_type);
-    if (await checkForPendingTransactions(userId, uniqueOrderId, uniqueRequestId)) return res.status(409).json({ success: false, message: 'Pending transaction detected' });
+    if (await checkForPendingTransactions(userId, uniqueOrderId, uniqueRequestId)) return res.status(409).json({ success: false, error: 'PENDING_TRANSACTION_EXISTS', message: 'Pending transaction detected' });
 
     const user = await User.findById(userId);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-    if (!validateTwoFactorAuth(user, twoFactorCode)) return res.status(403).json({ success: false, message: 'Invalid 2FA code' });
-    if (!await comparePasswordPin(passwordpin, user.passwordpin)) return res.status(401).json({ success: false, message: 'Invalid password PIN' });
+    if (!user) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND', message: 'User not found' });
+    if (!validateTwoFactorAuth(user, twoFactorCode)) return res.status(403).json({ success: false, error: 'INVALID_2FA_CODE', message: 'Invalid 2FA code' });
+    if (!await comparePasswordPin(passwordpin, user.passwordpin)) return res.status(401).json({ success: false, error: 'INVALID_PASSWORDPIN', message: 'Invalid password PIN' });
 
     const kycValidation = await validateUtilityTransaction(userId, amount);
-    if (!kycValidation.allowed) return res.status(403).json({ success: false, message: kycValidation.message, kycDetails: kycValidation.data });
+    if (!kycValidation.allowed) return res.status(403).json({ success: false, error: 'KYC_LIMIT_EXCEEDED', message: kycValidation.message, kycDetails: kycValidation.data });
 
     const customerValidation = await validateCustomerAndGetPlanPrice(phone_number, service_id, variation_id, service_type);
-    if (!customerValidation.isValid) return res.status(400).json({ success: false, message: customerValidation.error });
+    if (!customerValidation.isValid) return res.status(400).json({ success: false, error: 'VALIDATION_ERROR', message: customerValidation.error });
 
     if (service_type === 'data') {
       const amountValidation = validateAmountMatchesPlan(amount, customerValidation.expectedAmount, service_type);
-      if (!amountValidation.isValid) return res.status(400).json({ success: false, message: amountValidation.message });
+      if (!amountValidation.isValid) return res.status(400).json({ success: false, error: amountValidation.error, message: amountValidation.message });
     }
 
     const ngnbAmount = service_type === 'data' ? customerValidation.expectedAmount : amount;
-    if (!validateNGNBLimits(ngnbAmount, service_type).isValid) return res.status(400).json({ success: false, message: 'Amount out of allowed range' });
+    if (!validateNGNBLimits(ngnbAmount, service_type).isValid) return res.status(400).json({ success: false, error: 'VALIDATION_ERROR', message: 'Amount out of allowed range' });
 
     const balanceValidation = await validateUserBalance(userId, currency, ngnbAmount);
-    if (!balanceValidation.success) return res.status(400).json({ success: false, message: balanceValidation.message });
+    if (!balanceValidation.success) return res.status(400).json({ success: false, error: 'INSUFFICIENT_BALANCE', message: balanceValidation.message });
 
     const txData = { orderId: uniqueOrderId, status: 'initiated-api', productName: service_type, billType: service_type, amount: ngnbAmount, paymentCurrency: currency, requestId: uniqueRequestId, userId, metaData: { phone_number, service_id, variation_id, service_type } };
     pendingTransaction = await BillTransaction.create(txData); transactionCreated = true;
@@ -148,7 +148,7 @@ router.post('/purchase', async (req, res) => {
   } catch (error) {
     if (balanceActionTaken && balanceActionType === 'reserved') await releaseReservedBalance(req.user.id, 'NGNB', req.body.amount || 0);
     if (transactionCreated && pendingTransaction) await BillTransaction.findByIdAndUpdate(pendingTransaction._id, { status: 'failed' });
-    return res.status(500).json({ success: false, message: error.message });
+    return res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: error.message });
   }
 });
 

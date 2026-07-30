@@ -73,23 +73,23 @@ router.post('/purchase', async (req, res) => {
   try {
     const userId = req.user.id;
     const validation = validateElectricityRequest(req.body);
-    if (!validation.isValid) return res.status(400).json({ success: false, errors: validation.errors });
+    if (!validation.isValid) return res.status(400).json({ success: false, error: 'VALIDATION_ERROR', errors: validation.errors });
     const { customer_id, service_id, variation_id, amount, twoFactorCode, passwordpin } = validation.sanitized;
     const currency = 'NGNB', ngnbToUsdRate = 1 / 1554.42;
 
     const orderId = generateUniqueOrderId(), requestId = generateUniqueRequestId(userId);
-    if (await checkPending(userId, orderId, requestId)) return res.status(409).json({ success: false, message: 'Pending transaction detected' });
+    if (await checkPending(userId, orderId, requestId)) return res.status(409).json({ success: false, error: 'PENDING_TRANSACTION_EXISTS', message: 'Pending transaction detected' });
 
     const user = await User.findById(userId);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-    if (!validateTwoFactorAuth(user, twoFactorCode)) return res.status(403).json({ success: false, message: 'Invalid 2FA' });
-    if (!await comparePasswordPin(passwordpin, user.passwordpin)) return res.status(401).json({ success: false, message: 'Invalid PIN' });
+    if (!user) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND', message: 'User not found' });
+    if (!validateTwoFactorAuth(user, twoFactorCode)) return res.status(403).json({ success: false, error: 'INVALID_2FA_CODE', message: 'Invalid 2FA' });
+    if (!await comparePasswordPin(passwordpin, user.passwordpin)) return res.status(401).json({ success: false, error: 'INVALID_PASSWORDPIN', message: 'Invalid PIN' });
 
     const kycValidation = await validateUtilityTransaction(userId, amount);
-    if (!kycValidation.allowed) return res.status(403).json({ success: false, message: kycValidation.message, kycDetails: kycValidation.data });
+    if (!kycValidation.allowed) return res.status(403).json({ success: false, error: 'KYC_LIMIT_EXCEEDED', message: kycValidation.message, kycDetails: kycValidation.data });
 
     const balanceValidation = await validateUserBalance(userId, currency, amount);
-    if (!balanceValidation.success) return res.status(400).json({ success: false, message: balanceValidation.message });
+    if (!balanceValidation.success) return res.status(400).json({ success: false, error: 'INSUFFICIENT_BALANCE', message: balanceValidation.message });
 
     const txData = { orderId, status: 'initiated-api', productName: 'Electricity', billType: 'electricity', amount, paymentCurrency: currency, cryptoPrice: ngnbToUsdRate, requestId, userId, metaData: { customer_id, service_id, variation_id } };
     pendingTransaction = await BillTransaction.create(txData); transactionCreated = true;
@@ -106,7 +106,7 @@ router.post('/purchase', async (req, res) => {
   } catch (error) {
     if (balanceActionTaken && balanceActionType === 'reserved') await releaseReservedBalance(req.user.id, 'NGNB', req.body.amount || 0);
     if (transactionCreated && pendingTransaction) await BillTransaction.findByIdAndUpdate(pendingTransaction._id, { status: 'failed' });
-    return res.status(500).json({ success: false, message: error.message });
+    return res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: error.message });
   }
 });
 

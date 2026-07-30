@@ -115,7 +115,7 @@ router.post('/purchase', async (req, res) => {
   try {
     const userId = req.user.id;
     const validation = validateCableTVRequest(req.body);
-    if (!validation.isValid) return res.status(400).json({ success: false, message: 'Validation failed', errors: validation.errors });
+    if (!validation.isValid) return res.status(400).json({ success: false, error: 'VALIDATION_ERROR', message: 'Validation failed', errors: validation.errors });
     const { customer_id, service_id, variation_id, subscription_type, amount, twoFactorCode, passwordpin } = validation.sanitized;
     const currency = 'NGNB';
 
@@ -124,7 +124,7 @@ router.post('/purchase', async (req, res) => {
     if (await checkForPendingTransactions(userId, uniqueOrderId, uniqueRequestId)) return res.status(409).json({ success: false, error: 'DUPLICATE_OR_PENDING_TRANSACTION', message: 'Pending transaction exists' });
 
     const user = await User.findById(userId);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    if (!user) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND', message: 'User not found' });
     if (!validateTwoFactorAuth(user, twoFactorCode)) return res.status(403).json({ success: false, error: 'INVALID_2FA_CODE', message: 'Invalid 2FA code' });
     if (!await comparePasswordPin(passwordpin, user.passwordpin)) return res.status(401).json({ success: false, error: 'INVALID_PASSWORDPIN', message: 'Invalid password PIN' });
 

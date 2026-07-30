@@ -257,14 +257,14 @@ router.post('/purchase', async (req, res) => {
 
     const validation = validateAirtimeRequest(requestBody);
     if (!validation.isValid) {
-      return res.status(400).json({ success: false, message: 'Validation failed', errors: validation.errors });
+      return res.status(400).json({ success: false, error: 'VALIDATION_ERROR', message: 'Validation failed', errors: validation.errors });
     }
 
     const { phone, service_id, amount, twoFactorCode, passwordpin } = validation.sanitized;
     const currency = 'NGNB';
 
     const user = await User.findById(userId);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    if (!user) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND', message: 'User not found' });
 
     if (!user.twoFASecret || !user.is2FAEnabled) return res.status(400).json({ success: false, message: 'Two-factor authentication is not set up or not enabled. Please enable 2FA first.' });
 
