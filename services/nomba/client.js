@@ -262,7 +262,7 @@ class NombaClient {
   }
 }
 
-// Singleton, matches this repo's third-party client convention (e.g. payBetaAuth)
+// Singleton, matches this repo's third-party client convention (e.g. auth/billauth.js)
 const nombaClient = new NombaClient();
 
 module.exports = {
