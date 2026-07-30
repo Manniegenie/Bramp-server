@@ -28,20 +28,24 @@ const logger = require('../utils/logger');
 const router = express.Router();
 
 /**
- * Verify eBills webhook signature using canonical JSON serialization
+ * Verify eBills webhook signature.
+ *
+ * Per eBills' docs, the signature is HMAC-SHA256 of the RAW request body,
+ * signed with the PIN on *your* eBills reseller account (EBILLS_USER_PIN) —
+ * a single static credential, not anything per-customer. The payload must be
+ * hashed exactly as received; re-parsing and re-serializing it (as the
+ * previous version of this function did) is not guaranteed to reproduce the
+ * same bytes eBills signed, so signatures would fail even with the right PIN.
  */
-function verifyWebhookSignature(payload, signature, userPin) {
+function verifyWebhookSignature(rawPayload, signature, userPin) {
   try {
-    const parsedPayload = JSON.parse(payload);
-    const canonicalPayload = JSON.stringify(parsedPayload, null, 0);
-    
     const expectedSignature = crypto
       .createHmac('sha256', userPin)
-      .update(canonicalPayload, 'utf8')
+      .update(rawPayload, 'utf8')
       .digest('hex');
-    
+
     const cleanSignature = signature.replace(/^sha256=/, '');
-    
+
     return crypto.timingSafeEqual(
       Buffer.from(expectedSignature, 'hex'),
       Buffer.from(cleanSignature, 'hex')
@@ -86,7 +90,31 @@ router.post('/ebills', express.raw({ type: 'application/json' }), async (req, re
         message: 'X-Signature header required'
       });
     }
-    
+
+    // Verify signature against the raw payload using the reseller account's PIN
+    // (a single static credential — the signature isn't tied to any one
+    // customer, so this doesn't need a transaction or user lookup).
+    const ebillsUserPin = process.env.EBILLS_USER_PIN;
+    if (!ebillsUserPin) {
+      logger.error('EBILLS_USER_PIN is not configured — cannot verify webhook signatures');
+      return res.status(500).json({
+        success: false,
+        error: 'server_misconfigured',
+        message: 'Webhook signature verification is not configured'
+      });
+    }
+
+    if (!verifyWebhookSignature(rawPayload, signature, ebillsUserPin)) {
+      logger.error('Invalid eBills webhook signature');
+      return res.status(401).json({
+        success: false,
+        error: 'invalid_signature',
+        message: 'Invalid webhook signature'
+      });
+    }
+
+    logger.info('✅ eBills webhook signature verified successfully');
+
     // Parse JSON payload
     try {
       webhookData = JSON.parse(rawPayload);
@@ -143,55 +171,6 @@ router.post('/ebills', express.raw({ type: 'application/json' }), async (req, re
         note: 'This may be a webhook for a transaction not processed by this system'
       });
     }
-    
-    // Get user PIN for signature verification
-    const User = require('../models/user');
-    const user = await User.findById(transaction.userId).select('pin userPin ebillsPin');
-    
-    if (!user) {
-      logger.error('User not found for transaction:', transaction.userId);
-      addProcessingError(transaction, 'User not found for signature verification', 'webhook_processing');
-      await transaction.save();
-      
-      return res.status(400).json({
-        success: false,
-        error: 'user_not_found',
-        message: 'Transaction user not found'
-      });
-    }
-    
-    const userPin = user.ebillsPin || user.pin || user.userPin;
-    
-    if (!userPin) {
-      logger.error('User PIN not found for signature verification:', user._id);
-      addProcessingError(transaction, 'User PIN not found for signature verification', 'webhook_processing');
-      await transaction.save();
-      
-      return res.status(400).json({
-        success: false,
-        error: 'missing_pin',
-        message: 'User PIN required for signature verification'
-      });
-    }
-    
-    // Verify webhook signature
-    if (!verifyWebhookSignature(rawPayload, signature, userPin)) {
-      logger.error('Invalid eBills webhook signature:', {
-        order_id: webhookData.order_id,
-        userId: user._id
-      });
-      
-      addProcessingError(transaction, 'Invalid webhook signature', 'webhook_processing');
-      await transaction.save();
-      
-      return res.status(401).json({
-        success: false,
-        error: 'invalid_signature',
-        message: 'Invalid webhook signature'
-      });
-    }
-    
-    logger.info('✅ eBills webhook signature verified successfully');
     
     // Check if webhook was already processed
     if (transaction.webhookProcessedAt) {
