@@ -554,7 +554,6 @@ const AccountnameRoutes = require("./routes/Accountname");
 const ChatbottransactionHistoryRoutes = require("./routes/ChatbottransactionHistory");
 const SmileIDRedirectRoutes = require("./routes/SmileIDRedirect");
 const PricesRoutes = require("./routes/prices");
-const BetaMarketRoutes = require("./routes/betamarket");
 const ScanRoutes       = require("./routes/scan");
 const VoiceRoutes = require("./routes/voice");
 const adminsigninRoutes = require("./adminRoutes/adminsign-in");
@@ -724,7 +723,6 @@ app.use("/buy", authenticateToken, BuyRoutes);
 app.use("/chat-history", authenticateToken, ChatbottransactionHistoryRoutes);
 app.use("/smileid-redirect", SmileIDRedirectRoutes);
 app.use("/chatbot-kyc", authenticateToken, chatbotKYCRoutes);
-app.use("/betamarket", authenticateToken, BetaMarketRoutes);
 app.use("/scan",       authenticateToken, ScanRoutes);
 app.use("/voice", authenticateToken, VoiceRoutes);
 app.use("/lisk", authenticateToken, liskWalletRoutes);
@@ -973,14 +971,6 @@ const startServer = async () => {
         console.log("🔕 Nomba jobs disabled on this instance (ENABLE_NOMBA_JOBS=false)");
       }
 
-      // Start BetaMarket prediction settlement + position crons
-      try {
-        const betamarketCron = require('./services/betamarketCron');
-        betamarketCron.start();
-        console.log("📊 BetaMarket cron started");
-      } catch (cronErr) {
-        console.error("⚠️  Error starting BetaMarket cron:", cronErr.message);
-      }
 
       // Start Hyperliquid balance guard (hourly)
       try {
