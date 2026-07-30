@@ -333,8 +333,8 @@ router.get('/summary', async (req, res) => {
       maticPendingBalance: user.maticPendingBalance || 0,
       trxBalance: user.trxBalance || 0,
       trxPendingBalance: user.trxPendingBalance || 0,
-      ngnzBalance: user.ngnzBalance || 0,
-      ngnzPendingBalance: user.ngnzPendingBalance || 0
+      ngnbBalance: user.ngnbBalance || 0,
+      ngnbPendingBalance: user.ngnbPendingBalance || 0
     };
 
     // Calculate USD balances using the same logic as the balance route

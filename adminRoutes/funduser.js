@@ -13,8 +13,8 @@ const currencyFieldMap = {
   BNB: 'bnbBalance',      // Added
   MATIC: 'maticBalance',  // Added
   TRX: 'trxBalance',
-  NGNB: 'ngnzBalance',
-  NGNZ: 'ngnzBalance'     // Alias for NGNB
+  NGNB: 'ngnbBalance',
+  NGNZ: 'ngnbBalance'     // NGNZ was this balance's old name — alias kept for callers still using it
 };
 
 /**
@@ -41,16 +41,19 @@ router.post('/fund-user', async (req, res) => {
       });
     }
 
-    const fieldToUpdate = currencyFieldMap[currency.toUpperCase()];
-    if (!fieldToUpdate) {
-      return res.status(400).json({ 
-        success: false, 
-        message: `Unsupported currency: ${currency}. Supported: BTC, ETH, SOL, USDT, USDC, BNB, MATIC, TRX, NGNB/NGNZ` 
+    // Unlike ZeusODX (a multi-asset exchange), Bramp only supports funding NGNB —
+    // crypto balances are never manually admin-funded here.
+    const currencyU = currency.toUpperCase();
+    if (currencyU !== 'NGNB' && currencyU !== 'NGNZ') {
+      return res.status(400).json({
+        success: false,
+        message: `Unsupported currency: ${currency}. Only NGNB can be funded.`
       });
     }
+    const fieldToUpdate = 'ngnbBalance';
 
     // Build update object with $inc for atomic increment
-    const update = { 
+    const update = {
       $inc: {
         [fieldToUpdate]: numericAmount
       }
@@ -61,7 +64,7 @@ router.post('/fund-user', async (req, res) => {
       { email },
       update,
       { new: true, runValidators: true }
-    ).select('email btcBalance ethBalance solBalance usdtBalance usdcBalance bnbBalance maticBalance trxBalance ngnzBalance');
+    ).select('email ngnbBalance');
 
     if (!updatedUser) {
       return res.status(404).json({ 
@@ -80,25 +83,17 @@ router.post('/fund-user', async (req, res) => {
       message: `Successfully funded ${numericAmount} ${currency} to ${email}`,
       data: {
         email: updatedUser.email,
-        currency: currency.toUpperCase(),
+        currency: 'NGNB',
         amountFunded: numericAmount,
         newBalance,
         balances: {
-          BTC: updatedUser.btcBalance,
-          ETH: updatedUser.ethBalance,
-          SOL: updatedUser.solBalance,
-          USDT: updatedUser.usdtBalance,
-          USDC: updatedUser.usdcBalance,
-          BNB: updatedUser.bnbBalance,
-          MATIC: updatedUser.maticBalance,
-          TRX: updatedUser.trxBalance,
-          NGNZ: updatedUser.ngnzBalance
+          NGNB: updatedUser.ngnbBalance
         }
       }
     });
   } catch (err) {
     console.error('❌ Error in /fund-user:', err);
-    return res.status(500).json({ 
+    return res.status(500).json({
       success: false, 
       message: 'Internal server error',
       error: err.message 
@@ -149,7 +144,7 @@ router.post('/deduct-user', async (req, res) => {
       { email },
       update,
       { new: true, runValidators: true }
-    ).select('email btcBalance ethBalance solBalance usdtBalance usdcBalance bnbBalance maticBalance trxBalance ngnzBalance');
+    ).select('email btcBalance ethBalance solBalance usdtBalance usdcBalance bnbBalance maticBalance trxBalance ngnbBalance');
 
     if (!updatedUser) {
       return res.status(404).json({ 
@@ -179,7 +174,7 @@ router.post('/deduct-user', async (req, res) => {
           BNB: updatedUser.bnbBalance,
           MATIC: updatedUser.maticBalance,
           TRX: updatedUser.trxBalance,
-          NGNZ: updatedUser.ngnzBalance
+          NGNB: updatedUser.ngnbBalance
         }
       }
     });

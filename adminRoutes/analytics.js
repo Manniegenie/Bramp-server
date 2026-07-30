@@ -1110,7 +1110,7 @@ router.get('/platform-stats', async (req, res) => {
           totalBnb: { $sum: { $ifNull: ['$bnbBalance', 0] } },
           totalMatic: { $sum: { $ifNull: ['$maticBalance', 0] } },
           totalTrx: { $sum: { $ifNull: ['$trxBalance', 0] } },
-          totalNgnz: { $sum: { $ifNull: ['$ngnzBalance', 0] } },
+          totalNgnz: { $sum: { $ifNull: ['$ngnbBalance', 0] } },
           // Pending balances
           totalBtcPending: { $sum: { $ifNull: ['$btcPendingBalance', 0] } },
           totalEthPending: { $sum: { $ifNull: ['$ethPendingBalance', 0] } },
@@ -1120,7 +1120,7 @@ router.get('/platform-stats', async (req, res) => {
           totalBnbPending: { $sum: { $ifNull: ['$bnbPendingBalance', 0] } },
           totalMaticPending: { $sum: { $ifNull: ['$maticPendingBalance', 0] } },
           totalTrxPending: { $sum: { $ifNull: ['$trxPendingBalance', 0] } },
-          totalNgnzPending: { $sum: { $ifNull: ['$ngnzPendingBalance', 0] } },
+          totalNgnzPending: { $sum: { $ifNull: ['$ngnbPendingBalance', 0] } },
           userCount: { $sum: 1 }
         }
       }

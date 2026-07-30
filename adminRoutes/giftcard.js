@@ -810,14 +810,14 @@ router.post('/submissions/:id/approve', async (req, res) => {
     submission.transactionId = transaction._id;
     await submission.save();
 
-    // Fund user's NGNZ balance ATOMICALLY using $inc (like funduser.js)
+    // Fund user's NGNB balance ATOMICALLY using $inc (like funduser.js)
     const user = await User.findByIdAndUpdate(
       submission.userId._id,
       {
-        $inc: { ngnzBalance: paymentAmount }
+        $inc: { ngnbBalance: paymentAmount }
       },
       { new: true, runValidators: true }
-    ).select('email ngnzBalance');
+    ).select('email ngnbBalance');
 
     if (!user) {
       // This should never happen since we validated earlier, but handle it
@@ -828,7 +828,7 @@ router.post('/submissions/:id/approve', async (req, res) => {
       submissionId: id,
       userId: submission.userId._id,
       paymentAmount,
-      ngnzBalance: user.ngnzBalance,
+      ngnbBalance: user.ngnbBalance,
       transactionId: transaction._id
     });
 
@@ -915,7 +915,7 @@ router.post('/submissions/:id/approve', async (req, res) => {
         status: submission.status,
         paymentAmount,
         transactionId: transaction._id,
-        userBalance: user.ngnzBalance
+        userBalance: user.ngnbBalance
       }
     });
 

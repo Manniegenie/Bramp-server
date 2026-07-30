@@ -138,16 +138,16 @@ async function executeNGNZCryptoPurchase(userId, purchaseData, correlationId, sy
     const purchaseReference = `NGNZ_BUY_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
     // Get current NGNZ balance for audit trail
-    const userBefore = await User.findById(userId).select('ngnzBalance').lean();
+    const userBefore = await User.findById(userId).select('ngnbBalance').lean();
 
     // 1. Deduct NGNZ balance atomically
     const updatedUser = await User.findOneAndUpdate(
       {
         _id: userId,
-        ngnzBalance: { $gte: buyAmount } // Ensure sufficient balance
+        ngnbBalance: { $gte: buyAmount } // Ensure sufficient balance
       },
       {
-        $inc: { ngnzBalance: -buyAmount },
+        $inc: { ngnbBalance: -buyAmount },
         $set: { lastBalanceUpdate: new Date() }
       },
       {
@@ -206,8 +206,8 @@ async function executeNGNZCryptoPurchase(userId, purchaseData, correlationId, sy
       network,
       tokenAmount,
       walletAddress,
-      balanceBefore: userBefore.ngnzBalance,
-      balanceAfter: updatedUser.ngnzBalance,
+      balanceBefore: userBefore.ngnbBalance,
+      balanceAfter: updatedUser.ngnbBalance,
       transactionId: purchaseTransaction._id
     });
 
@@ -239,12 +239,12 @@ async function executeNGNZCryptoPurchase(userId, purchaseData, correlationId, sy
  * Validate user has sufficient NGNZ balance
  */
 async function validateUserNGNZBalance(userId, amount) {
-  const user = await User.findById(userId).select('ngnzBalance').lean();
+  const user = await User.findById(userId).select('ngnbBalance').lean();
   if (!user) {
     return { success: false, message: 'User not found' };
   }
 
-  const availableBalance = user.ngnzBalance || 0;
+  const availableBalance = user.ngnbBalance || 0;
   if (availableBalance < amount) {
     return {
       success: false,
