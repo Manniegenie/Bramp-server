@@ -15,8 +15,8 @@ router.get('/tier', async (req, res) => {
       });
     }
 
-    // Fetch user data (including emailVerified field)
-    const user = await User.findById(userId).select('kycLevel kyc email emailVerified');
+    // Fetch user data (including phoneVerified field)
+    const user = await User.findById(userId).select('kycLevel kyc email phonenumber phoneVerified');
     
     if (!user) {
       return res.status(404).json({
@@ -49,8 +49,8 @@ router.get('/tier', async (req, res) => {
       tierLevel = "2";
     }
 
-    // Email verification status from the emailVerified field
-    const emailVerification = user.emailVerified ? 'verified' : 'unverified';
+    // Phone verification status from the phoneVerified field
+    const phoneVerification = user.phoneVerified ? 'verified' : 'unverified';
 
     // Document upload status (Level 2 KYC)
     const documentUpload = mapKycStatus(user.kyc?.level2?.status || 'not_submitted');
@@ -61,7 +61,7 @@ router.get('/tier', async (req, res) => {
     // Response object
     const tierDetails = {
       tierLevel,
-      emailVerification,
+      phoneVerification,
       documentUpload,
       addressVerification
     };

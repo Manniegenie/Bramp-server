@@ -15,7 +15,7 @@ router.get('/profile', async (req, res) => {
 
     // Fetch user from database with only required fields
     const user = await User.findById(userId).select(
-      'username firstname lastname email phonenumber avatarUrl avatarLastUpdated assistantName emailVerified'
+      'username firstname lastname email phonenumber avatarUrl avatarLastUpdated assistantName emailVerified phoneVerified'
     );
 
     if (!user) {
@@ -39,6 +39,7 @@ router.get('/profile', async (req, res) => {
         email: user.email,
         emailVerified: !!user.emailVerified,
         phoneNumber: user.phonenumber || null,
+        phoneVerified: !!user.phoneVerified,
         assistantName: user.assistantName || null,
         avatar: {
           url: user.avatarUrl || null,

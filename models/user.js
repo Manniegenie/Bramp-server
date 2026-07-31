@@ -9,6 +9,7 @@ const userSchema = new mongoose.Schema({
   isUsernameCustom: { type: Boolean, default: false },
   email: { type: String, required: true, unique: true },
   emailVerified: { type: Boolean, default: false },
+  phoneVerified: { type: Boolean, default: false },
   password: { type: String },
   passwordpin: { type: String },
   transactionpin: { type: String },
