@@ -1,257 +1,217 @@
+// models/kyc.js
 const mongoose = require('mongoose');
+const { Schema } = mongoose;
 
-const KYCSchema = new mongoose.Schema({
-  // User association
-  userId: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'User', 
-    required: true, 
-    index: true 
+const STATUS = ['APPROVED', 'REJECTED', 'PROVISIONAL', 'PENDING', 'CANCELLED'];
+
+const KYCSchema = new Schema(
+  {
+    userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+
+    provider: { type: String, default: 'youverify', index: true },
+    environment: { type: String, enum: ['sandbox', 'production', 'development', 'unknown'], default: 'unknown' },
+
+    partnerJobId: { type: String, index: true },
+    jobType: { type: Number, default: 1 }, // 1 = Biometric KYC
+
+    youverifyId: { type: String },
+    smileJobId: { type: String }, // Kept for backward compatibility
+
+    jobComplete: { type: Boolean },
+    jobSuccess: { type: Boolean },
+
+    status: { type: String, enum: STATUS, default: 'PROVISIONAL', index: true },
+    resultCode: { type: String, index: true },
+    resultText: { type: String },
+
+    // Youverify-specific fields
+    passed: { type: Boolean },
+    allValidationPassed: { type: Boolean },
+    method: { type: String }, // e.g., 'liveness', 'documentCapture', 'vForm'
+    components: [{ type: String }], // e.g., ['liveness', 'id_capture']
+    businessId: { type: String },
+    requestedById: { type: String },
+    parentId: { type: String },
+
+    actions: { type: Schema.Types.Mixed },
+
+    // Document Information (populated when approved)
+    country: { type: String, default: 'NG' },
+    idType: { type: String }, // Youverify type (passport, nin, drivers-license, etc.)
+    frontendIdType: { type: String }, // Our frontend type (bvn, national_id, etc.)
+    idNumber: { type: String, index: true, sparse: true },
+
+    // Personal Information from Document
+    fullName: { type: String },
+    firstName: { type: String }, // Parsed from fullName if available
+    lastName: { type: String },  // Parsed from fullName if available
+    middleName: { type: String },
+    dateOfBirth: { type: String }, // YYYY-MM-DD format
+    gender: { type: String, enum: ['Male', 'Female', 'M', 'F', null], default: null },
+    documentExpiryDate: { type: String }, // Document expiration date
+    documentIssueDate: { type: String },
+    address: { type: String },
+
+    // Verification Metadata
+    confidenceValue: { type: String }, // Confidence score (if available)
+    verificationDate: { type: Date, default: Date.now },
+    lastUpdated: { type: Date, default: Date.now },
+
+    // Image and Document Links
+    imageLinks: {
+      type: {
+        selfie_image: { type: String },
+        liveness_images: [{ type: String }],
+        document_image: { type: String },
+        cropped_image: { type: String },
+        // Youverify-specific image fields
+        faceImage: { type: String },
+        fullDocumentFrontImage: { type: String },
+        fullDocumentBackImage: { type: String },
+        signatureImage: { type: String }
+      },
+      default: null
+    },
+    history: { type: [Schema.Types.Mixed] },
+
+    // Security and Validation
+    signature: { type: String },
+    signatureValid: { type: Boolean, default: false },
+    providerTimestamp: { type: Date },
+
+    // Raw payload from provider (for debugging)
+    payload: { type: Schema.Types.Mixed },
+
+    // Reasons for non-approved statuses
+    provisionalReason: { type: String },
+    errorReason: { type: String },
+
+    // Cancellation metadata (added to preserve audit trail)
+    cancelledAt: { type: Date, default: null },
+    cancelledReason: { type: String, default: null },
+
+    // Additional metadata for approved documents
+    documentMetadata: {
+      type: {
+        issuingAuthority: { type: String },
+        placeOfBirth: { type: String },
+        documentSeries: { type: String },
+        documentVersion: { type: String },
+        faceMatch: { type: Boolean },
+        livenessCheck: { type: Boolean },
+        documentAuthenticity: { type: Boolean }
+      },
+      default: null
+    }
   },
+  { timestamps: true }
+);
 
-  // Provider information
-  provider: { 
-    type: String, 
-    required: true, 
-    enum: ['smile-id', 'manual', 'other'],
-    default: 'smile-id'
-  },
-  environment: { 
-    type: String, 
-    enum: ['production', 'sandbox', 'test', 'unknown'],
-    default: 'unknown'
-  },
+// Indexes for performance and uniqueness
+KYCSchema.index(
+  { youverifyId: 1 },
+  { unique: true, sparse: true, partialFilterExpression: { youverifyId: { $exists: true, $type: 'string' } } }
+);
+KYCSchema.index(
+  { smileJobId: 1 },
+  { unique: true, sparse: true, partialFilterExpression: { smileJobId: { $exists: true, $type: 'string' } } }
+);
 
-  // Job identification
-  partnerJobId: { type: String, index: true },
-  jobType: { 
-    type: String,
-    enum: ['biometric_kyc', 'enhanced_kyc', 'document_verification', 'id_verification', 'other']
-  },
-  smileJobId: { 
-    type: String, 
-    unique: true, 
-    sparse: true
-  },
+KYCSchema.index(
+  { userId: 1, partnerJobId: 1 },
+  { unique: true, partialFilterExpression: { partnerJobId: { $type: 'string' } } }
+);
 
-  // Job status
-  jobComplete: { type: Boolean },
-  jobSuccess: { type: Boolean },
-  status: { 
-    type: String, 
-    enum: ['PENDING', 'APPROVED', 'REJECTED', 'PROVISIONAL', 'EXPIRED'],
-    required: true,
-    index: true
-  },
-
-  // Result details
-  resultCode: { type: String },
-  resultText: { type: String },
-  actions: { type: mongoose.Schema.Types.Mixed },
-
-  // Personal information extracted
-  country: { type: String, uppercase: true },
-  idType: { 
-    type: String,
-    enum: ['PASSPORT', 'NATIONAL_ID', 'DRIVERS_LICENSE', 'VOTER_ID', 'BVN', 'OTHER']
-  },
-  idNumber: { type: String },
-  fullName: { type: String },
-  dob: { type: Date },
-  gender: { type: String, enum: ['M', 'F', 'OTHER'] },
-  
-  // Document validity
-  expiresAt: { type: Date },
-
-  // Media and verification artifacts
-  imageLinks: { type: mongoose.Schema.Types.Mixed },
-  history: { type: mongoose.Schema.Types.Mixed },
-
-  // Security and audit
-  signature: { type: String },
-  signatureValid: { type: Boolean, default: false },
-  providerTimestamp: { type: Date },
-
-  // Raw data storage
-  payload: { type: mongoose.Schema.Types.Mixed },
-
-  // Error handling
-  errorReason: { type: String },
-  provisionalReason: { type: String },
-
-  // Internal tracking
-  attempts: { type: Number, default: 1 },
-  lastAttemptAt: { type: Date, default: Date.now },
-  
-  // Admin fields
-  reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-  reviewedAt: { type: Date },
-  reviewNotes: { type: String },
-  
-  // Compliance flags
-  isActive: { type: Boolean, default: true },
-  expiryNotificationSent: { type: Boolean, default: false },
-  
-  // Additional verification scores (if provided by SmileID)
-  confidenceScore: { type: Number, min: 0, max: 100 },
-  riskScore: { type: Number, min: 0, max: 100 },
-  
-}, { 
-  timestamps: true,
-  toJSON: { virtuals: true },
-  toObject: { virtuals: true }
-});
-
-// Indexes for performance (smileJobId already unique+sparse in schema)
-KYCSchema.index({ userId: 1, status: 1 });
 KYCSchema.index({ userId: 1, createdAt: -1 });
-KYCSchema.index({ partnerJobId: 1, userId: 1 }, { unique: true, sparse: true });
+KYCSchema.index({ userId: 1, status: 1 });
+KYCSchema.index({ idNumber: 1, status: 1 }, { sparse: true });
+
+// Admin route performance indexes
 KYCSchema.index({ status: 1, createdAt: -1 });
-KYCSchema.index({ provider: 1, environment: 1 });
-KYCSchema.index({ expiresAt: 1 }, { sparse: true });
+KYCSchema.index({ frontendIdType: 1, createdAt: -1 });
+KYCSchema.index({ status: 1, frontendIdType: 1, createdAt: -1 });
 
-// Virtual for checking if document is expired
-KYCSchema.virtual('isDocumentExpired').get(function() {
-  return this.expiresAt && this.expiresAt < new Date();
-});
+// Instance Methods
+KYCSchema.methods.isApproved = function() {
+  return this.status === 'APPROVED';
+};
 
-// Virtual for checking if KYC is valid
-KYCSchema.virtual('isValid').get(function() {
-  return this.status === 'APPROVED' && 
-         this.isActive && 
-         (!this.expiresAt || this.expiresAt > new Date());
-});
+KYCSchema.methods.isRejected = function() {
+  return this.status === 'REJECTED';
+};
 
-// Virtual for age calculation
-KYCSchema.virtual('age').get(function() {
-  if (!this.dob) return null;
-  const today = new Date();
-  const birth = new Date(this.dob);
-  let age = today.getFullYear() - birth.getFullYear();
-  const monthDiff = today.getMonth() - birth.getMonth();
-  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birth.getDate())) {
-    age--;
+KYCSchema.methods.isProvisional = function() {
+  return this.status === 'PROVISIONAL';
+};
+
+KYCSchema.methods.getDocumentInfo = function() {
+  if (!this.isApproved()) {
+    return null;
   }
-  return age;
-});
 
-// Pre-save middleware
-KYCSchema.pre('save', function(next) {
-  // Update attempt tracking
-  if (this.isModified('status') && !this.isNew) {
-    this.attempts += 1;
-    this.lastAttemptAt = new Date();
-  }
-  
-  // Auto-set review timestamp if status changed to APPROVED/REJECTED
-  if (this.isModified('status') && 
-      (this.status === 'APPROVED' || this.status === 'REJECTED') && 
-      !this.reviewedAt) {
-    this.reviewedAt = new Date();
-  }
-  
-  next();
-});
-
-// Instance methods
-KYCSchema.methods.approve = function(reviewerId, notes) {
-  this.status = 'APPROVED';
-  this.reviewedBy = reviewerId;
-  this.reviewedAt = new Date();
-  if (notes) this.reviewNotes = notes;
-  return this.save();
+  return {
+    idType: this.frontendIdType || this.idType,
+    idNumber: this.idNumber,
+    fullName: this.fullName,
+    firstName: this.firstName,
+    lastName: this.lastName,
+    dateOfBirth: this.dateOfBirth,
+    gender: this.gender,
+    expiryDate: this.documentExpiryDate,
+    verificationDate: this.verificationDate,
+    confidenceScore: this.confidenceValue,
+    country: this.country
+  };
 };
 
-KYCSchema.methods.reject = function(reviewerId, reason, notes) {
-  this.status = 'REJECTED';
-  this.errorReason = reason;
-  this.reviewedBy = reviewerId;
-  this.reviewedAt = new Date();
-  if (notes) this.reviewNotes = notes;
-  return this.save();
-};
-
-KYCSchema.methods.markProvisional = function(reason) {
-  this.status = 'PROVISIONAL';
-  this.provisionalReason = reason;
-  return this.save();
-};
-
-KYCSchema.methods.deactivate = function() {
-  this.isActive = false;
-  return this.save();
-};
-
-// Static methods
-KYCSchema.statics.findActiveByUserId = function(userId) {
-  return this.findOne({ 
-    userId, 
-    isActive: true, 
-    status: 'APPROVED',
-    $or: [
-      { expiresAt: { $exists: false } },
-      { expiresAt: null },
-      { expiresAt: { $gt: new Date() } }
-    ]
-  }).sort({ createdAt: -1 });
+// Static Methods
+KYCSchema.statics.findApprovedByUserId = function(userId) {
+  return this.find({ userId, status: 'APPROVED' }).sort({ createdAt: -1 });
 };
 
 KYCSchema.statics.findLatestByUserId = function(userId) {
-  return this.findOne({ userId })
-    .sort({ createdAt: -1 });
+  return this.findOne({ userId }).sort({ createdAt: -1 });
 };
 
-KYCSchema.statics.getKYCStats = function() {
-  return this.aggregate([
-    {
-      $group: {
-        _id: '$status',
-        count: { $sum: 1 },
-        avgConfidenceScore: { $avg: '$confidenceScore' }
-      }
+KYCSchema.statics.countByStatus = function(status) {
+  return this.countDocuments({ status });
+};
+
+// Middleware
+KYCSchema.pre('save', function(next) {
+  this.lastUpdated = new Date();
+
+  // Parse fullName into firstName and lastName if not already set
+  if (this.fullName && (!this.firstName || !this.lastName)) {
+    const nameParts = this.fullName.trim().split(' ');
+    if (nameParts.length >= 2) {
+      this.firstName = nameParts[0];
+      this.lastName = nameParts.slice(1).join(' ');
+    } else if (nameParts.length === 1) {
+      this.firstName = nameParts[0];
     }
-  ]);
-};
+  }
 
-KYCSchema.statics.findExpiringDocuments = function(daysFromNow = 30) {
-  const futureDate = new Date();
-  futureDate.setDate(futureDate.getDate() + daysFromNow);
-  
-  return this.find({
-    status: 'APPROVED',
-    isActive: true,
-    expiresAt: { 
-      $exists: true, 
-      $lte: futureDate,
-      $gt: new Date()
-    },
-    expiryNotificationSent: false
-  });
-};
+  next();
+});
 
-// Query helpers
-KYCSchema.query.byStatus = function(status) {
-  return this.where({ status });
-};
+// Virtual for full document summary
+KYCSchema.virtual('documentSummary').get(function() {
+  return {
+    id: this._id,
+    userId: this.userId,
+    status: this.status,
+    idType: this.frontendIdType || this.idType,
+    idNumber: this.idNumber ? this.idNumber.slice(0, 4) + '****' : null,
+    fullName: this.fullName,
+    verificationDate: this.verificationDate,
+    resultCode: this.resultCode,
+    confidenceValue: this.confidenceValue
+  };
+});
 
-KYCSchema.query.active = function() {
-  return this.where({ isActive: true });
-};
+// Ensure virtual fields are serialized
+KYCSchema.set('toJSON', { virtuals: true });
+KYCSchema.set('toObject', { virtuals: true });
 
-KYCSchema.query.byProvider = function(provider) {
-  return this.where({ provider });
-};
-
-KYCSchema.query.approved = function() {
-  return this.where({ 
-    status: 'APPROVED',
-    isActive: true,
-    $or: [
-      { expiresAt: { $exists: false } },
-      { expiresAt: null },
-      { expiresAt: { $gt: new Date() } }
-    ]
-  });
-};
-
-module.exports = mongoose.model('KYC', KYCSchema);
+module.exports = mongoose.models.KYC || mongoose.model('KYC', KYCSchema);
