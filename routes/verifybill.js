@@ -16,7 +16,7 @@ const CABLE_TV_SERVICES = ['dstv', 'gotv', 'startimes', 'showmax'];
 const BETTING_SERVICES = [
   '1xBet', 'BangBet', 'Bet9ja', 'BetKing', 'BetLand', 'BetLion',
   'BetWay', 'CloudBet', 'LiveScoreBet', 'MerryBet', 'NaijaBet',
-  'NairaBet', 'SupaBet'
+  'NairaBet', 'SportyBet', 'SupaBet'
 ];
 
 const VALID_METER_TYPES = ['prepaid', 'postpaid'];

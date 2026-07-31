@@ -571,6 +571,7 @@ const Admin2FARoutes = require("./adminRoutes/Admin2FA");
 const adminBannerRoutes = require("./adminRoutes/banners");
 const blockuserRoutes = require("./adminRoutes/blockuser");
 const Pushnotification = require("./adminRoutes/pushnotification");
+const pushTokenRoutes = require("./routes/pushtoken");
 const AdminKYCRoutes = require("./adminRoutes/kyc");
 const KYCBypassRoutes = require("./adminRoutes/kyc-bypass");
 const adminRequire2FA = require("./middleware/adminRequire2FA");
@@ -661,22 +662,22 @@ app.use("/onramp", authenticateAdminToken, requireAdmin, markupRouter);
 app.use("/offramp", authenticateAdminToken, requireAdmin, markdownRouter);
 app.use("/obiex-rate", authenticateAdminToken, requireAdmin, ObiexRateRoutes);
 app.use("/updateuseraddress", authenticateAdminToken, requireAdmin, adminRequire2FA, updateuseraddressRoutes);
-app.use("/bramp-wallets", generatebrampwalletsRoutes);
+app.use("/bramp-wallets", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, generatebrampwalletsRoutes);
 app.use("/migration", authenticateAdminToken, requireAdmin, migrationRoutes);
 app.use("/marker", authenticateAdminToken, requireAdmin, pricemarkdownRoutes);
 app.use("/admingiftcard", authenticateAdminToken, requireAdmin, requireGiftcards, admingiftcardRoutes);
-app.use("/notification", Pushnotification);
+app.use("/notification", authenticateToken, pushTokenRoutes);
 app.use("/block-user", authenticateAdminToken, requireAdmin, blockuserRoutes);
 app.use("/nairamarkup", authenticateAdminToken, requireAdmin, nairamarkupRoutes);
 app.use("/swapmarkdown", authenticateAdminToken, requireAdmin, swapmarkdownRoutes);
 
 // Public data
 app.use("/naira-price", nairaPriceRouter);
-app.use("/addressplan", AddressplanRoutes);
+app.use("/addressplan", authenticateToken, AddressplanRoutes);
 app.use("/resend-otp", resendOtpRoutes);
 app.use("/fetchnaira", fetchnairaRoutes);
 app.use("/rates", ratesRoutes);
-app.use("/accountname", AccountnameRoutes);
+app.use("/accountname", authenticateToken, AccountnameRoutes);
 app.use("/news", newsRoutes);
 
 // Protected user routes

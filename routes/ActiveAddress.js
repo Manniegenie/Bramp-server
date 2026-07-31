@@ -9,7 +9,7 @@ router.get('/active', async (req, res) => {
     validateObiexConfig();
 
     const axiosClient = axios.create({
-      baseURL: 'https://staging.api.obiex.finance/v1', // Use correct Obiex base URL
+      baseURL: `${(process.env.OBIEX_BASE_URL || 'https://api.obiex.finance').replace(/\/+$/, '')}/v1`,
       headers: { 'Content-Type': 'application/json' },
     });
 
