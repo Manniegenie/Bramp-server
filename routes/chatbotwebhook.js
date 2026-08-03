@@ -392,9 +392,11 @@ router.post('/transaction', webhookAuth, async (req, res) => {
     }
 
     let actualReceiveAmount;
+    let conversionRate;
     try {
       const calc = await depositToNgnbAmount(observed, normalizedCurrency, logger);
       actualReceiveAmount = calc.actualReceiveAmount;
+      conversionRate = calc.rate;
       logger.info('Deposit → NGNB conversion', {
         token: normalizedCurrency,
         observedAmount: observed,
@@ -428,6 +430,17 @@ router.post('/transaction', webhookAuth, async (req, res) => {
       reference,
       obiexTransactionId: transactionId,
       updatedAt: new Date(),
+      // Conversion receipt fields — every deposit through this webhook is
+      // auto-converted crypto → NGNB at the offramp rate before crediting,
+      // so these are always present here (unlike the manual /swap flow,
+      // which is the only other writer of these fields).
+      fromCurrency: normalizedCurrency,
+      toCurrency: 'NGNB',
+      fromAmount: observed,
+      toAmount: actualReceiveAmount,
+      swapType: 'offramp',
+      expectedRate: conversionRate,
+      expectedRateDisplay: `1 ${normalizedCurrency} ≈ ₦${Number(conversionRate).toLocaleString('en-NG', { maximumFractionDigits: 2 })}`,
     };
     if (hash) updatePayload.hash = hash;
     if (network) updatePayload.network = normalizedNetwork;

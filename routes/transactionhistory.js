@@ -216,7 +216,7 @@ router.post('/token-specific', async (req, res) => {
           fee: tx.fee,
           narration: tx.narration,
           // Conversion receipt fields — populated for deposits that go
-          // through the crypto-to-NGNB auto-conversion (swapType: 'onramp').
+          // through the crypto-to-NGNB auto-conversion (swapType: 'offramp').
           fromCurrency: tx.fromCurrency,
           toCurrency: tx.toCurrency,
           fromAmount: tx.fromAmount,
