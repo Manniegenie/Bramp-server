@@ -16,7 +16,7 @@ router.get('/tier', async (req, res) => {
     }
 
     // Fetch user data (including phoneVerified field)
-    const user = await User.findById(userId).select('kycLevel kyc email phonenumber phoneVerified');
+    const user = await User.findById(userId).select('kycLevel kyc email emailVerified phonenumber phoneVerified bvnVerified recentBankRecipients');
     
     if (!user) {
       return res.status(404).json({
@@ -63,7 +63,16 @@ router.get('/tier', async (req, res) => {
       tierLevel,
       phoneVerification,
       documentUpload,
-      addressVerification
+      addressVerification,
+      // Flat booleans for the dashboard's 5-step KYC completion tracker —
+      // deliberately simple, not tied to the level1/level2/level3 cascade
+      // or the fiatVerification step-count above (which can't tell BVN
+      // and bank-account apart when only one of the two is done).
+      emailVerified: !!user.emailVerified,
+      phoneVerified: !!user.phoneVerified,
+      identityVerified: user.kyc?.level2?.status === 'approved',
+      bvnVerified: !!user.bvnVerified,
+      bankAccountAdded: (user.recentBankRecipients || []).length > 0
     };
 
     res.status(200).json({
