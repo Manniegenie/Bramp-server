@@ -97,9 +97,15 @@ router.post("/verify-otp", async (req, res) => {
       });
     }
 
-    // Mark pending user as OTP verified
+    // Mark pending user as OTP verified. verificationCodeExpiresAt also drives
+    // the PendingUser TTL delete index (models/pendinguser.js) — left alone,
+    // it would still be counting down from the original 10-minute OTP expiry,
+    // so a user who takes their time on the PIN screens after verifying could
+    // have their PendingUser silently deleted mid-setup. Push it out now that
+    // the OTP itself is no longer what's being protected.
     pendingUser.otpVerified = true;
     pendingUser.otpVerifiedAt = now;
+    pendingUser.verificationCodeExpiresAt = new Date(now.getTime() + 30 * 60 * 1000);
     await pendingUser.save();
 
     logger.info(`OTP verified successfully for phone number: ${phonenumber}`);

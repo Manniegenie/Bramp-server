@@ -200,15 +200,6 @@ router.post('/password-pin', async (req, res) => {
       is2FAVerified: newUser.is2FAVerified || false,
     };
 
-    // DEBUG: Log JWT payload being used
-    logger.info('JWT payload being generated', {
-      userId: newUser._id,
-      payload: jwtPayload,
-      generatedUsername: generatedUsername,
-      hasUsername: !!jwtPayload.username,
-      source: 'password-pin'
-    });
-
     // JWT tokens - Now includes username
     const accessToken = jwt.sign(
       jwtPayload,
@@ -221,18 +212,6 @@ router.post('/password-pin', async (req, res) => {
       config.refreshjwtSecret || process.env.JWT_REFRESH_SECRET,
       { expiresIn: "7d" }
     );
-
-    // DEBUG: Log generated tokens (for debugging only - remove in production)
-    logger.info('JWT tokens generated', {
-      userId: newUser._id,
-      email: newUser.email,
-      username: generatedUsername,
-      accessToken: accessToken,
-      refreshToken: refreshToken,
-      accessTokenLength: accessToken.length,
-      refreshTokenLength: refreshToken.length,
-      source: 'password-pin'
-    });
 
     // Add refresh token to user before saving
     newUser.refreshTokens.push({ token: refreshToken, createdAt: new Date() });
@@ -336,15 +315,6 @@ router.post('/password-pin', async (req, res) => {
     await PendingUser.deleteOne({ _id: pendingUser._id });
 
     // NO BACKGROUND WALLET GENERATION - Wallets will be generated on-demand when requested
-
-    // DEBUG: Log tokens being sent in response
-    logger.info('Sending response with tokens', {
-      userId: newUser._id,
-      username: generatedUsername,
-      accessTokenStart: accessToken.substring(0, 20) + '...',
-      refreshTokenStart: refreshToken.substring(0, 20) + '...',
-      source: 'password-pin'
-    });
 
     // Respond immediately to frontend
     res.status(201).json({
