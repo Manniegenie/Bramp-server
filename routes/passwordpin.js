@@ -117,6 +117,12 @@ router.post('/password-pin', async (req, res) => {
 
     const userFields = {
       email,
+      // Signup's OTP is emailed to this address and must be entered correctly
+      // (checked in verifyotp.js) before a PendingUser can reach this step —
+      // that already proves ownership, so carry it over instead of leaving
+      // the schema default (false) and making "confirm email" permanently
+      // uncompletable for every user who signs up through this flow.
+      emailVerified: true,
       firstname,
       middlename: middlename || '',
       lastname,
