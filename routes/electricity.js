@@ -97,10 +97,16 @@ router.post('/purchase', async (req, res) => {
     ebillsResponse = await callEBillsElectricityAPI({ customer_id, service_id, variation_id, amount, request_id: requestId });
     const ebillsStatus = ebillsResponse.data.status;
 
+    // eBills' electricity endpoint should return a prepaid recharge token on
+    // success. Field name unconfirmed against a real response yet — logging
+    // the full body so this can be verified/corrected against real data.
+    logger.info('eBills electricity raw response body', { requestId, data: ebillsResponse.data });
+    const rechargeToken = ebillsResponse.data.token || ebillsResponse.data.data?.token || null;
+
     if (ebillsStatus === 'completed-api') { await updateUserBalance(userId, currency, -amount); await updateUserPortfolioBalance(userId); balanceActionTaken = true; balanceActionType = 'updated'; }
     else if (['initiated-api', 'processing-api'].includes(ebillsStatus)) { await reserveUserBalance(userId, currency, amount); await BillTransaction.findByIdAndUpdate(pendingTransaction._id, { balanceReserved: true }); balanceActionTaken = true; balanceActionType = 'reserved'; }
 
-    const finalTransaction = await BillTransaction.findByIdAndUpdate(pendingTransaction._id, { $set: { orderId: ebillsResponse.data.order_id, status: ebillsStatus } }, { new: true });
+    const finalTransaction = await BillTransaction.findByIdAndUpdate(pendingTransaction._id, { $set: { orderId: ebillsResponse.data.order_id, status: ebillsStatus, token: rechargeToken } }, { new: true });
     return res.status(200).json({ success: true, message: `Electricity purchase ${ebillsStatus}`, transaction: finalTransaction });
 
   } catch (error) {

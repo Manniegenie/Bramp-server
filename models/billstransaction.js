@@ -33,6 +33,11 @@ const billTransactionSchema = new mongoose.Schema({
     default: 1,
     min: 1
   },
+  // Prepaid electricity recharge token — only populated for billType: 'electricity'
+  token: {
+    type: String,
+    default: null
+  },
   
   // Amount information (NGNB only - with backward compatibility)
   amount: {

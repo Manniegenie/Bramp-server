@@ -214,7 +214,16 @@ router.post('/token-specific', async (req, res) => {
           address: tx.address,
           hash: tx.hash,
           fee: tx.fee,
-          narration: tx.narration
+          narration: tx.narration,
+          // Conversion receipt fields — populated for deposits that go
+          // through the crypto-to-NGNB auto-conversion (swapType: 'onramp').
+          fromCurrency: tx.fromCurrency,
+          toCurrency: tx.toCurrency,
+          fromAmount: tx.fromAmount,
+          toAmount: tx.toAmount,
+          swapType: tx.swapType,
+          expectedRate: tx.expectedRate,
+          expectedRateDisplay: tx.expectedRateDisplay
         }
       };
     });
@@ -345,7 +354,14 @@ router.post('/all-tokens', async (req, res) => {
           address: tx.address,
           hash: tx.hash,
           fee: tx.fee,
-          narration: tx.narration
+          narration: tx.narration,
+          fromCurrency: tx.fromCurrency,
+          toCurrency: tx.toCurrency,
+          fromAmount: tx.fromAmount,
+          toAmount: tx.toAmount,
+          swapType: tx.swapType,
+          expectedRate: tx.expectedRate,
+          expectedRateDisplay: tx.expectedRateDisplay
         }
       };
     });
@@ -469,7 +485,9 @@ router.post('/all-utilities', async (req, res) => {
           network: tx.network,
           customerInfo: tx.customerInfo?.phone || tx.customerPhone,
           billType: tx.billType,
-          paymentCurrency: tx.paymentCurrency
+          paymentCurrency: tx.paymentCurrency,
+          // Prepaid electricity recharge token — only present for billType: 'electricity'
+          token: tx.token || null
         }
       };
     });
@@ -586,7 +604,14 @@ router.post('/complete-history', async (req, res) => {
             address: tx.address,
             hash: tx.hash,
             fee: tx.fee,
-            narration: tx.narration
+            narration: tx.narration,
+            fromCurrency: tx.fromCurrency,
+            toCurrency: tx.toCurrency,
+            fromAmount: tx.fromAmount,
+            toAmount: tx.toAmount,
+            swapType: tx.swapType,
+            expectedRate: tx.expectedRate,
+            expectedRateDisplay: tx.expectedRateDisplay
           }
         };
       });
@@ -619,7 +644,8 @@ router.post('/complete-history', async (req, res) => {
             billType: tx.billType,
             productName: tx.productName,
             network: tx.network,
-            customerInfo: tx.customerInfo?.phone || tx.customerPhone
+            customerInfo: tx.customerInfo?.phone || tx.customerPhone,
+            token: tx.token || null
           }
         };
       });
