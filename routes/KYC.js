@@ -113,6 +113,14 @@ async function submitToYouverify({ idType, idNumber, selfieImage, userId, partne
     };
 
     logger.info('Youverify response', { status: response.status, youverifyId, jobId: partnerJobId });
+    // BVN has no document photo to match a selfie against, unlike NIN/passport/
+    // drivers-license — its response shape may not include allValidationPassed
+    // at all, which is what verificationResult.allValidationPassed is built
+    // from. Log the raw response body for BVN specifically until we've
+    // confirmed the real success field Youverify sends for that endpoint.
+    if (idType === 'bvn') {
+      logger.info('Youverify BVN raw response body', { jobId: partnerJobId, dataObj });
+    }
 
     return { success: true, data: response.data, youverifyId, verificationResult };
   } catch (error) {
