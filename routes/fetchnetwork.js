@@ -1,22 +1,22 @@
 // routes/fetchnetwork.js
 const express = require('express');
 const router = express.Router();
-const CryptoFeeMarkup = require('../models/cryptofee');
+const TokenNetwork = require('../models/tokenNetwork');
 const logger = require('../utils/logger');
 
-const SUPPORTED_TOKENS = {
-  BTC: { name: 'Bitcoin', symbol: 'BTC', decimals: 8, isStablecoin: false },
-  ETH: { name: 'Ethereum', symbol: 'ETH', decimals: 18, isStablecoin: false },
-  SOL: { name: 'Solana', symbol: 'SOL', decimals: 9, isStablecoin: false },
-  USDT: { name: 'Tether', symbol: 'USDT', decimals: 6, isStablecoin: true },
-  USDC: { name: 'USD Coin', symbol: 'USDC', decimals: 6, isStablecoin: true },
-  BNB: { name: 'Binance Coin', symbol: 'BNB', decimals: 18, isStablecoin: false },
-  MATIC: { name: 'Polygon', symbol: 'MATIC', decimals: 18, isStablecoin: false },
-  TRX: { name: 'Tron', symbol: 'TRX', decimals: 6, isStablecoin: false },
-  TON: { name: 'Toncoin', symbol: 'TON', decimals: 9, isStablecoin: false }
+const TOKEN_META = {
+  BTC: { name: 'Bitcoin', decimals: 8, isStablecoin: false },
+  ETH: { name: 'Ethereum', decimals: 18, isStablecoin: false },
+  SOL: { name: 'Solana', decimals: 9, isStablecoin: false },
+  USDT: { name: 'Tether', decimals: 6, isStablecoin: true },
+  USDC: { name: 'USD Coin', decimals: 6, isStablecoin: true },
+  BNB: { name: 'Binance Coin', decimals: 18, isStablecoin: false },
+  MATIC: { name: 'Polygon', decimals: 18, isStablecoin: false },
+  AVAX: { name: 'Avalanche', decimals: 18, isStablecoin: false },
+  NGNB: { name: 'Naira', decimals: 2, isStablecoin: true },
 };
 
-// GET /networks/fetch-network?currency=BTC
+// GET /networks/fetch-network?currency=BTC — enabled networks for one token
 router.get('/fetch-network', async (req, res) => {
   try {
     const { currency } = req.query;
@@ -27,29 +27,18 @@ router.get('/fetch-network', async (req, res) => {
 
     const upperCurrency = currency.toUpperCase();
 
-    if (!SUPPORTED_TOKENS[upperCurrency]) {
-      return res.status(400).json({
-        success: false,
-        error: 'UNSUPPORTED_CURRENCY',
-        message: `Currency ${upperCurrency} is not supported. Supported currencies: ${Object.keys(SUPPORTED_TOKENS).join(', ')}`
-      });
-    }
-
-    logger.info('Fetching networks for currency', { currency: upperCurrency });
-
-    const networkDocs = await CryptoFeeMarkup.find(
-      { currency: upperCurrency },
-      { network: 1, networkName: 1, feeUsd: 1, _id: 0 }
-    ).sort({ network: 1 });
+    const networkDocs = await TokenNetwork.find(
+      { token: upperCurrency, enabled: true },
+      { networkId: 1, networkName: 1, order: 1, _id: 0 }
+    ).sort({ order: 1 });
 
     if (!networkDocs || networkDocs.length === 0) {
-      return res.status(404).json({ success: false, error: 'NO_NETWORKS_FOUND', message: `No networks found for currency ${upperCurrency}` });
+      return res.status(404).json({ success: false, error: 'NO_NETWORKS_FOUND', message: `No enabled networks found for currency ${upperCurrency}` });
     }
 
-    const networks = networkDocs.map(doc => ({
-      network: doc.network,
-      networkName: doc.networkName || doc.network,
-      feeUsd: doc.feeUsd
+    const networks = networkDocs.map((doc) => ({
+      network: doc.networkId,
+      networkName: doc.networkName,
     }));
 
     res.status(200).json({ success: true, data: { currency: upperCurrency, networks, total: networks.length } });
@@ -59,14 +48,15 @@ router.get('/fetch-network', async (req, res) => {
   }
 });
 
-// GET /networks/currencies
+// GET /networks/currencies — token metadata only, no network breakdown
 router.get('/currencies', async (req, res) => {
   try {
-    const currencies = Object.keys(SUPPORTED_TOKENS).map(currency => ({
-      symbol: currency,
-      name: SUPPORTED_TOKENS[currency].name || currency,
-      decimals: SUPPORTED_TOKENS[currency].decimals || 18,
-      isStablecoin: SUPPORTED_TOKENS[currency].isStablecoin || false
+    const tokens = await TokenNetwork.distinct('token', { enabled: true });
+    const currencies = tokens.sort().map((symbol) => ({
+      symbol,
+      name: TOKEN_META[symbol]?.name || symbol,
+      decimals: TOKEN_META[symbol]?.decimals ?? 18,
+      isStablecoin: TOKEN_META[symbol]?.isStablecoin || false,
     }));
 
     res.status(200).json({ success: true, data: { currencies, total: currencies.length } });
@@ -76,28 +66,29 @@ router.get('/currencies', async (req, res) => {
   }
 });
 
-// GET /networks/all
+// GET /networks/all — every token with its enabled networks, in display order.
+// This is what the app's deposit/withdraw token+network pickers consume.
 router.get('/all', async (req, res) => {
   try {
-    const networkDocs = await CryptoFeeMarkup.find({}, { currency: 1, network: 1, networkName: 1, feeUsd: 1, _id: 0 }).sort({ currency: 1, network: 1 });
+    const networkDocs = await TokenNetwork.find({ enabled: true }).sort({ token: 1, order: 1 });
 
     if (!networkDocs || networkDocs.length === 0) {
       return res.status(404).json({ success: false, error: 'NO_NETWORKS_FOUND', message: 'No network configurations found' });
     }
 
-    const networksByCurrency = {};
-    networkDocs.forEach(doc => {
-      if (!networksByCurrency[doc.currency]) networksByCurrency[doc.currency] = [];
-      networksByCurrency[doc.currency].push({ network: doc.network, networkName: doc.networkName || doc.network, feeUsd: doc.feeUsd });
+    const networksByToken = {};
+    networkDocs.forEach((doc) => {
+      if (!networksByToken[doc.token]) networksByToken[doc.token] = [];
+      networksByToken[doc.token].push({ network: doc.networkId, networkName: doc.networkName });
     });
 
-    const result = Object.keys(networksByCurrency).map(currency => ({
-      currency,
-      currencyName: SUPPORTED_TOKENS[currency]?.name || currency,
-      isStablecoin: SUPPORTED_TOKENS[currency]?.isStablecoin || false,
-      decimals: SUPPORTED_TOKENS[currency]?.decimals || 18,
-      networks: networksByCurrency[currency],
-      networkCount: networksByCurrency[currency].length
+    const result = Object.keys(networksByToken).map((token) => ({
+      currency: token,
+      currencyName: TOKEN_META[token]?.name || token,
+      isStablecoin: TOKEN_META[token]?.isStablecoin || false,
+      decimals: TOKEN_META[token]?.decimals ?? 18,
+      networks: networksByToken[token],
+      networkCount: networksByToken[token].length,
     }));
 
     res.status(200).json({ success: true, data: { currencies: result, totalCurrencies: result.length, totalNetworks: networkDocs.length } });

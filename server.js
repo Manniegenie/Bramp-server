@@ -488,6 +488,7 @@ const depositRoutes = require("./routes/deposit");
 const NombadepositRoutes = require("./routes/Nombadeposit");
 const deleteuserRoutes = require("./adminRoutes/deleteuser");
 const SetfeeRoutes = require("./adminRoutes/cryptofee");
+const TokenNetworksAdminRoutes = require("./adminRoutes/tokenNetworks");
 const verifyotpRoutes = require("./routes/verifyotp");
 const usernamecheckRoutes = require("./routes/usernamecheck");
 const withdrawRoutes = require("./routes/withdraw");
@@ -658,6 +659,7 @@ app.use("/admin", authenticateAdminToken, requireSuperAdmin, adminRegisterRoutes
 
 // ADMIN LEVEL ROUTES (admin + super_admin)
 app.use("/set-fee", authenticateAdminToken, requireAdmin, SetfeeRoutes);
+app.use("/admin/token-networks", authenticateAdminToken, requireAdmin, TokenNetworksAdminRoutes);
 app.use("/onramp", authenticateAdminToken, requireAdmin, markupRouter);
 app.use("/offramp", authenticateAdminToken, requireAdmin, markdownRouter);
 app.use("/obiex-rate", authenticateAdminToken, requireAdmin, ObiexRateRoutes);
