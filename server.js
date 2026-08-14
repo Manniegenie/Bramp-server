@@ -512,7 +512,10 @@ const AirtimeRoutes = require("./routes/airtime");
 const DataRoutes = require("./routes/data");
 const VerifybillRoutes = require("./routes/verifybill");
 const ElectricityRoutes = require("./routes/electricity");
-const BettingRoutes = require("./routes/betting");
+// Betting route disabled — feature removed from the app (Apple Guideline 2.3.6).
+// File kept on disk, not deleted, in case of future reinstatement; unmounted
+// below means /betting now 404s like any other undefined route.
+// const BettingRoutes = require("./routes/betting");
 const CableTVRoutes = require("./routes/cabletv");
 const fetchdataplans = require("./routes/dataplans");
 const billwebhookRoutes = require("./routes/billwebhook");
@@ -702,7 +705,7 @@ app.use("/airtime", authenticateToken, AirtimeRoutes);
 app.use("/data", authenticateToken, DataRoutes);
 app.use("/verifybill", authenticateToken, VerifybillRoutes);
 app.use("/electricity", authenticateToken, ElectricityRoutes);
-app.use("/betting", authenticateToken, BettingRoutes);
+// app.use("/betting", authenticateToken, BettingRoutes); // disabled — see require above
 app.use("/cabletv", authenticateToken, CableTVRoutes);
 app.use("/packages", authenticateToken, CableplanRoutes);
 app.use("/api", authenticateToken, DashboardRoutes);
