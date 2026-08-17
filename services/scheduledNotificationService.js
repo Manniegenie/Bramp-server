@@ -11,10 +11,10 @@ class ScheduledNotificationService {
     this.jobs = [];
     // Define schedules as class property so they're always available
     this.scheduleConfig = [
-      { time: '7:00 AM', cron: '0 7 * * *' },
-      { time: '12:00 PM', cron: '0 12 * * *' },
-      { time: '6:00 PM', cron: '0 18 * * *' },
-      { time: '9:00 PM', cron: '0 21 * * *' }
+      { time: '5:00 AM', cron: '0 5 * * *', greeting: 'Good morning ☀️' },
+      { time: '12:00 PM', cron: '0 12 * * *', greeting: 'Good afternoon 🌤️' },
+      { time: '4:00 PM', cron: '0 16 * * *', greeting: 'Good evening 🌆' },
+      { time: '11:00 PM', cron: '0 23 * * *', greeting: 'Good night 🌙' }
     ];
   }
 
@@ -27,11 +27,11 @@ class ScheduledNotificationService {
 
     logger.info('Starting scheduled notification service...');
 
-    this.scheduleConfig.forEach(({ time, cron: cronExpression }) => {
+    this.scheduleConfig.forEach(({ time, cron: cronExpression, greeting }) => {
       const job = cron.schedule(cronExpression, async () => {
         logger.info(`Running scheduled price notification at ${time} (${cronExpression})`);
         try {
-          await this.sendPriceNotification();
+          await this.sendPriceNotification(greeting);
         } catch (err) {
           logger.error('Scheduled notification job failed', { time, error: err.message });
         }
@@ -66,46 +66,48 @@ class ScheduledNotificationService {
     logger.info('Scheduled notification service stopped');
   }
 
+  // Fetch NGNB + major token rates, shared by both send paths below.
+  async getAllPrices() {
+    // Get NGNB rate (offramp only)
+    let ngnbRate = null;
+    try {
+      const rateInfo = await offrampService.getUsdToNgnRate();
+      ngnbRate = {
+        symbol: 'NGNB',
+        price: rateInfo.finalPrice,
+        hourly_change: 0
+      };
+    } catch (error) {
+      logger.warn('NGNB rate unavailable (set offramp rate in admin):', error.message);
+    }
+
+    // Get latest prices for major tokens (from PriceChange - populated by crypto price job)
+    const latestPrices = await PriceChange.getLatestPrices() || [];
+
+    // Filter for major tokens (BTC, BNB, ETH, SOL) and sort in display order
+    const majorTokens = ['BTC', 'BNB', 'ETH', 'SOL'];
+    const relevantPrices = latestPrices
+      .filter(price => majorTokens.includes(price.symbol))
+      .sort((a, b) => majorTokens.indexOf(a.symbol) - majorTokens.indexOf(b.symbol));
+
+    // Add NGNB at the beginning if available
+    return ngnbRate ? [ngnbRate, ...relevantPrices] : relevantPrices;
+  }
+
   // Send price notification to all users
-  async sendPriceNotification() {
+  async sendPriceNotification(greeting) {
     try {
       logger.info('Fetching latest crypto prices...');
 
-      // Get NGNZ rate (offramp only)
-      let ngnzRate = null;
-      try {
-        const rateInfo = await offrampService.getUsdToNgnRate();
-        ngnzRate = {
-          symbol: 'NGNZ',
-          price: rateInfo.finalPrice,
-          hourly_change: 0
-        };
-      } catch (error) {
-        logger.warn('NGNZ rate unavailable (set offramp rate in admin):', error.message);
-      }
-
-      // Get latest prices for major tokens (from PriceChange - populated by crypto price job)
-      const latestPrices = await PriceChange.getLatestPrices() || [];
-
-      // Filter for major tokens (BTC, BNB, ETH, SOL) and sort in display order
-      const majorTokens = ['BTC', 'BNB', 'ETH', 'SOL'];
-      const relevantPrices = latestPrices
-        .filter(price => majorTokens.includes(price.symbol))
-        .sort((a, b) => majorTokens.indexOf(a.symbol) - majorTokens.indexOf(b.symbol));
-
-      // Add NGNZ at the beginning if available
-      const allPrices = ngnzRate ? [ngnzRate, ...relevantPrices] : relevantPrices;
+      const allPrices = await this.getAllPrices();
 
       if (allPrices.length === 0) {
-        const reasons = [];
-        if (!ngnzRate) reasons.push('NGNZ/offramp rate not set in admin');
-        if (relevantPrices.length === 0) reasons.push('no BTC/BNB/ETH/SOL in pricechanges (run crypto price job)');
-        logger.warn('No prices for notification:', reasons.join('; '));
+        logger.warn('No prices for notification: NGNB/offramp rate not set in admin; no BTC/BNB/ETH/SOL in pricechanges (run crypto price job)');
         return;
       }
 
       // Format the notification message
-      const notification = this.formatPriceNotification(allPrices);
+      const notification = this.formatPriceNotification(allPrices, greeting);
       
       logger.info('Sending price notification to all users...', {
         message: notification.title,
@@ -173,24 +175,23 @@ class ScheduledNotificationService {
   }
 
   // Format the price notification message
-  formatPriceNotification(prices) {
-    const title = 'Latest Rates';
+  formatPriceNotification(prices, greeting = 'Latest Rates') {
+    const title = greeting;
 
-    // Format each token price (keep NGNZ first, then sort the rest)
+    // Format each token price (keep NGNB first, then sort the rest)
     const priceLines = prices.map(price => {
       const symbol = price.symbol;
 
-      // NGNZ shows as Naira rate
-      if (symbol === 'NGNZ') {
-        return `NGNZ: ₦${Math.round(price.price).toLocaleString()}/$`;
+      // NGNB shows as Naira rate
+      if (symbol === 'NGNB') {
+        return `NGNB: ₦${Math.round(price.price).toLocaleString()}/$`;
       }
 
       const priceFormatted = this.formatPrice(price.price);
       return `${symbol}: ${priceFormatted}`;
     });
 
-    // Simple format: rates only, no change percentages
-    const body = priceLines.join(' | ');
+    const body = `Here's how the market's looking —\n${priceLines.join(' | ')}`;
 
     return {
       title,
@@ -228,50 +229,24 @@ class ScheduledNotificationService {
   }
 
   // Test the notification (for manual testing) - returns detailed results
-  async testNotification() {
+  async testNotification(greeting) {
     logger.info('Testing price notification...');
-    return await this.sendPriceNotificationWithResults();
+    return await this.sendPriceNotificationWithResults(greeting);
   }
 
   // Send price notification and return detailed results
-  async sendPriceNotificationWithResults() {
+  async sendPriceNotificationWithResults(greeting) {
     try {
       logger.info('Fetching latest crypto prices...');
 
-      // Get NGNZ rate (offramp only)
-      let ngnzRate = null;
-      try {
-        const rateInfo = await offrampService.getUsdToNgnRate();
-        ngnzRate = {
-          symbol: 'NGNZ',
-          price: rateInfo.finalPrice,
-          hourly_change: 0
-        };
-      } catch (error) {
-        logger.warn('NGNZ rate unavailable (set offramp rate in admin):', error.message);
-      }
-
-      // Get latest prices for major tokens (from PriceChange - populated by crypto price job)
-      const latestPrices = await PriceChange.getLatestPrices() || [];
-
-      // Filter for major tokens (BTC, BNB, ETH, SOL) and sort in display order
-      const majorTokens = ['BTC', 'BNB', 'ETH', 'SOL'];
-      const relevantPrices = latestPrices
-        .filter(price => majorTokens.includes(price.symbol))
-        .sort((a, b) => majorTokens.indexOf(a.symbol) - majorTokens.indexOf(b.symbol));
-
-      // Add NGNZ at the beginning if available
-      const allPrices = ngnzRate ? [ngnzRate, ...relevantPrices] : relevantPrices;
+      const allPrices = await this.getAllPrices();
 
       if (allPrices.length === 0) {
-        const reasons = [];
-        if (!ngnzRate) reasons.push('NGNZ/offramp rate not configured in admin');
-        if (relevantPrices.length === 0) reasons.push('no BTC/BNB/ETH/SOL in pricechanges (run crypto price job)');
-        return { success: false, reason: reasons.join('. ') };
+        return { success: false, reason: 'NGNB/offramp rate not configured in admin. no BTC/BNB/ETH/SOL in pricechanges (run crypto price job)' };
       }
 
       // Format the notification message
-      const notification = this.formatPriceNotification(allPrices);
+      const notification = this.formatPriceNotification(allPrices, greeting);
 
       // Get all users with valid Expo push tokens (Expo-only; FCM removed)
       const users = await User.find({
