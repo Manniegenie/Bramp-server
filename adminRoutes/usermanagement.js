@@ -419,4 +419,45 @@ router.get('/summary', async (req, res) => {
   }
 });
 
+/**
+ * POST /users/:userId/unlock-pin
+ * Clear the sign-in PIN lock (loginAttempts/lockUntil) for a single user by ID.
+ * Same reset performed by /unlockaccount/unlock-account, just addressed by
+ * userId instead of phone number — matches what the admin frontend calls.
+ */
+router.post('/users/:userId/unlock-pin', async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found.' });
+    }
+
+    const wasLocked = !!(user.lockUntil && user.lockUntil > Date.now());
+    const previousAttempts = user.loginAttempts;
+
+    user.loginAttempts = 0;
+    user.lockUntil = null;
+    user.failedLoginAttempts = 0;
+    user.lastFailedLogin = null;
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'PIN lock cleared successfully.',
+      data: {
+        userId: user._id,
+        username: user.username,
+        wasLocked,
+        previousLoginAttempts: previousAttempts,
+        newLoginAttempts: 0,
+      },
+    });
+  } catch (err) {
+    console.error('Error unlocking PIN account:', err);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
 module.exports = router;
