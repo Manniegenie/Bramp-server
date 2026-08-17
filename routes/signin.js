@@ -80,9 +80,15 @@ router.post(
       }
 
       if (!isValidPin) {
-        const newAttemptCount = (user.loginAttempts || 0) + 1;
+        // If a previous lock already expired, this is a fresh attempt cycle —
+        // otherwise the stale loginAttempts count (already at MAX from the
+        // prior lockout) makes the very next wrong guess re-lock the account
+        // instantly, so the 6-hour wait never actually resets anything.
+        const lockExpired = !!(user.lockUntil && user.lockUntil <= Date.now());
+        const newAttemptCount = lockExpired ? 1 : (user.loginAttempts || 0) + 1;
         user.loginAttempts = newAttemptCount;
         user.lastFailedLogin = new Date();
+        if (lockExpired) user.lockUntil = null;
         if (newAttemptCount >= MAX_LOGIN_ATTEMPTS) {
           user.lockUntil = new Date(Date.now() + LOCK_TIME);
           await user.save();
