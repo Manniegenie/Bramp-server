@@ -256,27 +256,6 @@ async function sendChatbotWithdrawalEmail(to, name, amount, currency, reference,
   });
 }
 
-async function sendFinancialAnalysisCompleteEmail(to, name, jobId, bankStatementProcessed, cryptoStatementProcessed) {
-  const params = {
-    username: String(name || 'User'),
-    jobId: String(jobId || 'N/A'),
-    bankStatementStatus: String(bankStatementProcessed ? 'Processed' : 'Pending'),
-    cryptoStatementStatus: String(cryptoStatementProcessed ? 'Processed' : 'Pending'),
-    completionDate: String(new Date().toLocaleDateString()),
-    completionTime: String(new Date().toLocaleTimeString()),
-    reportUrl: String(`${process.env.CLIENT_URL || 'https://www.chatbramp.com'}/financial-analysis/report/${jobId}`)
-  };
-
-  console.log('Financial Analysis Complete email params:', params);
-
-  return sendEmail({
-    to,
-    name,
-    templateId: parseInt(process.env.BREVO_TEMPLATE_FINANCIAL_ANALYSIS || process.env.BREVO_TEMPLATE_DEPOSIT), // Fallback to deposit template if financial analysis template not set
-    params
-  });
-}
-
 /**
  * Send giftcard response email (approved or rejected)
  */
@@ -610,7 +589,6 @@ module.exports = {
   sendChatbotSellEmail,
   sendChatbotDepositEmail,
   sendChatbotWithdrawalEmail,
-  sendFinancialAnalysisCompleteEmail,
   sendAdminWelcomeEmail,
   sendNINVerificationEmail,
   sendTawkMessageNotify,

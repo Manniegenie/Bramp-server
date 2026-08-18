@@ -80,6 +80,14 @@ const transactionSchema = new mongoose.Schema({
 // Indexes
 transactionSchema.index({ userId: 1, type: 1, status: 1 });
 transactionSchema.index({ obiexTransactionId: 1 }); // Webhook lookups (chatbot, obiex)
+// Prevents double-crediting on duplicate webhook delivery for the same Obiex
+// transaction+type (e.g. two DEPOSIT callbacks for the same transactionId).
+// Partial + scoped by type so it never affects transactions that don't carry
+// an obiexTransactionId (bank/internal/giftcard) or coincide across types.
+transactionSchema.index(
+  { obiexTransactionId: 1, type: 1 },
+  { unique: true, partialFilterExpression: { obiexTransactionId: { $exists: true, $type: 'string' } } }
+);
 transactionSchema.index({ giftCardId: 1 });
 transactionSchema.index({ cardType: 1, country: 1 });
 

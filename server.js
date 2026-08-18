@@ -34,7 +34,6 @@ const cron = require("node-cron");
 
 const { updateCryptoPrices } = require("./services/cryptoPriceJob");
 const { markExpiredTransactions } = require("./services/transactionCleanup");
-const { logger: financialLogger } = require("./financial-analysis/utils/logger");
 
 // BULLETPROOF: Catch ALL errors from winston/file system that might crash the app
 process.on('uncaughtException', (error) => {
@@ -293,9 +292,7 @@ const generalLimiter = rateLimit({
     const path = req.path.toLowerCase();
     return path === '/' ||
       path === '/health' ||
-      path.startsWith('/financial-analysis/health') ||
-      path.includes('webhook') ||
-      path.match(/^\/financial-analysis\/job\/[a-f0-9]{32,}$/i); // Job status polling endpoint (32+ hex chars)
+      path.includes('webhook');
   }
 });
 
@@ -534,8 +531,6 @@ const CableplanRoutes = require("./routes/cablepackages");
 const AddressplanRoutes = require("./routes/ActiveAddress");
 const pricemarkdownRoutes = require("./adminRoutes/pricemarkdown");
 const admingiftcardRoutes = require("./adminRoutes/giftcard");
-const giftcardRoutes = require("./routes/giftcard");
-const giftcardRatesRoutes = require("./routes/giftcardrates");
 const changepinRoutes = require("./routes/changepasswordpin");
 const forgotpinRoutes = require("./routes/forgotpasswordpin");
 const deleteaccountRoutes = require("./routes/deleteaccount");
@@ -585,8 +580,6 @@ const scheduledNotificationRoutes = require("./adminRoutes/scheduledNotification
 const scheduledGiftCardNotificationRoutes = require("./adminRoutes/scheduledGiftCardNotifications");
 const nairamarkupRoutes = require("./adminRoutes/nairamarkup");
 const swapmarkdownRoutes = require("./adminRoutes/swapmarkdown");
-const financialAnalysisRoutes = require("./routes/financialAnalysis");
-const financialAnalysisWebhookRoutes = require("./routes/financialAnalysisWebhook");
 const liskWalletRoutes = require("./routes/liskWallet");
 const newsRoutes = require("./routes/news");
 const notificationsRoutes = require("./routes/notifications");
@@ -595,7 +588,6 @@ const blogRoutes = require("./routes/blog");
 const tokenPricesRoutes = require("./routes/tokenPrices");
 const bannersRoutes = require("./routes/Banners");
 const collectionsRoutes = require("./routes/collections");
-const giftcardcountryRoutes = require("./routes/giftcardcountry");
 const fetchnetworkRoutes = require("./routes/fetchnetwork");
 const tawkRoutes = require("./routes/tawk");
 const debugRoutes = require("./routes/debug");
@@ -715,8 +707,6 @@ app.use("/transfer", authenticateToken, internaltransferRoutes);
 app.use("/query", authenticateToken, usernamequeryRoutes);
 app.use("/ngnbwithdraw", authenticateToken, ngnbwithdrawRoutes);
 app.use("/dollarvalue", authenticateToken, dollarvalueRoutes);
-app.use("/giftcard", authenticateToken, giftcardRoutes);
-app.use("/giftcardrates", authenticateToken, giftcardRatesRoutes);
 app.use("/changepin", authenticateToken, changepinRoutes);
 app.use("/forgotpin", forgotpinRoutes);
 app.use("/deleteaccount", authenticateToken, deleteaccountRoutes);
@@ -751,7 +741,6 @@ app.use("/reset-pin", authenticateToken, resetPinRoutes);
 app.use("/blog", blogRoutes);
 app.use("/token-prices", tokenPricesRoutes);
 app.use("/banners", bannersRoutes);
-app.use("/giftcardcountry", giftcardcountryRoutes);
 app.use("/networks", fetchnetworkRoutes);
 // Webhooks
 app.use("/tawk", tawkRoutes);
@@ -759,10 +748,6 @@ app.use("/tawk", tawkRoutes);
 if (process.env.NODE_ENV !== 'production') {
   app.use("/debug", debugRoutes);
 }
-// Financial analysis routes (health is public, process requires auth)
-// Webhook endpoint is public (validated by signature), other endpoints require auth
-app.use("/financial-analysis", financialAnalysisRoutes);
-app.use("/financial-analysis", financialAnalysisWebhookRoutes);
 
 // Health
 app.get("/", (_req, res) => {
@@ -800,33 +785,6 @@ app.use((err, req, res, next) => {
 
 // Cron jobs disabled per new requirements
 
-// Initialize Redis and workers for financial analysis queue (optional, with graceful fallback)
-let financialAnalysisWorker = null;
-let redisInitialized = false;
-
-async function initializeFinancialAnalysisQueue() {
-  try {
-    const { initializeRedis } = require("./financial-analysis/queue/redis");
-    const { createExtractionWorker } = require("./financial-analysis/queue/workers");
-
-    // Initialize Redis connection
-    await initializeRedis();
-    redisInitialized = true;
-    financialLogger.info("✅ Redis initialized successfully for financial analysis queue");
-
-    // Start workers
-    financialAnalysisWorker = createExtractionWorker();
-    financialLogger.info("✅ Financial analysis workers started successfully");
-
-    return true;
-  } catch (error) {
-    financialLogger.warn("⚠️  Failed to initialize Redis/Queue system:", error.message);
-    financialLogger.warn("⚠️  Financial analysis will fall back to direct processing");
-    redisInitialized = false;
-    return false;
-  }
-}
-
 // Graceful shutdown handlers
 const gracefulShutdown = async (signal) => {
   console.log(`${signal} received, shutting down gracefully...`);
@@ -839,23 +797,6 @@ const gracefulShutdown = async (signal) => {
     }
   } catch (error) {
     console.error("Error closing MongoDB connection:", error);
-  }
-
-  if (financialAnalysisWorker) {
-    try {
-      await financialAnalysisWorker.close();
-      console.log("✅ Financial analysis workers closed");
-    } catch (error) {
-      console.error("Error closing workers:", error);
-    }
-  }
-
-  try {
-    const { closeRedis } = require("./financial-analysis/queue/redis");
-    await closeRedis();
-    console.log("✅ Redis connections closed");
-  } catch (error) {
-    // Redis might not be initialized, ignore
   }
 
   process.exit(0);
@@ -904,18 +845,6 @@ const startServer = async () => {
     console.log("🔄 Attempting to connect to MongoDB...");
     await mongoose.connect(process.env.MONGODB_URI, mongooseOptions);
     console.log("✅ MongoDB Connected");
-
-    // Initialize financial analysis queue (non-blocking, with fallback)
-    initializeFinancialAnalysisQueue().then(success => {
-      if (success) {
-        console.log("✅ Financial analysis queue system: ACTIVE");
-      } else {
-        console.log("⚠️  Financial analysis queue system: FALLBACK (direct processing)");
-      }
-    }).catch(err => {
-      console.error("⚠️  Error initializing financial analysis queue:", err.message);
-      console.log("⚠️  Financial analysis queue system: FALLBACK (direct processing)");
-    });
 
     app.listen(PORT, "0.0.0.0", () => {
       console.log(`🔥 Server running on port ${PORT}`);

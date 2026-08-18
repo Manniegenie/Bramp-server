@@ -374,21 +374,46 @@ router.post('/transaction', webhookAuth, async (req, res) => {
       return res.status(404).json({ error: 'No user found' });
     }
 
-    // Idempotency: already processed deposit for this transactionId
-    const existing = await Transaction.findOne({ obiexTransactionId: transactionId, type: 'DEPOSIT' }).lean();
-    if (existing) {
-      logger.info('Deposit already processed', { transactionId });
-      return res.status(200).json({ success: true, message: 'Already processed' });
-    }
-
     const FINAL_OK = new Set(['CONFIRMED', 'SUCCESS', 'COMPLETED', 'SUCCESSFUL']);
     if (!FINAL_OK.has(status)) {
+      // Non-terminal delivery (e.g. still PROCESSING at the provider) — don't
+      // claim the transactionId yet, so the real terminal-status delivery
+      // that arrives later is still free to be processed normally.
       return res.status(200).json({ success: true, queued: true });
     }
 
     const observed = parseFloat(amount);
     if (!(observed > 0)) {
       return res.status(400).json({ error: 'Invalid amount' });
+    }
+
+    // Idempotency: atomically claim this transactionId before doing any
+    // crediting work. A plain read-then-write check here would leave a wide
+    // race window (Obiex quote call, balance credit, email, notification all
+    // happen before the old code ever wrote a Transaction record) — two
+    // webhook deliveries for the same transactionId, which providers commonly
+    // send on retry, could both pass a read-only check and both credit the
+    // user. This insert is backed by the unique partial index on
+    // (obiexTransactionId, type) in models/transaction.js, so only one
+    // concurrent request can ever win the claim; every other gets a duplicate
+    // key error and bails out below without touching the user's balance.
+    let claimedTrx;
+    try {
+      claimedTrx = await Transaction.create({
+        userId: user._id,
+        type: 'DEPOSIT',
+        currency: normalizedCurrency,
+        amount: observed,
+        status: 'PROCESSING',
+        obiexTransactionId: transactionId,
+        reference,
+      });
+    } catch (claimErr) {
+      if (claimErr.code === 11000) {
+        logger.info('Deposit already processed (claim race)', { transactionId });
+        return res.status(200).json({ success: true, message: 'Already processed' });
+      }
+      throw claimErr;
     }
 
     let actualReceiveAmount;
@@ -405,6 +430,9 @@ router.post('/transaction', webhookAuth, async (req, res) => {
       });
     } catch (err) {
       logger.error('Failed to compute NGNB for deposit', { error: err.message, token: normalizedCurrency });
+      // Roll back the claim — nothing was credited, so a retried webhook
+      // delivery must be able to try again, not get bounced as "already processed".
+      await Transaction.deleteOne({ _id: claimedTrx._id }).catch(() => {});
       return res.status(500).json({ error: 'Failed to compute NGNB amount', details: err.message });
     }
 
@@ -413,6 +441,7 @@ router.post('/transaction', webhookAuth, async (req, res) => {
       creditedUser = await updateUserBalance(user._id, 'NGNB', actualReceiveAmount);
     } catch (e) {
       logger.error('Failed to credit NGNB', { error: e.message, userId: user._id });
+      await Transaction.deleteOne({ _id: claimedTrx._id }).catch(() => {});
       return res.status(500).json({ error: 'Failed to credit user NGNB wallet' });
     }
 
@@ -448,12 +477,14 @@ router.post('/transaction', webhookAuth, async (req, res) => {
     if (source) updatePayload.source = source;
     if (createdAt) updatePayload.createdAt = new Date(createdAt);
 
+    // Update the record already claimed above by its own _id — it's guaranteed
+    // to exist (we just created it), so no upsert needed here.
     const trxDoc = await Transaction.findOneAndUpdate(
-      { obiexTransactionId: transactionId },
+      { _id: claimedTrx._id },
       { $set: updatePayload },
-      { upsert: true, new: true }
+      { new: true }
     );
-    logger.info(trxDoc.isNew ? 'New transaction created' : 'Transaction updated');
+    logger.info('Transaction updated after successful credit', { transactionId });
 
     try {
       if (creditedUser && creditedUser.email) {
