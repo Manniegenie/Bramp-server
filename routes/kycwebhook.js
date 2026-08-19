@@ -399,9 +399,18 @@ router.post('/callback', async (req, res) => {
         userUpdate.$set['kyc.level2.documentNumber'] = norm.idNumber;
         userUpdate.$set['kyc.level2.approvedAt'] = new Date();
         userUpdate.$set['kyc.level2.rejectionReason'] = null;
-        
+
         // Update overall KYC status to approved (document verification complete)
         userUpdate.$set['kycStatus'] = 'approved';
+
+        // This webhook approves the level2 sub-document but was never bumping
+        // the numeric kycLevel field itself (findByIdAndUpdate bypasses the
+        // autoUpgradeKYC instance method, which is also never called anywhere
+        // else) — users kept showing kycLevel: 1 forever despite an approved
+        // level2 document. Guard against downgrading an already-level-3 user.
+        if ((user.kycLevel || 0) < 2) {
+          userUpdate.$set['kycLevel'] = 2;
+        }
 
         logger.info('Document verification approved', {
           requestId,

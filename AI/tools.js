@@ -7,7 +7,50 @@ const API_BASE_URL = process.env.API_BASE_URL || 'https://priscaai.online';
 const logger = require('../utils/logger');
 const cache = require('./cache');
 require('dotenv').config();
-const OpenAI = (() => { try { return require('openai'); } catch (e) { return null; } })();
+const Anthropic = (() => { try { return require('@anthropic-ai/sdk'); } catch (e) { return null; } })();
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL_PRIMARY || 'claude-sonnet-5';
+let anthropicClient = null;
+try {
+  if (Anthropic && process.env.ANTHROPIC_API_KEY) {
+    anthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  }
+} catch (e) {
+  logger.error('Anthropic init error in AI/tools.js:', e?.message || e);
+}
+
+/**
+ * Match a user-provided (possibly partial) bank name against the official
+ * bank list, using Claude tool use to force a structured {bankCode,
+ * bankName} result instead of parsing free-text JSON.
+ */
+async function matchBankNameWithClaude(providedName, officialBanks) {
+  const bankNames = officialBanks.map(b => `${b.code}: ${b.name}`).join('\n');
+
+  const response = await anthropicClient.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 300,
+    messages: [{
+      role: 'user',
+      content: `The user provided the bank name: "${providedName}".\nMatch this name against the official list of banks below (format: CODE: Full Bank Name). Use the return_bank_match tool to give your answer — if no reasonable match exists, pass null for both fields.\n\nOfficial Bank List:\n${bankNames}`
+    }],
+    tools: [{
+      name: 'return_bank_match',
+      description: 'Return the single best-matching bank code and name from the official list, or null values if no reasonable match exists.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          bankCode: { type: ['string', 'null'], description: 'The matched bank code from the official list, or null if no match' },
+          bankName: { type: ['string', 'null'], description: 'The matched full bank name from the official list, or null if no match' }
+        },
+        required: ['bankCode', 'bankName']
+      }
+    }],
+    tool_choice: { type: 'tool', name: 'return_bank_match' }
+  });
+
+  const toolUse = (response.content || []).find(b => b.type === 'tool_use');
+  return toolUse ? toolUse.input : { bankCode: null, bankName: null };
+}
 
 
 /**
@@ -249,68 +292,6 @@ const AVAILABLE_TOOLS = [
   {
     type: 'function',
     function: {
-      name: 'connect_lisk_wallet',
-      description: 'Connect a Lisk wallet to the user\'s account. Use when user wants to connect, link, or add their Lisk wallet. REQUIRES AUTHENTICATION. This will generate a message that the user needs to sign with their Lisk wallet to verify ownership. Do NOT call if user is not authenticated.',
-      parameters: {
-        type: 'object',
-        properties: {
-          network: {
-            type: 'string',
-            enum: ['mainnet', 'testnet'],
-            description: 'Lisk network to connect to (mainnet or testnet)',
-            default: 'mainnet'
-          }
-        },
-        required: []
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'verify_lisk_wallet',
-      description: 'Verify Lisk wallet connection by providing the signed message. Use after user has signed the connection message with their Lisk wallet. REQUIRES AUTHENTICATION. Needs: address, signature, and the original message. Do NOT call if user is not authenticated.',
-      parameters: {
-        type: 'object',
-        properties: {
-          address: {
-            type: 'string',
-            description: 'Lisk wallet address (starts with lsk)'
-          },
-          signature: {
-            type: 'string',
-            description: 'Signature of the connection message signed by the wallet'
-          },
-          message: {
-            type: 'string',
-            description: 'The original connection message that was signed'
-          },
-          network: {
-            type: 'string',
-            enum: ['mainnet', 'testnet'],
-            description: 'Lisk network (mainnet or testnet)',
-            default: 'mainnet'
-          }
-        },
-        required: ['address', 'signature', 'message']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_lisk_wallet',
-      description: 'Get connected Lisk wallet information including address and balance. Use when user asks about their Lisk wallet, Lisk balance, or connected wallet. REQUIRES AUTHENTICATION. Do NOT call if user is not authenticated.',
-      parameters: {
-        type: 'object',
-        properties: {},
-        required: []
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
       name: 'browse_web',
       description: 'Search the web for recent information that is not available in my training data. Use this when user asks about current events, recent news, latest prices, recent releases, or any information that requires up-to-date data from the internet. This will take a moment to gather the latest information. Do NOT use this for information I already have (like crypto prices from our API, NGN rates, or general crypto knowledge).',
       parameters: {
@@ -381,6 +362,51 @@ const AVAILABLE_TOOLS = [
           }
         },
         required: ['token', 'amount']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_notifications',
+      description: 'Get the user\'s notifications (transaction alerts, deposit confirmations, system messages, etc). Use when user asks to see their notifications, alerts, or updates. REQUIRES AUTHENTICATION.',
+      parameters: {
+        type: 'object',
+        properties: {
+          limit: {
+            type: 'number',
+            description: 'Maximum number of notifications to return',
+            default: 50
+          },
+          unreadOnly: {
+            type: 'boolean',
+            description: 'Only return unread notifications',
+            default: false
+          }
+        },
+        required: []
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'mark_notification_read',
+      description: 'Mark one notification (or all notifications) as read. Use when user asks to clear, dismiss, or mark notifications as read. REQUIRES AUTHENTICATION. Provide either notificationId for a single notification, or markAll to clear everything.',
+      parameters: {
+        type: 'object',
+        properties: {
+          notificationId: {
+            type: 'string',
+            description: 'ID of the specific notification to mark as read (omit if using markAll)'
+          },
+          markAll: {
+            type: 'boolean',
+            description: 'Mark all notifications as read instead of a single one',
+            default: false
+          }
+        },
+        required: []
       }
     }
   }
@@ -1131,12 +1157,117 @@ async function executeTool(toolName, parameters, authCtx = {}) {
           throw historyError;
         }
 
+      case 'get_notifications':
+        if (!authenticated) {
+          return {
+            success: false,
+            error: 'Authentication required',
+            message: 'You need to sign in to view notifications. Please sign in first.',
+            requiresAuth: true
+          };
+        }
+        try {
+          const params = new URLSearchParams();
+          if (parameters.limit) params.append('limit', parameters.limit);
+          if (parameters.unreadOnly) params.append('unreadOnly', 'true');
+
+          const notifRes = await axios.get(
+            `${API_BASE_URL}/notifications?${params.toString()}`,
+            {
+              headers,
+              timeout: 15000,
+              validateStatus: (status) => status < 500
+            }
+          );
+
+          if (notifRes.status >= 400) {
+            return logAndReturnResult('get_notifications', {
+              success: false,
+              error: `Failed to get notifications: ${notifRes.status}`,
+              message: 'Unable to retrieve notifications right now. Please try again later.',
+              status: notifRes.status
+            });
+          }
+
+          const notifications = notifRes.data?.data || [];
+          let displayMessage = notifications.length > 0
+            ? `Found ${notifications.length} notification${notifications.length !== 1 ? 's' : ''}. `
+            : 'No notifications found. ';
+          displayMessage += 'Please display each notification clearly, showing title, message, and whether it has been read.';
+
+          return logAndReturnResult('get_notifications', {
+            success: true,
+            data: notifications,
+            message: displayMessage
+          });
+        } catch (notifError) {
+          logger.error('get_notifications failed', { error: notifError.message, userId });
+          return logAndReturnResult('get_notifications', {
+            success: false,
+            error: notifError.message,
+            message: 'Failed to fetch notifications.',
+            status: notifError.response?.status || 500
+          });
+        }
+
+      case 'mark_notification_read':
+        if (!authenticated) {
+          return {
+            success: false,
+            error: 'Authentication required',
+            message: 'You need to sign in to manage notifications. Please sign in first.',
+            requiresAuth: true
+          };
+        }
+        if (!parameters.markAll && !parameters.notificationId) {
+          return {
+            success: false,
+            error: 'Missing required parameters',
+            message: 'Either notificationId or markAll must be provided.'
+          };
+        }
+        try {
+          const markUrl = parameters.markAll
+            ? `${API_BASE_URL}/notifications/read-all`
+            : `${API_BASE_URL}/notifications/${parameters.notificationId}/read`;
+
+          const markRes = await axios.put(markUrl, {}, {
+            headers,
+            timeout: 10000,
+            validateStatus: (status) => status < 500
+          });
+
+          if (markRes.status >= 400) {
+            return logAndReturnResult('mark_notification_read', {
+              success: false,
+              error: `Failed to mark as read: ${markRes.status}`,
+              message: 'Unable to update notification status right now. Please try again later.',
+              status: markRes.status
+            });
+          }
+
+          return logAndReturnResult('mark_notification_read', {
+            success: true,
+            data: markRes.data?.data,
+            message: parameters.markAll
+              ? 'All notifications marked as read.'
+              : 'Notification marked as read.'
+          });
+        } catch (markError) {
+          logger.error('mark_notification_read failed', { error: markError.message, userId });
+          return logAndReturnResult('mark_notification_read', {
+            success: false,
+            error: markError.message,
+            message: 'Failed to update notification.',
+            status: markError.response?.status || 500
+          });
+        }
 
        // ... inside executeTool(toolName, parameters, authCtx)
 // ... before the default case
 case 'match_naira':
         try {
-          if (!OpenAI) {
+          if (!anthropicClient) {
             return {
               success: false,
               error: 'LLM dependency missing',
@@ -1166,29 +1297,8 @@ case 'match_naira':
             });
           }
 
-          // Format the list for the LLM
-          const bankNames = officialBanks
-            .map(b => `${b.code}: ${b.name}`) // Use b.code and b.name as defined in routes/fetchnaira.js
-            .join('\n');
-
-          // 2. Use OpenAI/LLM to perform the matching logic
-          const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY }); // Initialize the client
-
-          const prompt = `The user provided the bank name: "${parameters.providedName}".
-          Match this name against the official list of banks below. The format is 'CODE: Full Bank Name'.
-          Return the single best match in JSON format: {"bankCode": "...", "bankName": "..."}.
-          The bankCode must be one of the codes from the list.
-          If no reasonable match is found, return: {"bankCode": null, "bankName": null}.
-
-          Official Bank List (CODE: Name):\n${bankNames}`;
-
-          const completion = await openai.chat.completions.create({
-            model: "gpt-4o-mini", // Using a fast, reliable model
-            messages: [{ role: "user", content: prompt }],
-            response_format: { type: "json_object" }
-          });
-
-          const matchResult = JSON.parse(completion.choices[0].message.content);
+          // 2. Use Claude to perform the matching logic
+          const matchResult = await matchBankNameWithClaude(parameters.providedName, officialBanks);
 
           // 3. Process and return the result
           let displayMessage = '';
@@ -1290,7 +1400,7 @@ case 'validate_account':
     };
   }
   try {
-    if (!OpenAI) {
+    if (!anthropicClient) {
       return {
         success: false,
         error: 'LLM dependency missing',
@@ -1323,29 +1433,8 @@ case 'validate_account':
         });
       }
 
-      // Format the list for the LLM
-      const bankNames = officialBanks
-        .map(b => `${b.code}: ${b.name}`)
-        .join('\n');
-
-      // Use OpenAI to match
-      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-      const prompt = `The user provided the bank name: "${parameters.providedName}".
-      Match this name against the official list of banks below. The format is 'CODE: Full Bank Name'.
-      Return the single best match in JSON format: {"bankCode": "...", "bankName": "..."}.
-      The bankCode must be one of the codes from the list.
-      If no reasonable match is found, return: {"bankCode": null, "bankName": null}.
-
-      Official Bank List (CODE: Name):\n${bankNames}`;
-
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [{ role: "user", content: prompt }],
-        response_format: { type: "json_object" }
-      });
-
-      const matchResult = JSON.parse(completion.choices[0].message.content);
+      // Use Claude to match
+      const matchResult = await matchBankNameWithClaude(parameters.providedName, officialBanks);
 
       if (matchResult.bankCode && matchResult.bankName) {
         bankCode = matchResult.bankCode;
@@ -1523,117 +1612,9 @@ case 'validate_account':
         // Same as get_sell_quote for now
         return executeTool('get_sell_quote', parameters, authCtx);
 
-      case 'connect_lisk_wallet':
-        if (!authenticated) {
-          return {
-            success: false,
-            error: 'Authentication required',
-            message: 'You need to sign in to connect your Lisk wallet. Please sign in first.',
-            requiresAuth: true
-          };
-        }
-        try {
-          const connectUrl = `${API_BASE_URL}/lisk/connect`;
-          logger.info('Initiating Lisk wallet connection', {
-            url: connectUrl,
-            hasAuth: !!headers.Authorization,
-            userId
-          });
-
-          const connectRes = await axios.post(connectUrl, {
-            network: parameters.network || 'mainnet'
-          }, {
-            headers,
-            timeout: 10000
-          });
-
-          logger.info('Lisk wallet connection initiated', {
-            status: connectRes.status,
-            hasData: !!connectRes.data
-          });
-
-          const data = connectRes.data;
-
-          return logAndReturnResult('connect_lisk_wallet', {
-            success: true,
-            data: data,
-            message: `To connect your Lisk wallet, please sign this message with your wallet: "${data.message}". This will verify your wallet ownership without triggering any blockchain transaction.`
-          });
-        } catch (error) {
-          logger.error('connect_lisk_wallet failed', {
-            error: error.message,
-            status: error.response?.status,
-            url: `${API_BASE_URL}/lisk/connect`,
-            userId
-          });
-
-          return logAndReturnResult('connect_lisk_wallet', {
-            success: false,
-            error: error.message,
-            message: 'Failed to initiate wallet connection.',
-            status: error.response?.status || 500
-          });
-        }
-
-      case 'verify_lisk_wallet':
-        if (!authenticated) {
-          return {
-            success: false,
-            error: 'Authentication required',
-            message: 'You need to sign in to verify your Lisk wallet. Please sign in first.',
-            requiresAuth: true
-          };
-        }
-        try {
-          const verifyUrl = `${API_BASE_URL}/lisk/verify`;
-          logger.info('Verifying Lisk wallet connection', {
-            url: verifyUrl,
-            hasAuth: !!headers.Authorization,
-            userId,
-            address: parameters.address
-          });
-
-          const verifyRes = await axios.post(verifyUrl, {
-            address: parameters.address,
-            signature: parameters.signature,
-            message: parameters.message,
-            network: parameters.network || 'mainnet'
-          }, {
-            headers,
-            timeout: 15000
-          });
-
-          logger.info('Lisk wallet verified', {
-            status: verifyRes.status,
-            hasData: !!verifyRes.data
-          });
-
-          const data = verifyRes.data;
-
-          return logAndReturnResult('verify_lisk_wallet', {
-            success: true,
-            data: data,
-            message: `Lisk wallet connected successfully! Your wallet address ${data.wallet?.address} is now linked to your account. Balance: ${data.wallet?.balance || '0'} LSK.`
-          });
-        } catch (error) {
-          logger.error('verify_lisk_wallet failed', {
-            error: error.message,
-            status: error.response?.status,
-            url: `${API_BASE_URL}/lisk/verify`,
-            userId
-          });
-
-          return logAndReturnResult('verify_lisk_wallet', {
-            success: false,
-            error: error.message,
-            message: 'Failed to verify wallet connection.',
-            status: error.response?.status || 500
-          });
-        }
-
       case 'browse_web':
         try {
-          // This is a placeholder - browsing will be handled in Chatbot.js with OpenAI's browsing capability
+          // This is a placeholder - browsing will be handled in Chatbot.js via processBrowsingChat
           // Return a special flag to indicate browsing is needed
           return logAndReturnResult('browse_web', {
             success: true,
@@ -1649,66 +1630,6 @@ case 'validate_account':
             success: false,
             error: error.message,
             message: 'Failed to browse the web.'
-          });
-        }
-
-      case 'get_lisk_wallet':
-        if (!authenticated) {
-          return {
-            success: false,
-            error: 'Authentication required',
-            message: 'You need to sign in to view your Lisk wallet. Please sign in first.',
-            requiresAuth: true
-          };
-        }
-        try {
-          const walletUrl = `${API_BASE_URL}/lisk/account`;
-          logger.info('Fetching Lisk wallet info', {
-            url: walletUrl,
-            hasAuth: !!headers.Authorization,
-            userId
-          });
-
-          const walletRes = await axios.get(walletUrl, {
-            headers,
-            timeout: 10000
-          });
-
-          logger.info('Lisk wallet info retrieved', {
-            status: walletRes.status,
-            hasData: !!walletRes.data
-          });
-
-          const data = walletRes.data;
-
-          return logAndReturnResult('get_lisk_wallet', {
-            success: true,
-            data: data,
-            message: `Your Lisk wallet: ${data.wallet?.address || 'N/A'}. Balance: ${data.wallet?.balance || '0'} LSK. Network: ${data.wallet?.network || 'mainnet'}.`
-          });
-        } catch (error) {
-          logger.error('get_lisk_wallet failed', {
-            error: error.message,
-            status: error.response?.status,
-            url: `${API_BASE_URL}/lisk/account`,
-            userId
-          });
-
-          // If wallet not connected, return helpful message
-          if (error.response?.status === 404) {
-            return logAndReturnResult('get_lisk_wallet', {
-              success: false,
-              error: 'Wallet not connected',
-              message: 'No Lisk wallet connected. Would you like to connect your Lisk wallet?',
-              status: 404
-            });
-          }
-
-          return logAndReturnResult('get_lisk_wallet', {
-            success: false,
-            error: error.message,
-            message: 'Failed to retrieve wallet information.',
-            status: error.response?.status || 500
           });
         }
 

@@ -348,10 +348,11 @@ router.post(
 
         if (verification.allValidationPassed === true) {
           try {
+            // onIdentityDocumentVerified doesn't exist anywhere in the codebase —
+            // this silently no-op'd forever, leaving kycLevel stuck below 2 despite
+            // an approved document. autoUpgradeKYC() is the real model method for this.
             const updatedUser = await User.findById(user._id);
-            if (updatedUser.onIdentityDocumentVerified) {
-              await updatedUser.onIdentityDocumentVerified(idType, idNumber);
-            }
+            await updatedUser.autoUpgradeKYC();
           } catch (upgradeError) {
             logger.warn('Error during KYC upgrade after verification', { error: upgradeError.message, userId: user._id });
           }

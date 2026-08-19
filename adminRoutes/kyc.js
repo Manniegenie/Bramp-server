@@ -188,7 +188,10 @@ router.post('/approve', async (req, res) => {
     }
 
     try {
-      await updatedUser.onIdentityDocumentVerified(idType, idNumber);
+      // onIdentityDocumentVerified doesn't exist anywhere in the codebase — this
+      // threw every time, silently caught here, leaving kycLevel stuck below 2
+      // despite the approval succeeding. autoUpgradeKYC() is the real method.
+      await updatedUser.autoUpgradeKYC();
     } catch (upgradeError) {
       logger.warn('Error during KYC upgrade after manual approval', { error: upgradeError.message, userId: user._id });
     }

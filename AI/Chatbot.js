@@ -1,12 +1,19 @@
-// AI/Chatbot.js — Modern LLM-powered chatbot with function calling (R1-R3)
-// Architecture: Structured Prompts (R1) + Function Calling (R2) + Tool Router (R3)
-// No fine-tuning needed - uses OpenAI function calling
+// AI/Chatbot.js — Modern LLM-powered chatbot with tool use (R1-R3)
+// Architecture: Structured Prompts (R1) + Tool Use (R2) + Tool Router (R3)
+// No fine-tuning needed - uses Claude tool use (Anthropic Messages API)
+//
+// Internal representation stays in the same shape this file always used
+// (OpenAI-style: assistantMessage.tool_calls[].function.{name,arguments as
+// JSON string}, tool results as {role:'tool', tool_call_id, content}). The
+// callClaude() adapter below is the ONLY place that speaks Anthropic's actual
+// wire format — everything else (intent detection, validation, the sell-flow
+// tool chaining, etc.) is untouched by the provider swap.
 
 require('dotenv').config();
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
-const OpenAI = (() => { try { return require('openai'); } catch (e) { return null; } })();
+const Anthropic = (() => { try { return require('@anthropic-ai/sdk'); } catch (e) { return null; } })();
 const { AVAILABLE_TOOLS, executeTool } = require('./tools');
 const { quickIntentCheck, analyzeConversationContext } = require('./aiIntents');
 // Session management removed - no longer using 2-minute session windows
@@ -16,23 +23,127 @@ const axios = require('axios');
 
 // Config
 const JWT_SECRET = process.env.JWT_SECRET || process.env.ACCESS_TOKEN_SECRET || '';
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || process.env.OPENAI_KEY;
-const AI_MODEL = process.env.OPENAI_MODEL_PRIMARY || 'gpt-4o'; // Use gpt-4o for function calling
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const AI_MODEL = process.env.CLAUDE_MODEL_PRIMARY || 'claude-sonnet-5';
 const AI_OUTPUT_MAX_TOKENS = parseInt(process.env.AI_OUTPUT_MAX_TOKENS || '500', 10);
 const API_BASE_URL = process.env.API_BASE_URL || 'https://priscaai.online';
-const OPENAI_SUPPORTS_RESPONSES = false; // Use chat completions with function calling
 
-// OpenAI client
-let openai = null;
+// Anthropic client
+let anthropic = null;
 try {
-  if (OpenAI && OPENAI_API_KEY && OPENAI_API_KEY.startsWith('sk-')) {
-    openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-    logger.info('OpenAI initialized with function calling support');
+  if (Anthropic && ANTHROPIC_API_KEY) {
+    anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+    logger.info('Anthropic initialized with tool use support', { model: AI_MODEL });
   } else {
-    logger.warn('OPENAI_API_KEY missing or OpenAI SDK not installed');
+    logger.warn('ANTHROPIC_API_KEY missing or Anthropic SDK not installed');
   }
 } catch (e) {
-  logger.error('OpenAI init error:', e?.message || e);
+  logger.error('Anthropic init error:', e?.message || e);
+}
+
+// ─── OpenAI-shape compatibility adapter over the Anthropic Messages API ────
+// Converts this file's existing OpenAI-shaped {messages, tools, tool_choice}
+// call into a real Anthropic request, and converts the response back into an
+// OpenAI-completion-shaped object ({choices:[{message:{content,tool_calls}}]})
+// so every call site below is unchanged.
+
+function toAnthropicTools(openAiTools) {
+  return (openAiTools || []).map(t => ({
+    name: t.function.name,
+    description: t.function.description,
+    input_schema: t.function.parameters
+  }));
+}
+
+function toAnthropicToolChoice(openAiChoice) {
+  if (!openAiChoice || openAiChoice === 'auto') return { type: 'auto' };
+  if (openAiChoice === 'required' || openAiChoice === 'any') return { type: 'any' };
+  if (typeof openAiChoice === 'object' && openAiChoice.function?.name) {
+    return { type: 'tool', name: openAiChoice.function.name };
+  }
+  return { type: 'auto' };
+}
+
+// Splits an OpenAI-shaped messages array into Anthropic's {system, messages}
+// shape. Handles the three message forms this file actually produces: plain
+// user/assistant text, an assistant message carrying .tool_calls (pushed back
+// in after a completion), and {role:'tool', tool_call_id, content} results.
+function toAnthropicMessages(openAiMessages) {
+  let system = '';
+  const converted = [];
+
+  for (const m of openAiMessages) {
+    if (m.role === 'system') {
+      system += (system ? '\n\n' : '') + m.content;
+    } else if (m.role === 'user') {
+      converted.push({ role: 'user', content: m.content });
+    } else if (m.role === 'assistant') {
+      if (m.tool_calls && m.tool_calls.length > 0) {
+        const blocks = [];
+        if (m.content) blocks.push({ type: 'text', text: m.content });
+        for (const tc of m.tool_calls) {
+          let input = {};
+          try { input = JSON.parse(tc.function.arguments || '{}'); } catch (_) { /* leave empty */ }
+          blocks.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input });
+        }
+        converted.push({ role: 'assistant', content: blocks });
+      } else {
+        converted.push({ role: 'assistant', content: m.content || '' });
+      }
+    } else if (m.role === 'tool') {
+      converted.push({
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: m.tool_call_id, content: m.content }]
+      });
+    }
+  }
+
+  return { system, messages: converted };
+}
+
+async function callClaude({ model, messages, tools, tool_choice, max_completion_tokens, temperature }) {
+  const { system, messages: anthMessages } = toAnthropicMessages(messages);
+
+  const params = {
+    model: model || AI_MODEL,
+    system: system || undefined,
+    messages: anthMessages,
+    max_tokens: max_completion_tokens || AI_OUTPUT_MAX_TOKENS,
+    temperature: temperature !== undefined ? temperature : 0.7
+  };
+
+  // tool_choice 'none' means "don't call more tools, just answer" — the
+  // Anthropic-native way to force that is to omit tools entirely.
+  if (tool_choice !== 'none' && tools && tools.length > 0) {
+    params.tools = toAnthropicTools(tools);
+    params.tool_choice = toAnthropicToolChoice(tool_choice);
+  }
+
+  const response = await anthropic.messages.create(params);
+
+  let textContent = '';
+  const toolCalls = [];
+  for (const block of response.content || []) {
+    if (block.type === 'text') {
+      textContent += block.text;
+    } else if (block.type === 'tool_use') {
+      toolCalls.push({
+        id: block.id,
+        type: 'function',
+        function: { name: block.name, arguments: JSON.stringify(block.input || {}) }
+      });
+    }
+  }
+
+  return {
+    choices: [{
+      message: {
+        role: 'assistant',
+        content: textContent,
+        tool_calls: toolCalls.length > 0 ? toolCalls : undefined
+      }
+    }]
+  };
 }
 
 // Simple session management
@@ -601,7 +712,7 @@ if (functionName === 'create_sell_transaction') {
 // Session checking removed - no longer using session windows
 
 /**
- * Process browsing chat with OpenAI browsing capability
+ * Process browsing chat, using the browse_web tool for live information
  */
 async function processBrowsingChat({ sessionId, message, history = [], authCtx = {}, timeout }) {
   const startTime = Date.now();
@@ -629,8 +740,8 @@ async function processBrowsingChat({ sessionId, message, history = [], authCtx =
   });
 
   try {
-    // Use OpenAI with browsing enabled (if available)
-    const completion = await openai.chat.completions.create({
+    // Use Claude with browsing enabled (if available)
+    const completion = await callClaude({
       model: AI_MODEL,
       messages: messages,
       tools: AVAILABLE_TOOLS,
@@ -676,7 +787,7 @@ async function processBrowsingChat({ sessionId, message, history = [], authCtx =
       });
 
       // Continue conversation to get final response
-      const finalCompletion = await openai.chat.completions.create({
+      const finalCompletion = await callClaude({
         model: AI_MODEL,
         messages: finalMessages,
         tools: AVAILABLE_TOOLS,
@@ -797,15 +908,15 @@ if (process.env.DEBUG_LOGGING === 'true') {
     authenticated: authCtx.authenticated
   });
 }
-  // If OpenAI not available, return helpful message
-  if (!openai) {
+  // If Claude not available, return helpful message
+  if (!anthropic) {
     return {
       reply: "I'm having a technical moment. Please check back in a few seconds or use the app directly.",
       showWidget: false,
       metadata: {
         intent: finalIntent,
         responseTime: Date.now() - startTime,
-        error: 'openai_not_available'
+        error: 'claude_not_available'
       }
     };
   }
@@ -823,8 +934,8 @@ if (process.env.DEBUG_LOGGING === 'true') {
       content: enhancedPrompt
     };
 
-    // Call OpenAI with function calling
-    const completion = await openai.chat.completions.create({
+    // Call Claude with tool use
+    const completion = await callClaude({
   model: AI_MODEL,
   messages: messages,
   tools: AVAILABLE_TOOLS,
@@ -926,7 +1037,7 @@ Do NOT just repeat "function executed successfully" - show the actual data and a
         content: formattingPrompt
       });
 
-      const finalCompletion = await openai.chat.completions.create({
+      const finalCompletion = await callClaude({
         model: AI_MODEL,
         messages: finalMessages,
         tools: AVAILABLE_TOOLS,
@@ -1145,7 +1256,8 @@ router.get('/chat/browsing/:sessionId', async (req, res) => {
 router.get('/chat/health', async (_req, res) => {
   res.json({
     status: 'active',
-    openai: !!openai,
+    provider: 'anthropic',
+    available: !!anthropic,
     model: AI_MODEL,
     toolsAvailable: AVAILABLE_TOOLS.length,
     sellSessions: 0, // Session management removed
