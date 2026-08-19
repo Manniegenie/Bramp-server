@@ -238,8 +238,9 @@ function detectUserExpertise(message, history = []) {
 }
 
 // Build system prompt (R1: Structured Prompts)
-function buildSystemPrompt(authCtx = {}, userExpertise = 'intermediate') {
-  let prompt = `You are the Bramp AI assistant — composed, precise, and quietly capable, in the manner of Jarvis. You address the user directly, never pad with corporate filler, and get straight to what's useful. Confident and efficient, not chatty for its own sake.
+function buildSystemPrompt(authCtx = {}, userExpertise = 'intermediate', assistantName = null) {
+  const selfName = assistantName && assistantName.trim() ? assistantName.trim() : 'Bramp AI';
+  let prompt = `You are ${selfName}, the user's AI assistant for Bramp — composed, precise, and quietly capable, in the manner of Jarvis. When asked your name, or what to call you, answer "${selfName}" — that's the name the user chose for you, use it consistently, never revert to calling yourself "Bramp AI" or any other name once one has been set. You address the user directly, never pad with corporate filler, and get straight to what's useful. Confident and efficient, not chatty for its own sake.
 
 ABOUT BRAMP: Bramp converts crypto to Naira automatically. Deposits are auto-converted to NGNB (Bramp's naira balance) the moment they land — there is no manual "sell" or "swap" step for the user to trigger. Your job is to help users understand and act on their account, not to broker manual trades.
 
@@ -510,7 +511,7 @@ async function handleFunctionCall(toolCall, authCtx) {
 /**
  * Process browsing chat, using the browse_web tool for live information
  */
-async function processBrowsingChat({ sessionId, message, history = [], authCtx = {}, timeout }) {
+async function processBrowsingChat({ sessionId, message, history = [], authCtx = {}, timeout, assistantName = null }) {
   const startTime = Date.now();
   const session = getSession(sessionId);
   const userExpertise = detectUserExpertise(message, history);
@@ -519,7 +520,7 @@ async function processBrowsingChat({ sessionId, message, history = [], authCtx =
   const messages = [];
   messages.push({
     role: 'system',
-    content: buildSystemPrompt(authCtx, userExpertise)
+    content: buildSystemPrompt(authCtx, userExpertise, assistantName)
   });
 
   // Add conversation history
@@ -633,7 +634,7 @@ async function processBrowsingChat({ sessionId, message, history = [], authCtx =
 }
 
 // Core chat processing with function calling
-async function processChat({ sessionId, message, history = [], authCtx }) {
+async function processChat({ sessionId, message, history = [], authCtx, assistantName = null }) {
   const startTime = Date.now();
   const msg = String(message || '').trim();
 
@@ -675,7 +676,7 @@ async function processChat({ sessionId, message, history = [], authCtx }) {
   // Add system prompt with expertise-aware guidance
   messages.push({
     role: 'system',
-    content: buildSystemPrompt(authCtx, userExpertise)
+    content: buildSystemPrompt(authCtx, userExpertise, assistantName)
   });
 
   // Add conversation history (keep last 20 messages)
@@ -732,7 +733,7 @@ if (process.env.DEBUG_LOGGING === 'true') {
 
   try {
     // Enhance system prompt with intent-specific guidance
-    let enhancedPrompt = buildSystemPrompt(authCtx);
+    let enhancedPrompt = buildSystemPrompt(authCtx, userExpertise, assistantName);
     if (recommendedFunctions.length > 0) {
       enhancedPrompt += `\n\nCURRENT USER INTENT: ${finalIntent}\nRecommended functions: ${recommendedFunctions.join(', ')}\nConsider using these functions to fulfill the user's request.`;
     }
@@ -937,14 +938,15 @@ Do NOT just repeat "function executed successfully" - show the actual data and a
 router.post('/chat', async (req, res) => {
   try {
     const authCtx = await getAuthContext(req);
-    const { message, history = [], sessionId } = req.body || {};
+    const { message, history = [], sessionId, assistantName } = req.body || {};
     const id = String(sessionId || authCtx.userId || req.ip || 'anon');
 
     const result = await processChat({
       sessionId: id,
       message,
       history,
-      authCtx
+      authCtx,
+      assistantName: typeof assistantName === 'string' ? assistantName.trim().slice(0, 50) : null
     });
 
     // If browsing is required, send immediate response and process in background
@@ -972,6 +974,7 @@ router.post('/chat', async (req, res) => {
             message,
             history,
             authCtx,
+            assistantName: typeof assistantName === 'string' ? assistantName.trim().slice(0, 50) : null,
             timeout: browsingTimeout
           });
 
