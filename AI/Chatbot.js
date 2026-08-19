@@ -101,15 +101,18 @@ function toAnthropicMessages(openAiMessages) {
   return { system, messages: converted };
 }
 
-async function callClaude({ model, messages, tools, tool_choice, max_completion_tokens, temperature }) {
+async function callClaude({ model, messages, tools, tool_choice, max_completion_tokens }) {
   const { system, messages: anthMessages } = toAnthropicMessages(messages);
 
   const params = {
     model: model || AI_MODEL,
     system: system || undefined,
     messages: anthMessages,
-    max_tokens: max_completion_tokens || AI_OUTPUT_MAX_TOKENS,
-    temperature: temperature !== undefined ? temperature : 0.7
+    max_tokens: max_completion_tokens || AI_OUTPUT_MAX_TOKENS
+    // No temperature — claude-sonnet-5 hard-rejects it (400: "temperature is
+    // deprecated for this model"), unlike OpenAI where it's just a knob.
+    // Callers below still pass temperature (leftover from the OpenAI-shaped
+    // call sites) but it's intentionally dropped here at the adapter boundary.
   };
 
   // tool_choice 'none' means "don't call more tools, just answer" — the
