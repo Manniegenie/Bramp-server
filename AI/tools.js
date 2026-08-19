@@ -62,57 +62,8 @@ const AVAILABLE_TOOLS = [
   {
     type: 'function',
     function: {
-      name: 'create_sell_transaction',
-      description: 'Initiate a sell transaction to convert crypto to NGN. ONLY call this after user has provided bank details. The system will automatically validate the account details (including bank name matching and account name resolution) and save payout details upon success. This will return a deposit address for the user to send crypto to, and prompt the user to double-check the account name. REQUIRES: token, network, bankCode, accountNumber, bankName (optional if partial for matching). AccountName is fetched via validation. REQUIRES AUTHENTICATION.',
-      parameters: {
-        type: 'object',
-        properties: {
-          token: {
-            type: 'string',
-            enum: ['BTC', 'ETH', 'SOL', 'USDT', 'USDC', 'BNB', 'MATIC', 'AVAX'],
-            description: 'The cryptocurrency token to sell'
-          },
-          network: {
-            type: 'string',
-            enum: ['BTC', 'BITCOIN', 'ETH', 'ETHEREUM', 'ERC20', 'SOL', 'SOLANA', 'TRX', 'TRON', 'TRC20', 'BSC', 'BNB SMART CHAIN', 'BEP20', 'BINANCE', 'POLYGON', 'AVALANCHE'],
-            description: 'The blockchain network for the token (must match token). Common values: BTC/BITCOIN for Bitcoin, ETH/ETHEREUM/ERC20 for Ethereum, SOL/SOLANA for Solana, TRX/TRON/TRC20 for Tron, BSC/BNB SMART CHAIN/BEP20 for BNB Smart Chain, POLYGON for Polygon, AVALANCHE for Avalanche'
-          },
-          amount: {
-            type: 'number',
-            description: 'Amount to sell in token units (optional - user can send any amount)'
-          },
-          currency: {
-            type: 'string',
-            enum: ['TOKEN', 'NGN'],
-            description: 'Currency of the amount - TOKEN for crypto amount, NGN for NGN amount',
-            default: 'TOKEN'
-          },
-          bankCode: {
-            type: 'string',
-            description: 'Bank code for payout (REQUIRED)'
-          },
-          accountNumber: {
-            type: 'string',
-            description: 'Bank account number for payout (REQUIRED)'
-          },
-          bankName: {
-            type: 'string',
-            description: 'Full or partial bank name for payout (optional - will be matched/validated if provided)'
-          },
-          accountName: {
-            type: 'string',
-            description: 'Account holder name (optional - will be resolved via validation)'
-          }
-        },
-        required: ['token', 'network', 'bankCode', 'accountNumber']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
       name: 'validate_account',
-      description: 'Validate bank account details by matching a provided bank name (if partial) to the official code/name, then resolving the account name via bank API. Use this standalone when user wants to check/validate their bank details before a transaction, or let create_sell_transaction handle it automatically. Returns matched bank details, validated account name, and a confirmation prompt. REQUIRES AUTHENTICATION.',
+      description: 'Validate bank account details by matching a provided bank name (if partial) to the official code/name, then resolving the account name via bank API. Use this when user wants to check/validate their bank details, or let prepare_withdrawal handle it automatically as part of preparing a withdrawal. Returns matched bank details, validated account name, and a confirmation prompt. REQUIRES AUTHENTICATION.',
       parameters: {
         type: 'object',
         properties: {
@@ -130,77 +81,6 @@ const AVAILABLE_TOOLS = [
           }
         },
         required: ['accountNumber']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_sell_quote',
-      description: 'Get a quote showing how much NGN user will receive for selling crypto. Use when user asks "how much will I get", "what is the rate", "how much naira for X tokens", or wants to know the quote before selling. REQUIRES AUTHENTICATION. REQUIRES: token and amount. Network will be auto-detected from token if not provided. Do NOT call this function if token or amount is missing - ask the user first. Do NOT call if user is not authenticated.',
-      parameters: {
-        type: 'object',
-        properties: {
-          token: {
-            type: 'string',
-            enum: ['BTC', 'ETH', 'SOL', 'USDT', 'USDC', 'BNB', 'MATIC', 'AVAX'],
-            description: 'The cryptocurrency token to sell'
-          },
-          amount: {
-            type: 'number',
-            description: 'Amount to sell in token units'
-          }
-        },
-        required: ['token', 'amount']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'create_buy_transaction',
-      description: 'Initiate a buy transaction (NGN to crypto). REQUIRES USER TO BE AUTHENTICATED/SIGNED IN. Do not call this function if user is not signed in. User pays NGN and receives crypto.',
-      parameters: {
-        type: 'object',
-        properties: {
-          token: {
-            type: 'string',
-            enum: ['BTC', 'ETH', 'SOL', 'USDT', 'USDC', 'BNB', 'MATIC', 'AVAX'],
-            description: 'The cryptocurrency token to buy'
-          },
-          network: {
-            type: 'string',
-            enum: ['BITCOIN NETWORK', 'ETHEREUM NETWORK', 'SOLANA NETWORK', 'TRON NETWORK', 'BNB SMART CHAIN', 'POLYGON NETWORK', 'AVALANCHE NETWORK'],
-            description: 'The blockchain network for the token'
-          },
-          amount: {
-            type: 'number',
-            description: 'Amount to buy in NGN (minimum 5000 NGN)'
-          }
-        },
-        required: ['token', 'network', 'amount']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_buy_quote',
-      description: 'Get a quote for buying crypto (how much crypto you will receive for NGN). REQUIRES USER TO BE AUTHENTICATED/SIGNED IN. Do not call this function if user is not signed in.',
-      parameters: {
-        type: 'object',
-        properties: {
-          token: {
-            type: 'string',
-            enum: ['BTC', 'ETH', 'SOL', 'USDT', 'USDC', 'BNB', 'MATIC', 'AVAX'],
-            description: 'The cryptocurrency token to buy'
-          },
-          amount: {
-            type: 'number',
-            description: 'Amount to spend in NGN'
-          }
-        },
-        required: ['token', 'amount']
       }
     }
   },
@@ -309,65 +189,6 @@ const AVAILABLE_TOOLS = [
   {
     type: 'function',
     function: {
-      name: 'initiate_swap',
-      description: 'Initiate a token swap (exchange one crypto for another)',
-      parameters: {
-        type: 'object',
-        properties: {
-          fromToken: {
-            type: 'string',
-            enum: ['BTC', 'ETH', 'SOL', 'USDT', 'USDC', 'BNB', 'MATIC', 'AVAX'],
-            description: 'Token to swap from'
-          },
-          toToken: {
-            type: 'string',
-            enum: ['BTC', 'ETH', 'SOL', 'USDT', 'USDC', 'BNB', 'MATIC', 'AVAX'],
-            description: 'Token to swap to'
-          },
-          amount: {
-            type: 'number',
-            description: 'Amount of fromToken to swap'
-          },
-          fromNetwork: {
-            type: 'string',
-            enum: ['BTC', 'BITCOIN', 'ETH', 'ETHEREUM', 'ERC20', 'SOL', 'SOLANA', 'TRX', 'TRON', 'TRC20', 'BSC', 'BNB SMART CHAIN', 'BEP20', 'BINANCE', 'POLYGON', 'AVALANCHE'],
-            description: 'Network for fromToken'
-          },
-          toNetwork: {
-            type: 'string',
-            enum: ['BTC', 'BITCOIN', 'ETH', 'ETHEREUM', 'ERC20', 'SOL', 'SOLANA', 'TRX', 'TRON', 'TRC20', 'BSC', 'BNB SMART CHAIN', 'BEP20', 'BINANCE', 'POLYGON', 'AVALANCHE'],
-            description: 'Network for toToken'
-          }
-        },
-        required: ['fromToken', 'toToken', 'amount', 'fromNetwork', 'toNetwork']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_quote_price',
-      description: 'Get a general price quote for any token in NGN (selling rate)',
-      parameters: {
-        type: 'object',
-        properties: {
-          token: {
-            type: 'string',
-            enum: ['BTC', 'ETH', 'SOL', 'USDT', 'USDC', 'BNB', 'MATIC', 'AVAX'],
-            description: 'The cryptocurrency token'
-          },
-          amount: {
-            type: 'number',
-            description: 'Amount in token units'
-          }
-        },
-        required: ['token', 'amount']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
       name: 'get_notifications',
       description: 'Get the user\'s notifications (transaction alerts, deposit confirmations, system messages, etc). Use when user asks to see their notifications, alerts, or updates. REQUIRES AUTHENTICATION.',
       parameters: {
@@ -407,6 +228,93 @@ const AVAILABLE_TOOLS = [
           }
         },
         required: []
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'prepare_withdrawal',
+      description: 'Prepare a withdrawal of NGNB balance to a bank account. Validates the bank details and resolves the account name, then hands off to the app\'s secure confirmation screen where the user enters their PIN — this tool does NOT move any money itself. REQUIRES AUTHENTICATION. Do NOT ask for or accept a PIN or 2FA code in chat.',
+      parameters: {
+        type: 'object',
+        properties: {
+          amount: { type: 'number', description: 'Amount in NGN to withdraw' },
+          accountNumber: { type: 'string', description: 'Destination bank account number' },
+          bankCode: { type: 'string', description: 'Bank code, if known (e.g. "044" for Access Bank)' },
+          bankName: { type: 'string', description: 'Full or partial bank name — used to match the bank if bankCode is not known' },
+          narration: { type: 'string', description: 'Optional note for the withdrawal' }
+        },
+        required: ['amount', 'accountNumber']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'prepare_airtime_purchase',
+      description: 'Prepare an airtime purchase. Hands off to the app\'s secure confirmation screen where the user enters their PIN — this tool does NOT complete the purchase itself. REQUIRES AUTHENTICATION. Do NOT ask for or accept a PIN or 2FA code in chat.',
+      parameters: {
+        type: 'object',
+        properties: {
+          phone: { type: 'string', description: 'Phone number to top up' },
+          network: { type: 'string', enum: ['mtn', 'glo', 'airtel', '9mobile'], description: 'Mobile network' },
+          amount: { type: 'number', description: 'Amount in NGN' }
+        },
+        required: ['phone', 'network', 'amount']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'prepare_data_purchase',
+      description: 'Prepare a mobile data purchase. Opens the app\'s data purchase screen where the user picks a plan and enters their PIN — this tool does NOT complete the purchase itself. REQUIRES AUTHENTICATION. Do NOT ask for or accept a PIN or 2FA code in chat.',
+      parameters: {
+        type: 'object',
+        properties: {
+          phone: { type: 'string', description: 'Phone number to buy data for' },
+          network: { type: 'string', enum: ['mtn', 'glo', 'airtel', '9mobile'], description: 'Mobile network' },
+          planId: { type: 'string', description: 'Specific data plan/variation ID, if the user named one' }
+        },
+        required: ['phone', 'network']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'prepare_electricity_purchase',
+      description: 'Prepare an electricity bill payment. Verifies the meter number against the disco before handing off to the app\'s secure confirmation screen where the user enters their PIN — this tool does NOT complete the payment itself. REQUIRES AUTHENTICATION. Do NOT ask for or accept a PIN or 2FA code in chat.',
+      parameters: {
+        type: 'object',
+        properties: {
+          meterNumber: { type: 'string', description: 'Meter number' },
+          disco: {
+            type: 'string',
+            enum: ['ikeja-electric', 'eko-electric', 'kano-electric', 'portharcourt-electric', 'jos-electric', 'ibadan-electric', 'kaduna-electric', 'abuja-electric', 'enugu-electric', 'benin-electric', 'aba-electric', 'yola-electric'],
+            description: 'Electricity distribution company'
+          },
+          meterType: { type: 'string', enum: ['prepaid', 'postpaid'], description: 'Meter type' },
+          amount: { type: 'number', description: 'Amount in NGN' }
+        },
+        required: ['meterNumber', 'disco', 'meterType', 'amount']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'prepare_cable_purchase',
+      description: 'Prepare a cable TV subscription renewal. Verifies the smartcard/IUC number against the provider before handing off to the app\'s secure confirmation screen where the user enters their PIN — this tool does NOT complete the payment itself. REQUIRES AUTHENTICATION. Do NOT ask for or accept a PIN or 2FA code in chat.',
+      parameters: {
+        type: 'object',
+        properties: {
+          smartcardNumber: { type: 'string', description: 'Smartcard or IUC number' },
+          provider: { type: 'string', enum: ['dstv', 'gotv', 'startimes', 'showmax'], description: 'Cable TV provider' },
+          packageId: { type: 'string', description: 'Specific package/variation ID, if the user named one' }
+        },
+        required: ['smartcardNumber', 'provider']
       }
     }
   }
@@ -464,322 +372,6 @@ async function executeTool(toolName, parameters, authCtx = {}) {
     }
 
     switch (toolName) {
-      case 'create_sell_transaction':
-        if (!authenticated) {
-          return {
-            success: false,
-            error: 'Authentication required',
-            message: 'You need to sign in to initiate a sell transaction. Please sign in first.',
-            requiresAuth: true
-          };
-        }
-        try {
-          const sellUrl = `${API_BASE_URL}/sell/initiate`;
-          logger.info('Calling sell endpoint', {
-            url: sellUrl,
-            hasAuth: !!headers.Authorization,
-            userId
-          });
-
-          const sellRes = await axios.post(
-            sellUrl,
-            parameters,
-            {
-              headers,
-              timeout: 15000,
-              validateStatus: (status) => status < 500
-            }
-          );
-
-          // Check for HTML error responses
-          const responseData = sellRes.data;
-          const isHtmlResponse = typeof responseData === 'string' && (
-            responseData.includes('<!DOCTYPE html>') ||
-            responseData.includes('<html') ||
-            responseData.includes('Service Suspended')
-          );
-
-          if (isHtmlResponse || sellRes.status >= 400) {
-            return {
-              success: false,
-              error: sellRes.status >= 400 ? `Transaction failed: ${sellRes.status}` : 'Service unavailable',
-              message: 'Unable to initiate sell transaction. Please try again later or contact support.',
-              status: sellRes.status || 500
-            };
-          }
-
-          // Validate response data
-          if (!responseData || (typeof responseData === 'object' && !responseData.paymentId && !responseData.depositAddress)) {
-            logger.warn('create_sell_transaction: Response missing expected data', { data: responseData });
-          }
-
-          // Format helpful message with transaction details
-          let displayMessage = 'Sell transaction initiated successfully! ';
-          if (responseData.paymentId) {
-            displayMessage += `Payment ID: ${responseData.paymentId}. `;
-          }
-          if (responseData.depositAddress) {
-            displayMessage += `Deposit address: ${responseData.depositAddress}. `;
-          }
-          if (responseData.quote) {
-            const quote = responseData.quote;
-            if (quote.amountNGN) {
-              displayMessage += `You will receive ₦${Number(quote.amountNGN).toLocaleString()} for ${quote.amount || 'your crypto'}. `;
-            }
-          }
-          displayMessage += 'Please display the deposit address and payment details clearly to the user.';
-
-          return {
-            success: true,
-            data: responseData,
-            message: displayMessage
-          };
-        } catch (sellError) {
-          if (sellError.code === 'ECONNABORTED' || sellError.message.includes('timeout')) {
-            return {
-              success: false,
-              error: 'Request timeout',
-              message: 'The transaction request took too long. Please try again.',
-              status: 408
-            };
-          }
-          throw sellError;
-        }
-
-      case 'get_sell_quote':
-        if (!authenticated) {
-          return {
-            success: false,
-            error: 'Authentication required',
-            message: 'You need to sign in to get a sell quote. Please sign in first.',
-            requiresAuth: true
-          };
-        }
-        try {
-          // Map token to network if not provided
-          const tokenToNetwork = {
-            'BTC': 'BITCOIN',
-            'ETH': 'ETHEREUM',
-            'SOL': 'SOLANA',
-            'USDT': 'TRON',
-            'USDC': 'ETHEREUM',
-            'BNB': 'BNB SMART CHAIN',
-            'MATIC': 'POLYGON',
-            'AVAX': 'AVALANCHE'
-          };
-
-          const network = parameters.network || tokenToNetwork[parameters.token?.toUpperCase()] || 'ETHEREUM';
-
-          const quoteUrl = `${API_BASE_URL}/sell/initiate`;
-          logger.info('Calling sell quote endpoint', {
-            url: quoteUrl,
-            hasAuth: !!headers.Authorization,
-            token: parameters.token,
-            network,
-            amount: parameters.amount
-          });
-
-          // Reuse initiate endpoint with amount to get quote
-          const quoteRes = await axios.post(
-            quoteUrl,
-            {
-              token: parameters.token,
-              network: network,
-              amount: parameters.amount || 0
-            },
-            {
-              headers,
-              timeout: 15000,
-              validateStatus: (status) => status < 500
-            }
-          );
-
-          // Check for HTML error responses
-          const responseData = quoteRes.data;
-          const isHtmlResponse = typeof responseData === 'string' && (
-            responseData.includes('<!DOCTYPE html>') ||
-            responseData.includes('<html') ||
-            responseData.includes('Service Suspended')
-          );
-
-          if (isHtmlResponse || quoteRes.status >= 400) {
-            return {
-              success: false,
-              error: quoteRes.status >= 400 ? `Failed to get quote: ${quoteRes.status}` : 'Service unavailable',
-              message: 'Unable to retrieve sell quote. Please try again later.',
-              status: quoteRes.status || 500
-            };
-          }
-
-          const quoteData = responseData.quote || responseData;
-
-          // Format helpful message with quote details
-          let displayMessage = 'Sell quote retrieved successfully. ';
-          if (quoteData.amountNGN) {
-            displayMessage += `You will receive ₦${Number(quoteData.amountNGN).toLocaleString()} `;
-          }
-          if (quoteData.amount && quoteData.token) {
-            displayMessage += `for ${quoteData.amount} ${quoteData.token}. `;
-          }
-          if (quoteData.rate) {
-            displayMessage += `Rate: ₦${Number(quoteData.rate).toLocaleString()} per ${quoteData.token || 'token'}. `;
-          }
-          displayMessage += 'Please display the quote details clearly to the user.';
-
-          return {
-            success: true,
-            data: quoteData,
-            message: displayMessage
-          };
-        } catch (quoteError) {
-          if (quoteError.code === 'ECONNABORTED' || quoteError.message.includes('timeout')) {
-            return {
-              success: false,
-              error: 'Request timeout',
-              message: 'The quote request took too long. Please try again.',
-              status: 408
-            };
-          }
-          throw quoteError;
-        }
-
-      case 'create_buy_transaction':
-        if (!authenticated) {
-          return {
-            success: false,
-            error: 'Authentication required',
-            message: 'You need to sign in to initiate a buy transaction. Please sign in first.',
-            requiresAuth: true
-          };
-        }
-        try {
-          const buyRes = await axios.post(
-            `${API_BASE_URL}/buy/initiate`,
-            parameters,
-            {
-              headers,
-              timeout: 15000,
-              validateStatus: (status) => status < 500
-            }
-          );
-
-          // Check for HTML error responses
-          const responseData = buyRes.data;
-          const isHtmlResponse = typeof responseData === 'string' && (
-            responseData.includes('<!DOCTYPE html>') ||
-            responseData.includes('<html') ||
-            responseData.includes('Service Suspended')
-          );
-
-          if (isHtmlResponse || buyRes.status >= 400) {
-            return {
-              success: false,
-              error: buyRes.status >= 400 ? `Transaction failed: ${buyRes.status}` : 'Service unavailable',
-              message: 'Unable to initiate buy transaction. Please try again later or contact support.',
-              status: buyRes.status || 500
-            };
-          }
-
-          // Format helpful message with transaction details
-          let displayMessage = 'Buy transaction initiated successfully! ';
-          if (responseData.paymentId) {
-            displayMessage += `Payment ID: ${responseData.paymentId}. `;
-          }
-          if (responseData.quote) {
-            const quote = responseData.quote;
-            if (quote.amount) {
-              displayMessage += `You will receive ${quote.amount} ${quote.token || parameters.token || 'crypto'} `;
-            }
-            if (quote.amountNGN) {
-              displayMessage += `for ₦${Number(quote.amountNGN).toLocaleString()}. `;
-            }
-          }
-          displayMessage += 'Please display the transaction details clearly to the user.';
-
-          return {
-            success: true,
-            data: responseData,
-            message: displayMessage
-          };
-        } catch (buyError) {
-          if (buyError.code === 'ECONNABORTED' || buyError.message.includes('timeout')) {
-            return {
-              success: false,
-              error: 'Request timeout',
-              message: 'The transaction request took too long. Please try again.',
-              status: 408
-            };
-          }
-          throw buyError;
-        }
-
-      case 'get_buy_quote':
-        if (!authenticated) {
-          return {
-            success: false,
-            error: 'Authentication required',
-            message: 'You need to sign in to get a buy quote. Please sign in first.',
-            requiresAuth: true
-          };
-        }
-        try {
-          const buyQuoteRes = await axios.post(
-            `${API_BASE_URL}/buy/quote`,
-            parameters,
-            {
-              headers,
-              timeout: 15000,
-              validateStatus: (status) => status < 500
-            }
-          );
-
-          // Check for HTML error responses
-          const responseData = buyQuoteRes.data;
-          const isHtmlResponse = typeof responseData === 'string' && (
-            responseData.includes('<!DOCTYPE html>') ||
-            responseData.includes('<html') ||
-            responseData.includes('Service Suspended')
-          );
-
-          if (isHtmlResponse || buyQuoteRes.status >= 400) {
-            return {
-              success: false,
-              error: buyQuoteRes.status >= 400 ? `Failed to get quote: ${buyQuoteRes.status}` : 'Service unavailable',
-              message: 'Unable to retrieve buy quote. Please try again later.',
-              status: buyQuoteRes.status || 500
-            };
-          }
-
-          // Format helpful message with quote details
-          let displayMessage = 'Buy quote retrieved successfully. ';
-          if (responseData.amount) {
-            displayMessage += `You will receive ${responseData.amount} ${responseData.token || parameters.token || 'crypto'} `;
-          }
-          if (responseData.amountNGN) {
-            displayMessage += `for ₦${Number(responseData.amountNGN).toLocaleString()}. `;
-          }
-          if (responseData.rate) {
-            displayMessage += `Rate: ₦${Number(responseData.rate).toLocaleString()} per ${responseData.token || 'token'}. `;
-          }
-          displayMessage += 'Please display the quote details clearly to the user.';
-
-          return {
-            success: true,
-            data: responseData,
-            message: displayMessage
-          };
-        } catch (quoteError) {
-          if (quoteError.code === 'ECONNABORTED' || quoteError.message.includes('timeout')) {
-            return {
-              success: false,
-              error: 'Request timeout',
-              message: 'The quote request took too long. Please try again.',
-              status: 408
-            };
-          }
-          throw quoteError;
-        }
-
       case 'check_transaction_status':
         if (!authenticated) {
           return {
@@ -1263,6 +855,240 @@ async function executeTool(toolName, parameters, authCtx = {}) {
           });
         }
 
+      // ─── "Prepare" tools: validate details and hand off to the app's own ───
+      // secure PIN/2FA confirmation UI. NONE of these execute the actual
+      // money movement — passwordpin/twoFactorCode must never be collected
+      // via chat text. Each returns requiresConfirmation + confirmationScreen
+      // + prefillData, which Chatbot.js short-circuits on before Layer 3
+      // formatting, and the frontend uses to navigate to the real screen.
+
+      case 'prepare_withdrawal':
+        if (!authenticated) {
+          return {
+            success: false,
+            error: 'Authentication required',
+            message: 'You need to sign in to withdraw. Please sign in first.',
+            requiresAuth: true
+          };
+        }
+        if (!parameters.amount || parameters.amount <= 0) {
+          return {
+            success: false,
+            error: 'Missing required parameters',
+            message: 'Please provide the amount you want to withdraw.'
+          };
+        }
+        if (!parameters.accountNumber || (!parameters.bankCode && !parameters.bankName)) {
+          return {
+            success: false,
+            error: 'Missing required parameters',
+            message: 'Please provide the account number and bank name (or bank code) to withdraw to.'
+          };
+        }
+        try {
+          const validation = await executeTool('validate_account', {
+            bankCode: parameters.bankCode,
+            accountNumber: parameters.accountNumber,
+            providedName: parameters.bankName
+          }, authCtx);
+
+          if (!validation.success) {
+            return logAndReturnResult('prepare_withdrawal', {
+              success: false,
+              error: validation.error,
+              message: validation.message || 'Could not validate those bank details.'
+            });
+          }
+
+          const v = validation.data || {};
+          return logAndReturnResult('prepare_withdrawal', {
+            success: true,
+            requiresConfirmation: true,
+            confirmationScreen: 'withdraw',
+            prefillData: {
+              amount: parameters.amount,
+              bankCode: v.bankCode || parameters.bankCode,
+              bankName: v.bankName || parameters.bankName,
+              accountNumber: parameters.accountNumber,
+              accountName: v.accountName || null,
+              narration: parameters.narration || null
+            },
+            message: `Ready to withdraw ₦${Number(parameters.amount).toLocaleString('en-NG')} to ${v.accountName || 'the account'} (${v.bankName || parameters.bankName}, ${parameters.accountNumber}). I've opened the confirmation screen — enter your PIN there to complete it.`
+          });
+        } catch (error) {
+          logger.error('prepare_withdrawal failed', { error: error.message, userId });
+          return logAndReturnResult('prepare_withdrawal', {
+            success: false,
+            error: error.message,
+            message: 'Failed to prepare withdrawal.'
+          });
+        }
+
+      case 'prepare_airtime_purchase':
+        if (!authenticated) {
+          return {
+            success: false,
+            error: 'Authentication required',
+            message: 'You need to sign in to buy airtime. Please sign in first.',
+            requiresAuth: true
+          };
+        }
+        if (!parameters.phone || !parameters.network || !parameters.amount) {
+          return {
+            success: false,
+            error: 'Missing required parameters',
+            message: 'Please provide the phone number, network, and amount for the airtime purchase.'
+          };
+        }
+        return logAndReturnResult('prepare_airtime_purchase', {
+          success: true,
+          requiresConfirmation: true,
+          confirmationScreen: 'airtime',
+          prefillData: {
+            phone: parameters.phone,
+            service_id: String(parameters.network).toLowerCase(),
+            amount: parameters.amount
+          },
+          message: `Ready to buy ₦${Number(parameters.amount).toLocaleString('en-NG')} ${parameters.network} airtime for ${parameters.phone}. I've opened the confirmation screen — enter your PIN there to complete it.`
+        });
+
+      case 'prepare_data_purchase':
+        if (!authenticated) {
+          return {
+            success: false,
+            error: 'Authentication required',
+            message: 'You need to sign in to buy data. Please sign in first.',
+            requiresAuth: true
+          };
+        }
+        if (!parameters.phone || !parameters.network) {
+          return {
+            success: false,
+            error: 'Missing required parameters',
+            message: 'Please provide the phone number and network for the data purchase.'
+          };
+        }
+        return logAndReturnResult('prepare_data_purchase', {
+          success: true,
+          requiresConfirmation: true,
+          confirmationScreen: 'data',
+          prefillData: {
+            phone: parameters.phone,
+            service_id: String(parameters.network).toLowerCase(),
+            variation_id: parameters.planId || null,
+            amount: parameters.amount || null
+          },
+          message: `I've opened the data purchase screen for ${parameters.phone} on ${parameters.network} — pick your plan and enter your PIN there to complete it.`
+        });
+
+      case 'prepare_electricity_purchase':
+        if (!authenticated) {
+          return {
+            success: false,
+            error: 'Authentication required',
+            message: 'You need to sign in to pay for electricity. Please sign in first.',
+            requiresAuth: true
+          };
+        }
+        if (!parameters.meterNumber || !parameters.disco || !parameters.meterType || !parameters.amount) {
+          return {
+            success: false,
+            error: 'Missing required parameters',
+            message: 'Please provide the meter number, electricity provider (disco), meter type (prepaid/postpaid), and amount.'
+          };
+        }
+        try {
+          const verifyRes = await axios.post(`${API_BASE_URL}/verifybill/customer`, {
+            customer_id: parameters.meterNumber,
+            service_id: parameters.disco,
+            variation_id: parameters.meterType
+          }, { headers, timeout: 15000, validateStatus: (status) => status < 500 });
+
+          if (verifyRes.status >= 400 || !verifyRes.data?.success) {
+            return logAndReturnResult('prepare_electricity_purchase', {
+              success: false,
+              error: 'Meter verification failed',
+              message: verifyRes.data?.message || 'Could not verify that meter number. Please double-check it.'
+            });
+          }
+
+          const customerName = verifyRes.data?.data?.customer_name || verifyRes.data?.data?.Customer_Name || null;
+
+          return logAndReturnResult('prepare_electricity_purchase', {
+            success: true,
+            requiresConfirmation: true,
+            confirmationScreen: 'electricity',
+            prefillData: {
+              customer_id: parameters.meterNumber,
+              service_id: parameters.disco,
+              variation_id: parameters.meterType,
+              amount: parameters.amount,
+              customerName
+            },
+            message: `Ready to pay ₦${Number(parameters.amount).toLocaleString('en-NG')} for ${customerName || 'meter ' + parameters.meterNumber}. I've opened the confirmation screen — enter your PIN there to complete it.`
+          });
+        } catch (error) {
+          logger.error('prepare_electricity_purchase failed', { error: error.message, userId });
+          return logAndReturnResult('prepare_electricity_purchase', {
+            success: false,
+            error: error.message,
+            message: 'Failed to verify meter details.'
+          });
+        }
+
+      case 'prepare_cable_purchase':
+        if (!authenticated) {
+          return {
+            success: false,
+            error: 'Authentication required',
+            message: 'You need to sign in to pay for cable TV. Please sign in first.',
+            requiresAuth: true
+          };
+        }
+        if (!parameters.smartcardNumber || !parameters.provider) {
+          return {
+            success: false,
+            error: 'Missing required parameters',
+            message: 'Please provide the smartcard/IUC number and provider (DStv, GOtv, Startimes, or Showmax).'
+          };
+        }
+        try {
+          const verifyRes = await axios.post(`${API_BASE_URL}/verifybill/customer`, {
+            customer_id: parameters.smartcardNumber,
+            service_id: String(parameters.provider).toLowerCase()
+          }, { headers, timeout: 15000, validateStatus: (status) => status < 500 });
+
+          if (verifyRes.status >= 400 || !verifyRes.data?.success) {
+            return logAndReturnResult('prepare_cable_purchase', {
+              success: false,
+              error: 'Smartcard verification failed',
+              message: verifyRes.data?.message || 'Could not verify that smartcard number. Please double-check it.'
+            });
+          }
+
+          const customerName = verifyRes.data?.data?.customer_name || verifyRes.data?.data?.Customer_Name || null;
+
+          return logAndReturnResult('prepare_cable_purchase', {
+            success: true,
+            requiresConfirmation: true,
+            confirmationScreen: 'cabletv',
+            prefillData: {
+              customer_id: parameters.smartcardNumber,
+              service_id: String(parameters.provider).toLowerCase(),
+              variation_id: parameters.packageId || null,
+              customerName
+            },
+            message: `I've opened the ${parameters.provider} renewal screen for ${customerName || 'smartcard ' + parameters.smartcardNumber} — pick your package and enter your PIN there to complete it.`
+          });
+        } catch (error) {
+          logger.error('prepare_cable_purchase failed', { error: error.message, userId });
+          return logAndReturnResult('prepare_cable_purchase', {
+            success: false,
+            error: error.message,
+            message: 'Failed to verify smartcard details.'
+          });
+        }
+
        // ... inside executeTool(toolName, parameters, authCtx)
 // ... before the default case
 case 'match_naira':
@@ -1540,77 +1366,6 @@ case 'validate_account':
       message: 'Failed to validate account due to an internal server or API error.'
     });
   }
-
-      case 'initiate_swap':
-        if (!authenticated) {
-          return {
-            success: false,
-            error: 'Authentication required',
-            message: 'You need to sign in to initiate a swap. Please sign in first.',
-            requiresAuth: true
-          };
-        }
-        try {
-          const swapRes = await axios.post(
-            `${API_BASE_URL}/swap/initiate`,
-            parameters,
-            {
-              headers,
-              timeout: 15000,
-              validateStatus: (status) => status < 500
-            }
-          );
-
-          // Check for HTML error responses
-          const responseData = swapRes.data;
-          const isHtmlResponse = typeof responseData === 'string' && (
-            responseData.includes('<!DOCTYPE html>') ||
-            responseData.includes('<html') ||
-            responseData.includes('Service Suspended')
-          );
-
-          if (isHtmlResponse || swapRes.status >= 400) {
-            return {
-              success: false,
-              error: swapRes.status >= 400 ? `Swap failed: ${swapRes.status}` : 'Service unavailable',
-              message: 'Unable to initiate swap. Please try again later or contact support.',
-              status: swapRes.status || 500
-            };
-          }
-
-          // Format helpful message with swap details
-          let displayMessage = 'Swap initiated successfully! ';
-          if (responseData.fromAmount && responseData.fromToken) {
-            displayMessage += `Swapping ${responseData.fromAmount} ${responseData.fromToken} `;
-          }
-          if (responseData.toAmount && responseData.toToken) {
-            displayMessage += `for ${responseData.toAmount} ${responseData.toToken}. `;
-          }
-          if (responseData.exchangeRate) {
-            displayMessage += `Exchange rate: ${Number(responseData.exchangeRate).toFixed(6)}. `;
-          }
-          displayMessage += 'Please display the swap details clearly to the user.';
-
-          return {
-            success: true,
-            data: responseData,
-            message: displayMessage
-          };
-        } catch (swapError) {
-          if (swapError.code === 'ECONNABORTED' || swapError.message.includes('timeout')) {
-            return {
-              success: false,
-              error: 'Request timeout',
-              message: 'The swap request took too long. Please try again.',
-              status: 408
-            };
-          }
-          throw swapError;
-        }
-
-      case 'get_quote_price':
-        // Same as get_sell_quote for now
-        return executeTool('get_sell_quote', parameters, authCtx);
 
       case 'browse_web':
         try {

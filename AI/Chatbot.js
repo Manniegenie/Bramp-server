@@ -26,6 +26,7 @@ const JWT_SECRET = process.env.JWT_SECRET || process.env.ACCESS_TOKEN_SECRET || 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const AI_MODEL = process.env.CLAUDE_MODEL_PRIMARY || 'claude-sonnet-5';
 const AI_OUTPUT_MAX_TOKENS = parseInt(process.env.AI_OUTPUT_MAX_TOKENS || '500', 10);
+const MAX_SESSION_MESSAGES = parseInt(process.env.AI_MAX_SESSION_MESSAGES || '15', 10);
 const API_BASE_URL = process.env.API_BASE_URL || 'https://priscaai.online';
 
 // Anthropic client
@@ -238,55 +239,32 @@ function detectUserExpertise(message, history = []) {
 
 // Build system prompt (R1: Structured Prompts)
 function buildSystemPrompt(authCtx = {}, userExpertise = 'intermediate') {
-  const authed = authCtx.authenticated;
+  let prompt = `You are the Bramp AI assistant — composed, precise, and quietly capable, in the manner of Jarvis. You address the user directly, never pad with corporate filler, and get straight to what's useful. Confident and efficient, not chatty for its own sake.
 
-  let prompt = `You are Bramp AI, a friendly and helpful crypto companion. You help users move between crypto and NGN (Nigerian Naira) effortlessly.
+ABOUT BRAMP: Bramp converts crypto to Naira automatically. Deposits are auto-converted to NGNB (Bramp's naira balance) the moment they land — there is no manual "sell" or "swap" step for the user to trigger. Your job is to help users understand and act on their account, not to broker manual trades.
 
-Your capabilities:
-- Initiate sell transactions (crypto to NGN)
-- Get sell/buy quotes
-- Check transaction status
-- Get current rates and prices
-- View dashboard/portfolio (if authenticated)
-- Get transaction history (if authenticated)
-- Validate bank account details (combines bank name matching and account name resolution)
-- Initiate token swaps
+WHAT YOU CAN DO:
+- Show dashboard/portfolio and balances (if authenticated)
+- Show transaction history and check a specific transaction's status
+- Show current NGN rates and token prices
+- Validate a bank account's details (resolve the account name before a withdrawal)
+- Show and manage notifications (view, mark read)
+- Prepare a withdrawal, airtime purchase, data purchase, electricity payment, or cable TV payment
+- Answer finance and crypto questions conversationally — how crypto works, market concepts, NGN economics, personal finance as it relates to using Bramp
 
-CRITICAL SELL TRANSACTION FLOW:
-When a user wants to sell crypto, follow this EXACT sequence:
+SECURITY — NON-NEGOTIABLE: You NEVER ask for, accept, or process a PIN, password, or 2FA code in chat. For anything that moves money (withdrawal, airtime, data, electricity, cable), your "prepare_*" tools only validate details and hand off to the app's own secure confirmation screen — that screen is where the user enters their PIN. After calling one of these tools, tell the user what you've prepared and that they should confirm it on the screen that just opened. Do not imply the action is complete until they've confirmed it there.
 
-1. **Collect Sell Intent**: Ask for token, network, and amount (if they want to specify)
-   
-2. **Collect Bank Details**: 
-   - Ask: "Which bank and account number should we send the money to?"
-   - User provides bank name (e.g., "Access Bank", "GTBank") and account number
-   
-3. **Create Transaction with Validation**:
-   - Call create_sell_transaction with the provided details: token, network, bankCode (if known), accountNumber, bankName (optional/partial).
-   - The system will automatically:
-     - Match partial bank names to official code/name if needed.
-     - Validate the account number and resolve the account name.
-     - Save payout details.
-     - Return the deposit address and a double-check prompt like: "Validated account name: **John Doe**. Does this name match the account you want to send to? Please double-check to avoid errors in transfers."
-   - SHOW THIS VALIDATION PROMPT TO THE USER and wait for confirmation before proceeding further (e.g., if they need to adjust details).
-   - Example: After transaction init, display: "Sell initiated! Validated: John Doe - Access Bank (1234567890). Does this match? Deposit to: [address]."
+SCOPE: Stay strictly within finance and crypto — Bramp's own features, cryptocurrency, blockchain concepts, Nigerian financial context, and personal finance as it relates to money and crypto. For anything outside that (coding help, general trivia, unrelated topics), decline briefly and steer back to what you can actually help with. Don't be preachy about it — one line, then move on.
 
-IMPORTANT: 
-- Do NOT provide bankCode or accountName upfront - let the system validate automatically via create_sell_transaction.
-- make sure account numbers, names and bank details are copiable and bolded for clarity.
-- If user wants to validate details standalone (before selling), call validate_account tool directly.
-- Always display the validated account name clearly and prompt for double-check.
-- Use validate_account when user specifically asks to "check my bank details" without selling.
-
-Guidelines:
-1. Be conversational and friendly - no corporate speak
-2. For sell intents, process normally without session restrictions
-3. CRITICAL: Adapt your communication style based on user expertise level...
+GUIDELINES:
+1. Be direct and confident, not corporate or over-eager.
+2. Adapt your depth and vocabulary to the user's apparent expertise level (see below) — don't over-explain to someone who clearly knows crypto, and don't assume jargon for someone who doesn't.
+3. Present account numbers, bank names, and similar details clearly and precisely so they're easy to copy correctly.
+4. If a user asks to "sell" or "swap" crypto, explain that deposits auto-convert to NGNB automatically — there's nothing manual for them to trigger.
 `;
 
-  // ... rest of your existing prompt (e.g., expertise adaptation, etc.)
-  
-  return prompt;}
+  return prompt;
+}
 /**
  * Map detected intent to recommended function(s)
  * This helps guide the LLM to call the right function
@@ -294,7 +272,7 @@ Guidelines:
 function getRecommendedFunctionsForIntent(intent, authCtx) {
   const { authenticated } = authCtx;
   const functionMap = {
-    'sell': authenticated ? ['create_sell_transaction'] : [],
+    'sell': [], // No manual sell — deposits auto-convert; let the LLM explain that
     'deposit': authenticated ? [] : [], // Deposit handled differently
     'naira_rates': ['get_naira_rates'],
     'supported_token_price': ['get_token_price'],
@@ -314,9 +292,10 @@ function validateFunctionParameters(functionName, parameters, authCtx, userExper
 
   // Check authentication requirements
   const authRequiredFunctions = [
-    'create_sell_transaction', 'get_sell_quote', 'create_buy_transaction',
-    'get_buy_quote', 'get_dashboard', 'get_transaction_history',
-    'get_bank_details', 'initiate_swap', 'check_transaction_status'
+    'get_dashboard', 'get_transaction_history', 'check_transaction_status',
+    'validate_account', 'get_notifications', 'mark_notification_read',
+    'prepare_withdrawal', 'prepare_airtime_purchase', 'prepare_data_purchase',
+    'prepare_electricity_purchase', 'prepare_cable_purchase'
   ];
 
   if (authRequiredFunctions.includes(functionName) && !authenticated) {
@@ -375,16 +354,19 @@ function validateFunctionParameters(functionName, parameters, authCtx, userExper
  */
 function getRequiredParamsForFunction(functionName) {
   const paramMap = {
-    'create_sell_transaction': ['token', 'network'],
-    'create_buy_transaction': ['token', 'network', 'amount'],
-    'get_buy_quote': ['token', 'amount'],
     'check_transaction_status': ['paymentId'],
     'get_token_price': ['token'],
-    'get_bank_details': ['bankCode', 'accountNumber'],
-    'initiate_swap': ['fromToken', 'toToken', 'amount', 'fromNetwork', 'toNetwork'],
+    'validate_account': ['accountNumber'],
+    'prepare_withdrawal': ['amount', 'accountNumber'],
+    'prepare_airtime_purchase': ['phone', 'network', 'amount'],
+    'prepare_data_purchase': ['phone', 'network'],
+    'prepare_electricity_purchase': ['meterNumber', 'disco', 'meterType', 'amount'],
+    'prepare_cable_purchase': ['smartcardNumber', 'provider'],
     'get_naira_rates': [],
     'get_dashboard': [],
-    'get_transaction_history': []
+    'get_transaction_history': [],
+    'get_notifications': [],
+    'mark_notification_read': []
   };
 
   return paramMap[functionName] || [];
@@ -422,23 +404,8 @@ function getToolChoiceForIntent(intent, authCtx, message) {
     return { type: 'function', function: { name: 'get_transaction_history' } };
   }
 
-  if (intent === 'sell' && authenticated) {
-    // Check if we have all required info for sell
-    const hasToken = /\b(btc|eth|sol|usdt|usdc|bnb|matic|avax|bitcoin|ethereum|solana)\b/i.test(msg);
-    const hasNetwork = /\b(bitcoin|ethereum|erc20|tron|trc20|solana|bsc|bep20|bnb smart chain|polygon|avalanche)\b/i.test(msg);
-    const hasAmount = /\d+/.test(msg);
-
-    // If we have token and amount, suggest quote (network can be auto-detected for quote)
-    if (hasToken && hasAmount) {
-      return { type: 'function', function: { name: 'get_sell_quote' } };
-    }
-    // If we have token and network and amount, suggest create transaction
-    if (hasToken && hasNetwork && hasAmount) {
-      return { type: 'function', function: { name: 'create_sell_transaction' } };
-    }
-    // Otherwise, let LLM ask for missing info conversationally
-    return 'auto';
-  }
+  // 'sell' intent: no manual sell tool exists anymore (deposits auto-convert),
+  // so just let the LLM explain that per the system prompt.
 
   // Default: let LLM decide
   return 'auto';
@@ -497,181 +464,6 @@ async function handleFunctionCall(toolCall, authCtx) {
   });
 
   try {
-    // Special handling for sell transactions - create session
-    // Special handling for sell transactions - create session
-// Special handling for sell transactions - create session
-// Special handling for sell transactions - create session
-if (functionName === 'create_sell_transaction') {
-  // Execute the tool first
-  const toolResult = await executeTool(functionName, functionArgs, authCtx);
-
-  // Log tool execution result
-  logger.info('Tool execution result', {
-    function: functionName,
-    toolCallId,
-    success: toolResult.success,
-    hasData: !!toolResult.data,
-    message: toolResult.message,
-    error: toolResult.error,
-    paymentId: toolResult.data?.paymentId,
-    dataPreview: toolResult.data ? (typeof toolResult.data === 'object' ?
-      Object.keys(toolResult.data).slice(0, 5).join(', ') :
-      String(toolResult.data).substring(0, 100)) : null
-  });
-
-  // Call validate_account and then save_payout immediately after successful sell transaction if bank details provided
-  if (toolResult.success && toolResult.data?.paymentId) {
-    // Check if we have basic bank details to validate and save payout
-    const hasBasicBankDetails = functionArgs.bankCode && functionArgs.accountNumber;
-    
-    if (hasBasicBankDetails) {
-      try {
-        // Prepare parameters for validate_account
-        const validateArgs = {
-          bankCode: functionArgs.bankCode,
-          accountNumber: functionArgs.accountNumber,
-          providedName: functionArgs.bankName // Pass provided bank name for matching if partial/incomplete
-        };
-
-        logger.info('Calling validate_account after successful sell transaction', {
-          userId: authCtx.userId,
-          paymentId: toolResult.data.paymentId,
-          validateArgs
-        });
-
-        // Call validate_account tool
-        const validateResult = await executeTool('validate_account', validateArgs, authCtx);
-
-        logger.info('validate_account execution result', {
-          success: validateResult.success,
-          hasData: !!validateResult.data,
-          message: validateResult.message,
-          paymentId: toolResult.data.paymentId
-        });
-
-        if (!validateResult.success) {
-          logger.warn('validate_account failed after sell transaction', {
-            paymentId: toolResult.data.paymentId,
-            error: validateResult.error,
-            message: validateResult.message
-          });
-          
-          // Add warning to response but proceed to save with provided details if available
-          toolResult.validationWarning = validateResult.message || 'Failed to validate bank details';
-        } else {
-          // Use validated details for payout
-          const validatedAccountName = validateResult.data?.accountName || functionArgs.accountName;
-          const validatedBankName = validateResult.data?.bankName || functionArgs.bankName;
-          
-          // Merge validation success into main result
-          toolResult.validationSuccess = true;
-          toolResult.validatedDetails = {
-            bankName: validatedBankName,
-            bankCode: functionArgs.bankCode,
-            accountNumber: functionArgs.accountNumber,
-            accountName: validatedAccountName
-          };
-
-          // Append validation message (includes double-check prompt)
-          if (toolResult.message && validateResult.message) {
-            toolResult.message += ` ${validateResult.message}`;
-          } else if (validateResult.message) {
-            toolResult.message = validateResult.message;
-          }
-
-          logger.info('Account validated successfully', {
-            paymentId: toolResult.data.paymentId,
-            accountName: validatedAccountName
-          });
-
-          // Proceed to save payout with validated details
-          const payoutUrl = `${API_BASE_URL}/sell/payout`;
-          const headers = {
-            'Content-Type': 'application/json'
-          };
-          if (authCtx.token) {
-            headers['Authorization'] = `Bearer ${authCtx.token}`;
-          }
-
-          const payoutResponse = await axios.post(
-            payoutUrl,
-            {
-              paymentId: toolResult.data.paymentId,
-              bankName: validatedBankName,
-              bankCode: functionArgs.bankCode,
-              accountNumber: functionArgs.accountNumber,
-              accountName: validatedAccountName
-            },
-            {
-              headers,
-              timeout: 10000,
-              validateStatus: (status) => status < 500
-            }
-          );
-
-          const payoutData = payoutResponse.data;
-
-          logger.info('save_payout execution result', {
-            success: payoutData.success,
-            message: payoutData.message,
-            paymentId: toolResult.data.paymentId
-          });
-
-          // Merge the payout save status into the main result
-          if (payoutData.success) {
-            toolResult.payoutSaved = true;
-            toolResult.payoutDetails = toolResult.validatedDetails;
-            
-            logger.info('Payout details saved successfully with validated info', {
-              paymentId: toolResult.data.paymentId,
-              accountName: validatedAccountName
-            });
-          } else {
-            logger.warn('Payout save returned success=false after validation', {
-              paymentId: toolResult.data.paymentId,
-              message: payoutData.message
-            });
-            
-            // Add warning to response but don't fail the transaction
-            toolResult.payoutWarning = payoutData.message || 'Failed to save payout details';
-          }
-        }
-      } catch (validationError) {
-        logger.error('Failed to validate or save payout details', {
-          error: validationError.message,
-          status: validationError.response?.status,
-          userId: authCtx.userId,
-          paymentId: toolResult.data?.paymentId
-        });
-        
-        // Add error to response but don't fail the transaction
-        toolResult.validationError = validationError.message;
-        toolResult.payoutWarning = 'Bank details could not be validated or saved automatically. Please provide them again if needed.';
-      }
-    } else {
-      // Log which basic bank details are missing
-      logger.info('Validation/Payout not performed: missing basic bank details', {
-        paymentId: toolResult.data.paymentId,
-        hasBankCode: !!functionArgs.bankCode,
-        hasAccountNumber: !!functionArgs.accountNumber
-      });
-    }
-  } else {
-    // Log why validation/payout wasn't performed
-    if (!toolResult.success) {
-      logger.info('Validation/Payout not performed: sell transaction failed');
-    } else if (!toolResult.data?.paymentId) {
-      logger.warn('Validation/Payout not performed: no paymentId in response');
-    }
-  }
-
-  return {
-    role: 'tool',
-    tool_call_id: toolCallId,
-    content: JSON.stringify(toolResult)
-  };
-}
-
     // Execute other tools normally
     const toolResult = await executeTool(functionName, functionArgs, authCtx);
 
@@ -693,6 +485,7 @@ if (functionName === 'create_sell_transaction') {
       tool_call_id: toolCallId,
       content: JSON.stringify(toolResult)
     };
+
   } catch (error) {
     logger.error('Tool execution error', {
       function: functionName,
@@ -860,6 +653,19 @@ async function processChat({ sessionId, message, history = [], authCtx }) {
     session.welcomed = true;
   }
 
+  // Hard cap on messages per session to prevent abuse — counted before the
+  // Claude call so a session at the limit never triggers another API call.
+  session.aiTurns += 1;
+  if (session.aiTurns > MAX_SESSION_MESSAGES) {
+    return {
+      reply: "We've reached the limit for this conversation — please start a new chat to keep going.",
+      metadata: {
+        intent: 'session_limit_reached',
+        responseTime: Date.now() - startTime
+      }
+    };
+  }
+
   // Build messages array
   const messages = [];
 
@@ -1015,6 +821,29 @@ if (process.env.DEBUG_LOGGING === 'true') {
         };
       }
 
+      // If a tool prepared a money-moving action (withdrawal, bill payment),
+      // hand off to the app's own secure PIN/2FA UI instead of formatting a
+      // chat reply — PINs and 2FA codes must never be typed into chat text.
+      // Short-circuits before Layer 3 since we already have a clear message.
+      for (const result of functionResults) {
+        let parsed;
+        try { parsed = JSON.parse(result.content); } catch (_) { continue; }
+        if (parsed && parsed.requiresConfirmation) {
+          return {
+            reply: parsed.message || 'I\'ve prepared that for you — please confirm in the app.',
+            requiresConfirmation: true,
+            confirmationScreen: parsed.confirmationScreen,
+            prefillData: parsed.prefillData,
+            metadata: {
+              intent: 'requires_confirmation',
+              functionsCalled: functionCalls.map(tc => tc.function.name),
+              responseTime: Date.now() - startTime,
+              model: AI_MODEL
+            }
+          };
+        }
+      }
+
       // Layer 3: Format response using LLM with context from original query
       // Always use LLM to format responses naturally using the original user message context
       logger.info('Layer 3: Formatting response with LLM', {
@@ -1051,11 +880,6 @@ Do NOT just repeat "function executed successfully" - show the actual data and a
 
       const finalResponse = finalCompletion.choices[0].message.content || '';
 
-      // Update session
-      if (!authCtx.authenticated) {
-        session.aiTurns += 1;
-      }
-
       const response = {
         reply: finalResponse.trim() || 'I\'ve executed that action for you. Is there anything else?',
         metadata: {
@@ -1079,10 +903,6 @@ Do NOT just repeat "function executed successfully" - show the actual data and a
 
     // No function calls - direct response
     const response = assistantMessage.content || '';
-
-    if (!authCtx.authenticated) {
-      session.aiTurns += 1;
-    }
 
     return {
       reply: response.trim(),
@@ -1196,6 +1016,9 @@ router.post('/chat', async (req, res) => {
     const responsePayload = {
       reply: result.reply,
       showWidget: result.showWidget || false,
+      requiresConfirmation: result.requiresConfirmation || false,
+      confirmationScreen: result.confirmationScreen,
+      prefillData: result.prefillData,
       timestamp: new Date().toISOString(),
       metadata: result.metadata || {}
     };
