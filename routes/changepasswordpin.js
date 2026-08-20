@@ -1,7 +1,6 @@
 // routes/changePin.js
 const express = require('express');
 const { body, validationResult } = require('express-validator');
-const bcrypt = require('bcryptjs');
 
 const router = express.Router();
 
@@ -139,11 +138,12 @@ router.post(
         }
       }
 
-      // Hash and save normalized pin
-      const saltRounds = 10; // keep in sync with schema SALT_WORK_FACTOR
-      const hashedNewPin = await bcrypt.hash(normalizedNew, saltRounds);
-
-      user.passwordpin = hashedNewPin;
+      // Assign the plain PIN — models/user.js's pre-save hook hashes it on
+      // save. Hashing it here too (as this used to) double-hashes it, since
+      // the hook re-hashes whatever is in the field once it sees the field
+      // was modified — the stored value would be bcrypt(bcrypt(pin)), which
+      // never matches the plain PIN the user actually types again.
+      user.passwordpin = normalizedNew;
 
       // Clear OTP artifacts
       user.pinChangeOtp = undefined;

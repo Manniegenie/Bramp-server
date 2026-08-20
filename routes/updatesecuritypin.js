@@ -3,7 +3,6 @@ const router = express.Router();
 const mongoose = require('mongoose');
 const User = require('../models/user');
 const logger = require('../utils/logger');
-const bcrypt = require('bcryptjs');
 
 // POST: /api/admin/update-pin
 router.post('/update-pin', async (req, res) => {
@@ -51,9 +50,10 @@ router.post('/update-pin', async (req, res) => {
       return res.status(409).json({ message: `No existing ${pinType} to update.` });
     }
 
-    const salt = await bcrypt.genSalt(10);
-    const hashedPin = await bcrypt.hash(newPin, salt);
-    user[pinType] = hashedPin;
+    // Assign the plain PIN — models/user.js's pre-save hook hashes it on
+    // save. Hashing it here too double-hashes it (see changepasswordpin.js
+    // fix for the full explanation of why that permanently breaks the PIN).
+    user[pinType] = newPin;
     await user.save();
 
     logger.info('PIN updated successfully', { userId, pinType, source: 'update-pin' });

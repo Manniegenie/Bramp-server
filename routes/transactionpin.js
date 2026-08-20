@@ -2,7 +2,6 @@ const express = require('express');
 const router = express.Router();
 const User = require('../models/user');
 const logger = require('../utils/logger');
-const bcrypt = require('bcryptjs');
 
 // POST: /api/admin/transaction-pin
 router.post('/pin', async (req, res) => {
@@ -40,8 +39,10 @@ router.post('/pin', async (req, res) => {
       return res.status(409).json({ message: 'Transaction PIN already exists' });
     }
 
-    const hashedPin = await bcrypt.hash(newPin, 10);
-    user.transactionpin = hashedPin;
+    // Assign the plain PIN — models/user.js's pre-save hook hashes it on
+    // save. Hashing it here too double-hashes it (see changepasswordpin.js
+    // fix for the full explanation of why that permanently breaks the PIN).
+    user.transactionpin = newPin;
     await user.save();
 
     logger.info('Transaction PIN created', { userId, source: 'transaction-pin' });

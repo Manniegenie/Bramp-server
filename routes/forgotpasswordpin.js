@@ -6,7 +6,6 @@ const EmailVerificationService = require('../services/VerifiedEmail');
 const { validateTwoFactorAuth } = require('../services/twofactorAuth');
 const logger = require('../utils/logger');
 const validator = require('validator');
-const bcrypt = require('bcryptjs');
 
 // Generate numeric OTP (same as signup)
 function generateOTP(length = 6) {
@@ -241,10 +240,11 @@ router.post('/change-pin', async (req, res) => {
 
     logger.info('✅ 2FA validation successful for forgot pin completion', { userId: user._id });
 
-    const saltRounds = 10;
-    const hashedNewPin = await bcrypt.hash(newPin, saltRounds);
-
-    user.passwordpin = hashedNewPin;
+    // Assign the plain PIN — models/user.js's pre-save hook hashes it on
+    // save. Hashing it here too double-hashes it (the hook re-hashes
+    // whatever's in the field once it sees the field was modified), leaving
+    // a stored value that never matches the plain PIN the user types again.
+    user.passwordpin = newPin;
     user.pinChangeOtp = undefined;
     user.pinChangeOtpCreatedAt = undefined;
     user.pinChangeOtpExpiresAt = undefined;
