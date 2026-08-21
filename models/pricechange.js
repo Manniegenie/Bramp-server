@@ -76,6 +76,27 @@ priceChangeSchema.statics.storePrices = async function(prices, source = 'portfol
   }
 };
 
+// Latest price per symbol (this collection is insert-only time-series data —
+// every price update inserts a new doc rather than upserting in place — so
+// "latest" requires grouping by symbol and taking the most recent by timestamp).
+priceChangeSchema.statics.getLatestPrices = async function() {
+  try {
+    return await this.aggregate([
+      { $sort: { symbol: 1, timestamp: -1 } },
+      { $group: {
+        _id: '$symbol',
+        symbol: { $first: '$symbol' },
+        price: { $first: '$price' },
+        timestamp: { $first: '$timestamp' }
+      } },
+      { $project: { _id: 0, symbol: 1, price: 1, timestamp: 1 } }
+    ]);
+  } catch (e) {
+    console.error('Error getting latest prices:', e.message);
+    return [];
+  }
+};
+
 // Historical lookup
 priceChangeSchema.statics.getHistoricalPrice = async function(symbol, hoursAgo = 12) {
   try {

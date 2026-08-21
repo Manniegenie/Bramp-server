@@ -340,23 +340,25 @@ router.patch('/regenerate-by-phone', async (req, res) => {
 // POST: /generate-wallets-by-phone - Generate wallets using phone number (background)
 router.post('/generate-wallets-by-phone', async (req, res) => {
   try {
-    const { phonenumber, force = false } = req.body;
+    const { phonenumber, email, force = false } = req.body;
 
-    if (!phonenumber) {
-      return res.status(400).json({ 
+    if (!phonenumber && !email) {
+      return res.status(400).json({
         success: false,
-        message: 'Phone number is required' 
+        message: 'Phone number or email is required'
       });
     }
 
-    const user = await User.findOne({ phonenumber: phonenumber })
+    const query = email ? { email: email.toLowerCase().trim() } : { phonenumber };
+    const user = await User.findOne(query)
       .select('_id email phonenumber firstname lastname walletGenerationStatus wallets walletGenerationStartedAt walletGenerationCompletedAt');
 
     if (!user) {
-      return res.status(404).json({ 
+      const identifier = email || phonenumber;
+      return res.status(404).json({
         success: false,
-        message: 'User not found with this phone number',
-        phonenumber: phonenumber
+        message: 'User not found',
+        identifier
       });
     }
 
@@ -460,23 +462,25 @@ router.post('/generate-wallets-by-phone', async (req, res) => {
 // GET: /status-by-phone - Check regeneration status by phone number
 router.get('/status-by-phone', async (req, res) => {
   try {
-    const { phonenumber } = req.query;
+    const { phonenumber, email } = req.query;
 
-    if (!phonenumber) {
-      return res.status(400).json({ 
+    if (!phonenumber && !email) {
+      return res.status(400).json({
         success: false,
-        message: 'Phone number is required as query parameter' 
+        message: 'Phone number or email is required as query parameter'
       });
     }
-    
-    const user = await User.findOne({ phonenumber: phonenumber })
+
+    const query = email ? { email: String(email).toLowerCase().trim() } : { phonenumber };
+    const user = await User.findOne(query)
       .select('_id email phonenumber firstname lastname walletGenerationStatus walletGenerationStartedAt walletGenerationCompletedAt wallets');
-    
+
     if (!user) {
-      return res.status(404).json({ 
+      const identifier = email || phonenumber;
+      return res.status(404).json({
         success: false,
-        message: 'User not found with this phone number',
-        phonenumber: phonenumber
+        message: 'User not found',
+        identifier
       });
     }
 

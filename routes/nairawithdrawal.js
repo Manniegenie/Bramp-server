@@ -75,15 +75,17 @@ function validateWithdrawalRequest(body) {
     }
   }
 
-  if (!body.account_name || !String(body.account_name).trim()) {
-    errors.push('Account name is required');
-  } else {
+  // account_name/bank_name are optional, matching ZeusODX-server's equivalent
+  // flow — a NIP transfer only actually needs accountNumber + bankCode to
+  // execute; the name is a display courtesy, not something the payment rails
+  // require. Making these mandatory here (unlike ZeusODX) rejected manually-
+  // entered accounts whenever the frontend's name resolution hadn't finished
+  // by submit time, even though the withdrawal itself would have been valid.
+  if (body.account_name) {
     sanitized.account_name = String(body.account_name).trim().substring(0, 100);
   }
 
-  if (!body.bank_name || !String(body.bank_name).trim()) {
-    errors.push('Bank name is required');
-  } else {
+  if (body.bank_name) {
     sanitized.bank_name = String(body.bank_name).trim().substring(0, 100);
   }
 
@@ -134,7 +136,7 @@ async function executeNGNBWithdrawal(userId, withdrawalData, reference) {
     source: 'BANK',
     reference,
     obiexTransactionId: reference,
-    narration: narration || `NGNB withdrawal to ${bank_name || account_name}`,
+    narration: narration || `NGNB withdrawal to ${bank_name || account_name || account_number}`,
     fee: NGNB_FEE_TOTAL,
     metadata: {
       bank_code,
