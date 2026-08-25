@@ -580,6 +580,7 @@ const scheduledNotificationRoutes = require("./adminRoutes/scheduledNotification
 const scheduledGiftCardNotificationRoutes = require("./adminRoutes/scheduledGiftCardNotifications");
 const nairamarkupRoutes = require("./adminRoutes/nairamarkup");
 const swapmarkdownRoutes = require("./adminRoutes/swapmarkdown");
+const adminPnlRoutes = require("./adminRoutes/adminpnl");
 const liskWalletRoutes = require("./routes/liskWallet");
 const newsRoutes = require("./routes/news");
 const notificationsRoutes = require("./routes/notifications");
@@ -667,6 +668,7 @@ app.use("/notification", authenticateToken, pushTokenRoutes);
 app.use("/block-user", authenticateAdminToken, requireAdmin, blockuserRoutes);
 app.use("/nairamarkup", authenticateAdminToken, requireAdmin, nairamarkupRoutes);
 app.use("/swapmarkdown", authenticateAdminToken, requireAdmin, swapmarkdownRoutes);
+app.use("/pnl", authenticateAdminToken, requireSuperAdmin, adminPnlRoutes);
 
 // Public data
 app.use("/naira-price", nairaPriceRouter);
