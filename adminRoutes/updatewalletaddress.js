@@ -34,6 +34,8 @@ const generateWalletsInBackground = async (userId, email) => {
           normalizedKey = 'USDT_TRX';
         } else if (parts[0] === 'USDT' && parts[1] === 'ETH') {
           normalizedKey = 'USDT_ETH';
+        } else if (parts[0] === 'USDT' && parts[1] === 'SOL') {
+          normalizedKey = 'USDT_SOL';
         } else if (parts[0] === 'USDC' && parts[1] === 'BSC') {
           normalizedKey = 'USDC_BSC';
         } else if (parts[0] === 'USDC' && parts[1] === 'ETH') {
@@ -214,6 +216,8 @@ router.patch('/regenerate-by-phone', async (req, res) => {
             updatedWallets.USDT_ETH = { address, network, walletReferenceId: referenceId };
           } else if (network === 'BSC') {
             updatedWallets.USDT_BSC = { address, network, walletReferenceId: referenceId };
+          } else if (network === 'SOL') {
+            updatedWallets.USDT_SOL = { address, network, walletReferenceId: referenceId };
           }
         } else if (currency === 'USDC') {
           if (network === 'ETH') {
@@ -387,7 +391,7 @@ router.post('/generate-wallets-by-phone', async (req, res) => {
           },
           walletGenerationStatus: user.walletGenerationStatus,
           existingWalletsCount: existingWalletsCount,
-          totalExpectedWallets: 12
+          totalExpectedWallets: 13
         });
       }
 
@@ -440,7 +444,7 @@ router.post('/generate-wallets-by-phone', async (req, res) => {
       walletGenerationStatus: 'in_progress',
       previousStatus: user.walletGenerationStatus,
       existingWalletsCount: existingWalletsCount,
-      totalExpectedWallets: 12, // Updated: removed DOGE
+      totalExpectedWallets: 13, // Updated: added USDT_SOL
       estimatedCompletionTime: '2-5 minutes',
       force: force
     });
@@ -492,8 +496,8 @@ router.get('/status-by-phone', async (req, res) => {
 
     // List all supported wallet types - DOGE REMOVED
     const supportedWallets = [
-      'BTC_BTC', 'ETH_ETH', 'SOL_SOL', 
-      'USDT_ETH', 'USDT_TRX', 'USDT_BSC',
+      'BTC_BTC', 'ETH_ETH', 'SOL_SOL',
+      'USDT_ETH', 'USDT_TRX', 'USDT_BSC', 'USDT_SOL',
       'USDC_ETH', 'USDC_BSC',
       'BNB_ETH', 'BNB_BSC',
       'MATIC_ETH', 'AVAX_BSC'

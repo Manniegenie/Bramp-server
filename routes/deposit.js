@@ -30,7 +30,9 @@ const WALLET_KEY_MAPPING = {
   'USDT_BSC': 'USDT_BSC',
   'USDT_BEP20': 'USDT_BSC',
   'USDT_BINANCE': 'USDT_BSC',
-  
+  'USDT_SOL': 'USDT_SOL',
+  'USDT_SOLANA': 'USDT_SOL',
+
   // USDC variants
   'USDC_ETH':      'USDC_ETH',
   'USDC_ETHEREUM': 'USDC_ETH',
@@ -70,7 +72,7 @@ const SUPPORTED_TOKENS = {
   'BTC': ['BTC', 'BITCOIN'],
   'ETH': ['ETH', 'ETHEREUM'],
   'SOL': ['SOL', 'SOLANA'],
-  'USDT': ['ETH', 'ETHEREUM', 'ERC20', 'TRX', 'TRON', 'TRC20', 'BSC', 'BEP20', 'BINANCE'],
+  'USDT': ['ETH', 'ETHEREUM', 'ERC20', 'TRX', 'TRON', 'TRC20', 'BSC', 'BEP20', 'BINANCE', 'SOL', 'SOLANA'],
   'USDC': ['ETH', 'ETHEREUM', 'ERC20', 'BSC', 'BEP20', 'BINANCE', 'ARBITRUM'],
   'BNB': ['ETH', 'ETHEREUM', 'ERC20', 'BSC', 'BEP20', 'BINANCE'],
   'MATIC': ['ETH', 'ETHEREUM', 'ERC20', 'POLYGON'],

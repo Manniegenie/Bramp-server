@@ -15,6 +15,7 @@ const SEED = [
   { token: 'USDT', networkId: 'ETH', networkName: 'Ethereum (ERC20)' },
   { token: 'USDT', networkId: 'TRX', networkName: 'Tron (TRC20)' },
   { token: 'USDT', networkId: 'BSC', networkName: 'BNB Smart Chain (BEP20)' },
+  { token: 'USDT', networkId: 'SOL', networkName: 'Solana' },
   { token: 'USDC', networkId: 'ETH', networkName: 'Ethereum (ERC20)' },
   { token: 'USDC', networkId: 'BSC', networkName: 'BNB Smart Chain (BEP20)' },
   { token: 'USDC', networkId: 'ARBITRUM', networkName: 'Arbitrum One' },

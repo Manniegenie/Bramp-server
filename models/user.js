@@ -122,6 +122,7 @@ const userSchema = new mongoose.Schema({
     USDT_ETH: { address: String, network: String, walletReferenceId: String },
     USDT_TRX: { address: String, network: String, walletReferenceId: String },
     USDT_BSC: { address: String, network: String, walletReferenceId: String },
+    USDT_SOL: { address: String, network: String, walletReferenceId: String },
     USDC_ETH:      { address: String, network: String, walletReferenceId: String },
     USDC_BSC:      { address: String, network: String, walletReferenceId: String },
     USDC_ARBITRUM: { address: String, network: String, walletReferenceId: String },

@@ -113,6 +113,7 @@ const CURRENCY_NETWORK_TO_SCHEMA = {
   'USDT_ETH': 'USDT_ETH',
   'USDT_TRX': 'USDT_TRX',
   'USDT_BSC': 'USDT_BSC',
+  'USDT_SOL': 'USDT_SOL',
   
   // USDC variants
   'USDC_ETH':      'USDC_ETH',
@@ -169,8 +170,61 @@ const generateWalletBySchemaKey = async (email, userId, schemaKey) => {
   }
 };
 
-module.exports = {
-  generateSingleWallet,
-  generateWalletBySchemaKey,
-  getCurrencyNetworkFromSchema
+// Bulk-generate every supported wallet for a user in one call. Used by the
+// admin "generate all wallets" / "regenerate all wallets" flows, which need
+// {success, wallets, totalRequested, successfullyCreated, summary} back -
+// not the single-wallet shape generateSingleWallet returns.
+const generateAllWallets = async (email, userId) => {
+  const schemaKeys = Object.keys(CURRENCY_NETWORK_TO_SCHEMA);
+  const totalRequested = schemaKeys.length;
+
+  const results = await Promise.allSettled(
+    schemaKeys.map(async (schemaKey) => {
+      const { currency, network } = getCurrencyNetworkFromSchema(schemaKey);
+      return generateSingleWallet(email, userId, currency, network);
+    })
+  );
+
+  const wallets = {};
+  let successfullyCreated = 0;
+
+  results.forEach((result, index) => {
+    const schemaKey = schemaKeys[index];
+    if (result.status === 'fulfilled') {
+      const { wallet } = result.value;
+      wallets[schemaKey] = {
+        status: 'success',
+        currency: wallet.currency,
+        network: wallet.network,
+        address: wallet.address,
+        referenceId: wallet.referenceId,
+      };
+      successfullyCreated++;
+    } else {
+      logger.error('Bulk wallet generation: one wallet failed', {
+        schemaKey, email, userId, error: result.reason?.message,
+      });
+      wallets[schemaKey] = {
+        status: 'failed',
+        error: result.reason?.message || 'Unknown error',
+      };
+    }
+  });
+
+  return {
+    success: successfullyCreated > 0,
+    wallets,
+    totalRequested,
+    successfullyCreated,
+    summary: `${successfullyCreated}/${totalRequested} wallets generated successfully`,
+  };
 };
+
+// Callable default (bulk generation) with the individual helpers attached as
+// properties, so both `require(...)()` and `require(...).generateWalletBySchemaKey`
+// keep working for their respective callers.
+module.exports = generateAllWallets;
+module.exports.generateAllWallets = generateAllWallets;
+module.exports.generateSingleWallet = generateSingleWallet;
+module.exports.generateWalletBySchemaKey = generateWalletBySchemaKey;
+module.exports.getCurrencyNetworkFromSchema = getCurrencyNetworkFromSchema;
