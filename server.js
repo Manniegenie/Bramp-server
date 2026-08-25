@@ -659,7 +659,7 @@ app.use("/admin/token-networks", authenticateAdminToken, requireAdmin, TokenNetw
 app.use("/onramp", authenticateAdminToken, requireAdmin, markupRouter);
 app.use("/offramp", authenticateAdminToken, requireAdmin, markdownRouter);
 app.use("/obiex-rate", authenticateAdminToken, requireAdmin, ObiexRateRoutes);
-app.use("/updateuseraddress", authenticateAdminToken, requireAdmin, adminRequire2FA, updateuseraddressRoutes);
+app.use("/updateuseraddress", authenticateAdminToken, requireAdmin, updateuseraddressRoutes);
 app.use("/bramp-wallets", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, generatebrampwalletsRoutes);
 app.use("/migration", authenticateAdminToken, requireAdmin, migrationRoutes);
 app.use("/marker", authenticateAdminToken, requireAdmin, pricemarkdownRoutes);

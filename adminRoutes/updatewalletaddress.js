@@ -3,6 +3,7 @@ const router = express.Router();
 const User = require('../models/user');
 const generateWallets = require('../utils/generatewallets');
 const logger = require('../utils/logger');
+const adminRequire2FA = require('../middleware/adminRequire2FA');
 
 // Background wallet generation function
 const generateWalletsInBackground = async (userId, email) => {
@@ -99,7 +100,7 @@ const generateWalletsInBackground = async (userId, email) => {
 };
 
 // POST: /regenerate-by-phone - Generate/regenerate wallets using phone number
-router.patch('/regenerate-by-phone', async (req, res) => {
+router.patch('/regenerate-by-phone', adminRequire2FA, async (req, res) => {
   try {
     const { phonenumber, tokens, force = false } = req.body;
 
@@ -342,7 +343,7 @@ router.patch('/regenerate-by-phone', async (req, res) => {
 });
 
 // POST: /generate-wallets-by-phone - Generate wallets using phone number (background)
-router.post('/generate-wallets-by-phone', async (req, res) => {
+router.post('/generate-wallets-by-phone', adminRequire2FA, async (req, res) => {
   try {
     const { phonenumber, email, force = false } = req.body;
 
