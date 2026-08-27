@@ -119,13 +119,13 @@ const exactOrigins = new Set(
 // Note: trailing slashes are stripped by normalize()
 exactOrigins.add(normalize("https://chatbotbramp-git-game-staging-manniegenies-projects.vercel.app"));
 
-// Explicitly allow chatbramp.com and brampchat.online domains (production frontends)
+// Explicitly allow chatbramp.com and brampay.online domains (production frontends)
 // Add both normalized and non-normalized to ensure they're in the set
 const chatbrampOrigins = [
   "https://chatbramp.com",
   "https://www.chatbramp.com",
-  "https://brampchat.online",
-  "https://www.brampchat.online",
+  "https://brampay.online",
+  "https://www.brampay.online",
 ];
 chatbrampOrigins.forEach(origin => {
   exactOrigins.add(origin);
