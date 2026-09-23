@@ -565,6 +565,14 @@ const marketingStatsRoutes = require("./adminRoutes/marketingStats");
 const transactionDetailsRoutes = require("./adminRoutes/transactionDetails");
 const permissionsRoutes = require("./adminRoutes/permissions");
 const adminBlogRoutes = require("./adminRoutes/blog");
+const qaLogsRoutes = require("./adminRoutes/QA");
+const { createQaWithdrawalLogger } = require("./middleware/qaWithdrawalLog");
+
+// QA withdrawal audit loggers — one per withdrawal surface, each scoped to
+// only the sub-path that actually moves funds (see middleware/qaWithdrawalLog.js)
+const qaCryptoWithdrawalLog = createQaWithdrawalLogger('CRYPTO', ['/crypto']);
+const qaNgnbWithdrawalLog = createQaWithdrawalLogger('NGNB', ['/withdrawal/ngnb']);
+const qaInternalWithdrawalLog = createQaWithdrawalLogger('INTERNAL_USERNAME', ['/internal']);
 const AdminDisableTwoFARoutes = require("./adminRoutes/2FA");
 const Admin2FARoutes = require("./adminRoutes/Admin2FA");
 const adminBannerRoutes = require("./adminRoutes/banners");
@@ -625,6 +633,7 @@ app.use("/Chatbotwebhook", webhookLimiter, ChatbotwebhookRoutes);
 app.use("/admin/transaction", authenticateAdminToken, requireModerator, transactionDetailsRoutes);
 app.use("/admin/permissions", authenticateAdminToken, permissionsRoutes);
 app.use("/admin/blog", authenticateAdminToken, requireAdmin, adminBlogRoutes);
+app.use("/admin/qa-logs", authenticateAdminToken, requireSuperAdmin, qaLogsRoutes);
 app.use("/admin/banners", authenticateAdminToken, requireAdmin, requireBanners, adminBannerRoutes);
 app.use("/admin/notification", authenticateAdminToken, requireAdmin, requirePushNotifications, Pushnotification);
 app.use("/admin/scheduled-notifications", authenticateAdminToken, requireAdmin, requirePushNotifications, scheduledNotificationRoutes);
@@ -690,7 +699,7 @@ app.use("/deposit", authenticateToken, depositRoutes);
 // internally. See routes/Nombadeposit.js.
 app.use("/Nombadeposit", NombadepositRoutes);
 app.use("/wallet", authenticateToken, walletRoutes);
-app.use("/withdraw", authenticateToken, withdrawRoutes);
+app.use("/withdraw", authenticateToken, qaCryptoWithdrawalLog, withdrawRoutes);
 app.use("/validate-balance", authenticateToken, validatewithdrawRoutes);
 app.use("/transactionpin", authenticateToken, transactionpinRoutes);
 app.use("/2FA", authenticateToken, TwoFARoutes);
@@ -705,9 +714,9 @@ app.use("/packages", authenticateToken, CableplanRoutes);
 app.use("/api", authenticateToken, DashboardRoutes);
 app.use("/swap", authenticateToken, SwapRoutes);
 app.use("/history", authenticateToken, historyRoutes);
-app.use("/transfer", authenticateToken, internaltransferRoutes);
+app.use("/transfer", authenticateToken, qaInternalWithdrawalLog, internaltransferRoutes);
 app.use("/query", authenticateToken, usernamequeryRoutes);
-app.use("/ngnbwithdraw", authenticateToken, ngnbwithdrawRoutes);
+app.use("/ngnbwithdraw", authenticateToken, qaNgnbWithdrawalLog, ngnbwithdrawRoutes);
 app.use("/dollarvalue", authenticateToken, dollarvalueRoutes);
 app.use("/changepin", authenticateToken, changepinRoutes);
 app.use("/forgotpin", forgotpinRoutes);
