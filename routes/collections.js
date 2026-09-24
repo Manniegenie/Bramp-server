@@ -36,16 +36,23 @@ router.post('/virtual-accounts', async (req, res) => {
       return res.status(400).json({ success: false, message: 'type must be "static" or "dynamic"' });
     }
 
-    const user = await User.findById(userId).select('email firstname lastname phonenumber bvn kycLevel');
+    const user = await User.findById(userId).select('email firstname lastname phonenumber bvn bvnVerified kycLevel kyc');
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    if ((user.kycLevel || 0) < 2) {
+    // Checked directly rather than the numeric kycLevel field - kycLevel has a
+    // known history of not getting bumped by every approval path (see
+    // routes/KYC.js's isBvnVerification branch and routes/kycwebhook.js's
+    // comments), so it can under-report even when both checks below pass.
+    const idVerified = user.kyc?.level2?.status === 'approved';
+    const bvnVerified = !!user.bvnVerified;
+    if (!idVerified || !bvnVerified) {
       return res.status(403).json({
         success: false,
         code: 'KYC_REQUIRED',
-        message: 'Complete KYC Level 2 verification before creating a funding account. Go to your profile to finish identity verification.',
+        message: 'Complete KYC Level 2 verification (ID document and BVN) before creating a funding account. Go to your profile to finish identity verification.',
+        data: { idVerified, bvnVerified },
       });
     }
 
