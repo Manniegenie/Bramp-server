@@ -353,63 +353,29 @@ router.post('/glyde/collection', validateGlydeWebhookSignature, async (req, res)
       return;
     }
 
+    // This route only handles Virtual Account deposits - merchant_reference
+    // matches a VA's customer reference (bramp-va-{userId}-{type}), which is
+    // recurring/unsolicited so there's never a pre-existing pending
+    // transaction to update, unlike a one-shot checkout. (routes/buy.js also
+    // calls initializeCollection for its own hosted-checkout payment step,
+    // but tracks that via ChatbotTransaction/webhookRef, not this route -
+    // its payment-confirmed handling doesn't exist yet, see routes/buy.js.)
+    const account = await GlydeVirtualAccount.findOne({ reference: merchantReference });
+    if (!account) {
+      logger.warn('Glyde collection webhook: no virtual account matches merchant_reference', {
+        merchantReference,
+        glydeReference,
+        event,
+      });
+      return;
+    }
+
     if (event === 'collection.failed') {
-      // Only the hosted-checkout flow has a PENDING transaction to fail; a
-      // virtual account deposit that never succeeded never created one.
-      const pending = await Transaction.findOne({ reference: merchantReference, type: 'DEPOSIT', status: 'PENDING' });
-      if (pending) {
-        pending.status = 'FAILED';
-        pending.metadata = {
-          ...pending.metadata,
-          glyde_reference: glydeReference,
-          glyde_status: status,
-          webhook_received_at: new Date(),
-        };
-        await pending.save();
-        logger.info('Glyde collection failed, marked transaction FAILED', { transactionId: pending._id, merchantReference });
-      }
+      logger.info('Glyde virtual account deposit failed', { accountUid: account.uid, merchantReference, glydeReference });
       return;
     }
 
     // event === 'collection.success'
-    // Case 1: hosted checkout - a PENDING transaction already exists with this exact reference
-    const pending = await Transaction.findOne({ reference: merchantReference, type: 'DEPOSIT', status: 'PENDING' });
-    if (pending) {
-      const user = await User.findById(pending.userId);
-      if (!user) {
-        logger.error('Glyde collection webhook: user not found for pending transaction', { transactionId: pending._id });
-        return;
-      }
-
-      pending.status = 'SUCCESSFUL';
-      pending.metadata = {
-        ...pending.metadata,
-        glyde_reference: glydeReference,
-        glyde_status: status,
-        webhook_received_at: new Date(),
-      };
-      await pending.save();
-
-      await updateUserBalance(user._id, pending.currency, pending.amount);
-      logger.info('Glyde hosted-checkout collection credited', {
-        transactionId: pending._id,
-        userId: user._id,
-        amount: pending.amount,
-        currency: pending.currency,
-      });
-      return;
-    }
-
-    // Case 2: virtual account deposit - merchant_reference matches a VA's
-    // customer reference (bramp-va-{userId}-{type}), not a per-transaction one
-    const account = await GlydeVirtualAccount.findOne({ reference: merchantReference });
-    if (!account) {
-      logger.warn('Glyde collection webhook: no pending transaction or virtual account matches merchant_reference', {
-        merchantReference,
-        glydeReference,
-      });
-      return;
-    }
 
     const user = await User.findById(account.userId);
     if (!user) {
