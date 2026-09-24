@@ -3,6 +3,7 @@ const router = express.Router();
 const crypto = require('crypto');
 const User = require('../models/user');
 const Transaction = require('../models/transaction');
+const GlydeVirtualAccount = require('../models/glydeVirtualAccount');
 const { updateUserBalance } = require('../services/portfolio');
 const logger = require('../utils/logger');
 
@@ -257,6 +258,197 @@ async function handleFailedTransfer(transaction, user, amount, fee) {
     throw error;
   }
 }
+
+/**
+ * Verify Glyde webhook signature per the official docs: HMAC-SHA256 of the
+ * raw body using a DEDICATED webhook signing key (Settings -> API Keys &
+ * Webhook in the Glyde dashboard), sent as header X-Glyde-Signature.
+ *
+ * This is deliberately a separate function from validateGlydeSignature
+ * above, which predates this spec and checks a different header
+ * (x-signature-hash) against GLYDE_API_KEY instead of a dedicated signing
+ * key - left untouched since it's live production code for withdrawal
+ * confirmations and changing it needs its own careful pass.
+ */
+const validateGlydeWebhookSignature = (req, res, next) => {
+  try {
+    const signature = req.headers['x-glyde-signature'];
+    const signingKey = process.env.GLYDE_WEBHOOK_SIGNING_KEY;
+
+    if (!signature) {
+      logger.warn('Glyde collection webhook: Missing X-Glyde-Signature header');
+      return res.status(400).json({ error: 'Missing signature header' });
+    }
+
+    if (!signingKey) {
+      logger.error('Glyde collection webhook: GLYDE_WEBHOOK_SIGNING_KEY not configured');
+      return res.status(500).json({ error: 'Webhook signature validation not configured' });
+    }
+
+    const rawBody = req.rawBody || JSON.stringify(req.body);
+    const expected = crypto.createHmac('sha256', signingKey).update(rawBody).digest('hex');
+
+    const sigBuf = Buffer.from(signature);
+    const expBuf = Buffer.from(expected);
+    const valid = sigBuf.length === expBuf.length && crypto.timingSafeEqual(sigBuf, expBuf);
+
+    if (!valid) {
+      logger.warn('Glyde collection webhook: Invalid signature');
+      return res.status(401).json({ error: 'Invalid signature' });
+    }
+
+    next();
+  } catch (error) {
+    logger.error('Glyde collection webhook signature validation error:', error);
+    return res.status(500).json({ error: 'Signature validation failed' });
+  }
+};
+
+/**
+ * @route   POST /ngnbwebhook/glyde/collection
+ * @desc    Credit a user's balance when money arrives - either a hosted
+ *          checkout payment (routes/collections.js /initialize) or an
+ *          unsolicited Virtual Account deposit (models/glydeVirtualAccount.js).
+ *          Handles collection.success / collection.failed per Glyde's docs.
+ * @access  Webhook (signature validated)
+ */
+router.post('/glyde/collection', validateGlydeWebhookSignature, async (req, res) => {
+  const body = req.body;
+
+  logger.info('Glyde collection webhook - received', {
+    event: body.event,
+    reference: body.data?.reference,
+    merchant_reference: body.data?.merchant_reference,
+    status: body.data?.status,
+    amount: body.data?.amount,
+  });
+
+  // Respond immediately per Glyde's documented best practice, then process -
+  // everything below is idempotent on data.reference, so a retry (Glyde
+  // retries on any non-2xx) is safe even if this instance restarts mid-way.
+  res.status(200).json({ success: true });
+
+  try {
+    const { event, data } = body;
+    if (!event || !data) {
+      logger.warn('Glyde collection webhook: invalid payload structure', body);
+      return;
+    }
+
+    const { reference: glydeReference, merchant_reference: merchantReference, amount, status } = data;
+    if (!glydeReference || !merchantReference || !amount) {
+      logger.warn('Glyde collection webhook: missing required fields', { glydeReference, merchantReference, amount });
+      return;
+    }
+
+    if (event !== 'collection.success' && event !== 'collection.failed') {
+      logger.info('Glyde collection webhook: ignoring unhandled event', { event });
+      return;
+    }
+
+    // Idempotency: has this exact Glyde reference already been processed?
+    const alreadyProcessed = await Transaction.findOne({ 'metadata.glyde_reference': glydeReference });
+    if (alreadyProcessed) {
+      logger.info('Glyde collection webhook: already processed, skipping', { glydeReference, merchantReference });
+      return;
+    }
+
+    if (event === 'collection.failed') {
+      // Only the hosted-checkout flow has a PENDING transaction to fail; a
+      // virtual account deposit that never succeeded never created one.
+      const pending = await Transaction.findOne({ reference: merchantReference, type: 'DEPOSIT', status: 'PENDING' });
+      if (pending) {
+        pending.status = 'FAILED';
+        pending.metadata = {
+          ...pending.metadata,
+          glyde_reference: glydeReference,
+          glyde_status: status,
+          webhook_received_at: new Date(),
+        };
+        await pending.save();
+        logger.info('Glyde collection failed, marked transaction FAILED', { transactionId: pending._id, merchantReference });
+      }
+      return;
+    }
+
+    // event === 'collection.success'
+    // Case 1: hosted checkout - a PENDING transaction already exists with this exact reference
+    const pending = await Transaction.findOne({ reference: merchantReference, type: 'DEPOSIT', status: 'PENDING' });
+    if (pending) {
+      const user = await User.findById(pending.userId);
+      if (!user) {
+        logger.error('Glyde collection webhook: user not found for pending transaction', { transactionId: pending._id });
+        return;
+      }
+
+      pending.status = 'SUCCESSFUL';
+      pending.metadata = {
+        ...pending.metadata,
+        glyde_reference: glydeReference,
+        glyde_status: status,
+        webhook_received_at: new Date(),
+      };
+      await pending.save();
+
+      await updateUserBalance(user._id, pending.currency, pending.amount);
+      logger.info('Glyde hosted-checkout collection credited', {
+        transactionId: pending._id,
+        userId: user._id,
+        amount: pending.amount,
+        currency: pending.currency,
+      });
+      return;
+    }
+
+    // Case 2: virtual account deposit - merchant_reference matches a VA's
+    // customer reference (bramp-va-{userId}-{type}), not a per-transaction one
+    const account = await GlydeVirtualAccount.findOne({ reference: merchantReference });
+    if (!account) {
+      logger.warn('Glyde collection webhook: no pending transaction or virtual account matches merchant_reference', {
+        merchantReference,
+        glydeReference,
+      });
+      return;
+    }
+
+    const user = await User.findById(account.userId);
+    if (!user) {
+      logger.error('Glyde collection webhook: user not found for virtual account', {
+        accountUid: account.uid,
+        userId: account.userId,
+      });
+      return;
+    }
+
+    const creditedAmount = Number(amount);
+    const transaction = await Transaction.create({
+      userId: user._id,
+      type: 'DEPOSIT',
+      currency: 'NGNB',
+      amount: creditedAmount,
+      status: 'SUCCESSFUL',
+      source: 'BANK',
+      reference: `${merchantReference}-${glydeReference}`,
+      narration: `Deposit via virtual account ${account.accountNumber}`,
+      metadata: {
+        glyde_reference: glydeReference,
+        glyde_status: status,
+        virtual_account_uid: account.uid,
+        webhook_received_at: new Date(),
+      },
+    });
+
+    await updateUserBalance(user._id, 'NGNB', creditedAmount);
+    logger.info('Glyde virtual account deposit credited', {
+      transactionId: transaction._id,
+      userId: user._id,
+      accountUid: account.uid,
+      amount: creditedAmount,
+    });
+  } catch (error) {
+    logger.error('Glyde collection webhook processing failed:', { error: error.message, stack: error.stack, body });
+  }
+});
 
 /**
  * @route   GET /webhook/glyde/ngnb/test
