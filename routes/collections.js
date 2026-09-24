@@ -36,9 +36,17 @@ router.post('/virtual-accounts', async (req, res) => {
       return res.status(400).json({ success: false, message: 'type must be "static" or "dynamic"' });
     }
 
-    const user = await User.findById(userId).select('email firstname lastname phonenumber bvn');
+    const user = await User.findById(userId).select('email firstname lastname phonenumber bvn kycLevel');
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    if ((user.kycLevel || 0) < 2) {
+      return res.status(403).json({
+        success: false,
+        code: 'KYC_REQUIRED',
+        message: 'Complete KYC Level 2 verification before creating a funding account. Go to your profile to finish identity verification.',
+      });
     }
 
     // One active account per type per user

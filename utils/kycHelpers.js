@@ -103,12 +103,43 @@ function isNinIdType(idType) {
   return !!(idType && ['nin', 'nin_slip', 'national_id'].includes(idType.toLowerCase()));
 }
 
+/**
+ * Compare two full names regardless of word order (e.g. "John Musa Doe" vs
+ * "Doe John Musa" match) or casing. Deliberately lenient - not a strict
+ * equality check - so a rearranged or differently-cased name still matches.
+ * Used to compare a bank transfer sender's name against a user's own
+ * registered name (e.g. virtual account deposit fraud check).
+ * @param {string} nameA
+ * @param {string} nameB
+ * @returns {boolean} True if both names contain the same set of words
+ */
+function namesMatch(nameA, nameB) {
+  const tokenize = (name) =>
+    (name || '')
+      .toLowerCase()
+      .normalize('NFKD')
+      .replace(/[^a-z\s]/g, ' ')
+      .split(/\s+/)
+      .filter(Boolean)
+      .sort();
+
+  const tokensA = tokenize(nameA);
+  const tokensB = tokenize(nameB);
+
+  if (tokensA.length === 0 || tokensB.length === 0) return false;
+
+  // Every token in the shorter name must appear in the longer name.
+  const [shorter, longer] = tokensA.length <= tokensB.length ? [tokensA, tokensB] : [tokensB, tokensA];
+  return shorter.every((token) => longer.includes(token));
+}
+
 module.exports = {
   classifyOutcome,
   parseFullName,
   isValidKycDocument,
   isBvnIdType,
   isNinIdType,
+  namesMatch,
   APPROVED_CODES,
   PROVISIONAL_CODES,
   REJECTED_CODES
