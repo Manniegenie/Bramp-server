@@ -453,10 +453,236 @@ function buildCollectionPayload(options = {}) {
   };
 }
 
+// ---------- Virtual Accounts (dedicated bank accounts) ----------
+// Separate Glyde product from Collection above: /v1/virtual-accounts issues
+// a persistent (static, BVN-required) or temporary (dynamic, no BVN) bank
+// account number a customer can transfer to directly, rather than a hosted
+// checkout link.
+
+function sanitizeVirtualAccountCustomer(c = {}) {
+  return {
+    reference: cleanStr(c.reference),
+    first_name: cleanStr(c.first_name || c.firstName),
+    last_name: cleanStr(c.last_name || c.lastName),
+    email: cleanStr(c.email),
+    phone: c.phone ? cleanStr(c.phone) : null,
+    bvn: c.bvn ? cleanStr(c.bvn) : null,
+  };
+}
+
+function validateVirtualAccountPayload(type, customer, expectedAmount) {
+  const errs = [];
+
+  if (!['static', 'dynamic'].includes(type)) {
+    errs.push('type must be "static" or "dynamic"');
+  }
+  if (!customer.reference) errs.push('customer.reference is required');
+  if (!customer.first_name) errs.push('customer.first_name is required');
+  if (!customer.last_name) errs.push('customer.last_name is required');
+  if (!customer.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customer.email)) {
+    errs.push('customer.email must be a valid email address');
+  }
+
+  if (type === 'static') {
+    if (!customer.bvn || !/^\d{11}$/.test(customer.bvn)) {
+      errs.push('customer.bvn is required for static accounts and must be 11 digits');
+    }
+  }
+
+  if (type === 'dynamic' && expectedAmount != null) {
+    if (isNaN(Number(expectedAmount)) || Number(expectedAmount) <= 0) {
+      errs.push('expected_amount must be a positive number');
+    }
+  }
+
+  return errs;
+}
+
+/**
+ * Create a Glyde virtual account (static or dynamic).
+ * Pass: type ('static'|'dynamic'), customer { reference, first_name, last_name, email, phone?, bvn? (static) }, expectedAmount (dynamic, optional)
+ */
+async function createVirtualAccount({ type, customer, expectedAmount } = {}) {
+  try {
+    validateCollectionConfig();
+  } catch (configErr) {
+    logger.error('Glyde virtual account configuration validation failed', { error: configErr.message });
+    return { success: false, statusCode: 500, message: 'Glyde virtual account service configuration error' };
+  }
+
+  let client;
+  try {
+    client = getCollectionClient();
+  } catch (clientErr) {
+    logger.error('Failed to get Glyde collection client', { error: clientErr.message });
+    return { success: false, statusCode: 500, message: 'Glyde virtual account service unavailable - configuration error' };
+  }
+
+  const cleanCustomer = sanitizeVirtualAccountCustomer(customer);
+  const errors = validateVirtualAccountPayload(type, cleanCustomer, expectedAmount);
+  if (errors.length) {
+    return { success: false, statusCode: 400, message: errors.join('; ') };
+  }
+
+  const payload = {
+    type,
+    customer: {
+      reference: cleanCustomer.reference,
+      first_name: cleanCustomer.first_name,
+      last_name: cleanCustomer.last_name,
+      email: cleanCustomer.email,
+      ...(cleanCustomer.phone && { phone: cleanCustomer.phone }),
+      ...(type === 'static' && { bvn: cleanCustomer.bvn }),
+    },
+    ...(type === 'dynamic' && expectedAmount != null && { expected_amount: Number(expectedAmount) }),
+  };
+
+  const payloadPreview = {
+    type,
+    customer: {
+      ...payload.customer,
+      email: maskEmail(payload.customer.email),
+      phone: payload.customer.phone ? maskPhone(payload.customer.phone) : null,
+      ...(payload.customer.bvn && { bvn: `${payload.customer.bvn.slice(0, 3)}********` }),
+    },
+    expected_amount: payload.expected_amount,
+  };
+
+  try {
+    logger.info('Creating Glyde virtual account', payloadPreview);
+
+    const res = await client.post('/v1/virtual-accounts', payload, {
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    });
+
+    const d = res?.data?.data || res?.data || {};
+    logger.info('Glyde virtual account created', {
+      uid: d.uid,
+      type: d.type,
+      status: d.status,
+      accountNumber: d.account_number,
+      requestId: pickRequestId(res?.headers || {}),
+    });
+
+    return { success: true, data: d };
+  } catch (err) {
+    const httpStatus = err.response?.status || 500;
+    const providerBody = err.response?.data;
+    const providerMessage = providerBody?.message;
+
+    logger.error('Glyde virtual account creation failed', {
+      httpStatus,
+      payloadPreview,
+      providerBody,
+      requestId: pickRequestId(err.response?.headers || {}),
+    });
+
+    return {
+      success: false,
+      statusCode: httpStatus,
+      message: providerMessage || err.message || 'Glyde virtual account service temporarily unavailable',
+      providerRaw: providerBody,
+    };
+  }
+}
+
+/**
+ * List virtual accounts. params: { status?, per_page?, page? }
+ */
+async function listVirtualAccounts(params = {}) {
+  try {
+    const client = getCollectionClient();
+    const res = await client.get('/v1/virtual-accounts', { params });
+    return { success: true, data: res?.data?.data || res?.data };
+  } catch (err) {
+    logger.error('Glyde list virtual accounts failed', {
+      httpStatus: err.response?.status,
+      providerBody: err.response?.data,
+    });
+    return {
+      success: false,
+      statusCode: err.response?.status || 500,
+      message: err.response?.data?.message || err.message,
+    };
+  }
+}
+
+/**
+ * Get a single virtual account by Glyde uid.
+ */
+async function getVirtualAccount(uid) {
+  try {
+    const client = getCollectionClient();
+    const res = await client.get(`/v1/virtual-accounts/${encodeURIComponent(uid)}`);
+    return { success: true, data: res?.data?.data || res?.data };
+  } catch (err) {
+    logger.error('Glyde get virtual account failed', {
+      uid,
+      httpStatus: err.response?.status,
+      providerBody: err.response?.data,
+    });
+    return {
+      success: false,
+      statusCode: err.response?.status || 500,
+      message: err.response?.data?.message || err.message,
+    };
+  }
+}
+
+/**
+ * List transactions received on a virtual account.
+ */
+async function getVirtualAccountTransactions(uid, params = {}) {
+  try {
+    const client = getCollectionClient();
+    const res = await client.get(`/v1/virtual-accounts/${encodeURIComponent(uid)}/transactions`, { params });
+    return { success: true, data: res?.data?.data || res?.data };
+  } catch (err) {
+    logger.error('Glyde get virtual account transactions failed', {
+      uid,
+      httpStatus: err.response?.status,
+      providerBody: err.response?.data,
+    });
+    return {
+      success: false,
+      statusCode: err.response?.status || 500,
+      message: err.response?.data?.message || err.message,
+    };
+  }
+}
+
+/**
+ * Deactivate a virtual account so it can no longer receive payments.
+ */
+async function deactivateVirtualAccount(uid) {
+  try {
+    const client = getCollectionClient();
+    const res = await client.post(`/v1/virtual-accounts/${encodeURIComponent(uid)}/deactivate`);
+    logger.info('Glyde virtual account deactivated', { uid });
+    return { success: true, data: res?.data?.data || res?.data };
+  } catch (err) {
+    logger.error('Glyde deactivate virtual account failed', {
+      uid,
+      httpStatus: err.response?.status,
+      providerBody: err.response?.data,
+    });
+    return {
+      success: false,
+      statusCode: err.response?.status || 500,
+      message: err.response?.data?.message || err.message,
+    };
+  }
+}
+
 module.exports = {
   initializeCollection,
   generateCollectionReference,
   validateCustomer,
   buildCollectionPayload,
   getCollectionClient,
+  createVirtualAccount,
+  listVirtualAccounts,
+  getVirtualAccount,
+  getVirtualAccountTransactions,
+  deactivateVirtualAccount,
 };
