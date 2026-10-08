@@ -6,10 +6,11 @@ const router = express.Router();
 const User = require("../models/user");
 const KYC = require("../models/kyc");
 const logger = require("../utils/logger");
-const { classifyOutcome } = require("../utils/kycHelpers");
+const { classifyOutcome, isNinIdType, namesMatch, namesPartiallyOverlap, namesSimilar } = require("../utils/kycHelpers");
+const dojahService = require("../services/dojahService");
 const { sendKycEmail, sendKycProvisionalAdminNotify } = require("../services/EmailService");
 
-// Youverify Configuration
+// Youverify Configuration (still used for passport, drivers_license, voter_id)
 const YOUVERIFY_CONFIG = {
   publicMerchantKey: process.env.YOUVERIFY_PUBLIC_MERCHANT_KEY,
   secretKey: process.env.YOUVERIFY_SECRET_KEY,
@@ -40,6 +41,12 @@ const ID_PATTERNS = {
 const validateYouverifyConfig = () => {
   if (!YOUVERIFY_CONFIG.publicMerchantKey) {
     throw new Error('YOUVERIFY_PUBLIC_MERCHANT_KEY is not configured');
+  }
+};
+
+const validateDojahConfig = () => {
+  if (!process.env.DOJAH_SECRET_KEY || !process.env.DOJAH_APP_ID) {
+    throw new Error('DOJAH_SECRET_KEY / DOJAH_APP_ID is not configured');
   }
 };
 
@@ -129,7 +136,145 @@ async function submitToYouverify({ idType, idNumber, selfieImage, userId, partne
   }
 }
 
-// POST: /kyc/biometric-verification - Verify user identity using Youverify
+/**
+ * NIN via Dojah: lookup + selfie-to-document face match in one call
+ * (POST /api/v1/kyc/nin/verify), plus a name match against the user's
+ * profile. Liveness (POST /api/v1/ml/liveness) is computed and logged but
+ * not gating - Dojah's passive liveness model scores genuine front-camera
+ * captures at 0% (paused on ZeusODX 2026-09-23 for the same reason).
+ * Approval requires: record found + name overlap (or no name data) + face match.
+ */
+async function submitToDojahNIN({ idNumber, selfieImage, profileFullName, partnerJobId }) {
+  const [verifyResult, livenessResult] = await Promise.all([
+    dojahService.verifyNIN({ nin: idNumber, selfieImage }),
+    dojahService.checkLiveness(selfieImage)
+  ]);
+
+  if (!verifyResult.success) {
+    logger.warn('Dojah NIN verify failed', { jobId: partnerJobId, status: verifyResult.status, error: JSON.stringify(verifyResult.error) });
+    return { success: false, error: verifyResult.error, status: verifyResult.status };
+  }
+
+  const entity = verifyResult.entity || {};
+  // entity.nin (masked) is present on every successful response even when
+  // name fields are sparse; Dojah endpoints also mix firstname/first_name.
+  const entityFirstName = entity.firstname || entity.first_name || null;
+  const entityLastName = entity.surname || entity.last_name || null;
+  const ninFound = !!(entity.nin || entityFirstName || entityLastName || entity.selfie_verification);
+  const ninFullName = [entityFirstName, entityLastName].filter(Boolean).join(' ');
+
+  return buildDojahResult({
+    kind: 'NIN',
+    found: ninFound,
+    idFullName: ninFullName,
+    firstName: entityFirstName,
+    lastName: entityLastName,
+    dateOfBirth: entity.birthdate || null,
+    entity,
+    livenessResult,
+    idNumber,
+    profileFullName,
+    partnerJobId,
+    raw: { nin: verifyResult.entity, liveness: livenessResult.entity }
+  });
+}
+
+/**
+ * BVN via Dojah: lookup + selfie-to-document face match in one call
+ * (POST /api/v1/kyc/bvn/verify). Same check model as submitToDojahNIN.
+ */
+async function submitToDojahBVN({ idNumber, selfieImage, profileFullName, partnerJobId }) {
+  const [verifyResult, livenessResult] = await Promise.all([
+    dojahService.verifyBVN({ bvn: idNumber, selfieImage }),
+    dojahService.checkLiveness(selfieImage)
+  ]);
+
+  if (!verifyResult.success) {
+    logger.warn('Dojah BVN verify failed', { jobId: partnerJobId, status: verifyResult.status, error: JSON.stringify(verifyResult.error) });
+    return { success: false, error: verifyResult.error, status: verifyResult.status };
+  }
+
+  const entity = verifyResult.entity || {};
+  const bvnFound = !!(entity.bvn || entity.first_name || entity.last_name || entity.selfie_verification);
+  const bvnFullName = [entity.first_name, entity.middle_name, entity.last_name].filter(Boolean).join(' ');
+
+  return buildDojahResult({
+    kind: 'BVN',
+    found: bvnFound,
+    idFullName: bvnFullName,
+    firstName: entity.first_name || null,
+    lastName: entity.last_name || null,
+    dateOfBirth: entity.date_of_birth || null,
+    entity,
+    livenessResult,
+    idNumber,
+    profileFullName,
+    partnerJobId,
+    raw: { bvn: verifyResult.entity, liveness: livenessResult.entity }
+  });
+}
+
+function buildDojahResult({ kind, found, idFullName, firstName, lastName, dateOfBirth, entity, livenessResult, idNumber, profileFullName, partnerJobId, raw }) {
+  const hasNameData = idFullName.trim().length > 0;
+  // nameMatched (exact token subset, or Jaro-Winkler near-match) is logged
+  // and persisted for audit; the gate only needs namePartiallyMatched since
+  // a selfie-to-document face match is required alongside it.
+  const nameMatched = found && hasNameData && (namesMatch(idFullName, profileFullName) || namesSimilar(idFullName, profileFullName));
+  const namePartiallyMatched = found && hasNameData && namesPartiallyOverlap(idFullName, profileFullName);
+  const selfieMatched = entity.selfie_verification?.match === true;
+  const nameCheckPassed = !hasNameData || namePartiallyMatched;
+  const livenessPassed = livenessResult.success && livenessResult.entity?.liveness?.liveness_check === true;
+  const allValidationPassed = found && nameCheckPassed && selfieMatched;
+
+  logger.info(`Dojah ${kind} verification result`, {
+    jobId: partnerJobId,
+    found,
+    hasNameData,
+    nameMatched,
+    namePartiallyMatched,
+    selfieMatched,
+    selfieMatchConfidence: entity.selfie_verification?.confidence_value,
+    livenessPassed,
+    livenessProbability: livenessResult.entity?.liveness?.liveness_probability,
+    livenessGating: false,
+    allValidationPassed,
+    rawEntity: entity
+  });
+
+  let validationMessages = null;
+  if (!found) {
+    validationMessages = `We could not find a matching ${kind} record. Please check the number and try again.`;
+  } else if (hasNameData && !nameCheckPassed) {
+    validationMessages = `The name on this ${kind} does not match your profile name.`;
+  } else if (!selfieMatched) {
+    validationMessages = `Your selfie does not match the photo on record for this ${kind}.`;
+  }
+
+  return {
+    success: true,
+    dojahId: partnerJobId,
+    verificationResult: {
+      allValidationPassed,
+      firstName,
+      lastName,
+      dateOfBirth,
+      gender: entity.gender || null,
+      idNumber,
+      faceMatch: selfieMatched,
+      livenessCheck: livenessPassed,
+      selfieMatchConfidence: entity.selfie_verification?.confidence_value ?? null,
+      livenessProbability: livenessResult.entity?.liveness?.liveness_probability ?? null,
+      nameMatched,
+      namePartiallyMatched,
+      profileFullName,
+      idFullName: idFullName || null,
+      validationMessages
+    },
+    raw
+  };
+}
+
+// POST: /kyc/biometric-verification - NIN/BVN via Dojah, other documents via Youverify
 router.post(
   "/biometric-verification",
   [
@@ -157,9 +302,12 @@ router.post(
     }
 
     const { idType, idNumber, selfieImage, livenessImages } = req.body;
+    // NIN and BVN go through Dojah; everything else stays on Youverify.
+    const usingDojah = isNinIdType(idType) || idType === 'bvn';
 
     try {
-      validateYouverifyConfig();
+      if (usingDojah) validateDojahConfig();
+      else validateYouverifyConfig();
 
       const user = await User.findById(req.user.id).select('firstname lastname email username phonenumber kycLevel kycStatus bvn bvnVerified kyc kycStatus');
       if (!user) return res.status(404).json({ success: false, message: "User not found" });
@@ -225,7 +373,7 @@ router.post(
       try {
         kycDoc = await KYC.create({
           userId: user._id,
-          provider: 'youverify',
+          provider: usingDojah ? 'dojah' : 'youverify',
           environment: process.env.NODE_ENV || 'development',
           partnerJobId: jobId,
           jobType: 1,
@@ -251,11 +399,22 @@ router.post(
         throw dbError;
       }
 
-      const youverifyResult = await submitToYouverify({ idType: youverifyIdType, idNumber, selfieImage, userId: user._id, partnerJobId: jobId });
+      const providerName = usingDojah ? 'Dojah' : 'Youverify';
+      const submitToDojah = isBvnVerification ? submitToDojahBVN : submitToDojahNIN;
+      const providerResult = usingDojah
+        ? await submitToDojah({ idNumber, selfieImage, profileFullName: `${user.firstname} ${user.lastname}`, partnerJobId: jobId })
+        : await submitToYouverify({ idType: youverifyIdType, idNumber, selfieImage, userId: user._id, partnerJobId: jobId });
 
-      if (youverifyResult.success && youverifyResult.youverifyId) {
-        const verification = youverifyResult.verificationResult || {};
-        const kycUpdateData = { youverifyId: youverifyResult.youverifyId, lastUpdated: new Date() };
+      const providerRefId = providerResult.youverifyId || providerResult.dojahId;
+      // Dojah gives a specific reason per failed check; Youverify doesn't.
+      const rejectionReason = (verification) => usingDojah
+        ? (verification.validationMessages || `We could not verify your ${isBvnVerification ? 'BVN' : 'NIN'}. Please try again.`)
+        : 'Incorrect data provided. Please ensure your selfie clearly shows your face and matches your ID document.';
+
+      if (providerResult.success && providerRefId) {
+        const verification = providerResult.verificationResult || {};
+        const kycUpdateData = { lastUpdated: new Date() };
+        if (providerResult.youverifyId) kycUpdateData.youverifyId = providerResult.youverifyId;
 
         if (verification.allValidationPassed !== undefined) {
           if (verification.allValidationPassed === true) {
@@ -268,7 +427,7 @@ router.post(
             kycUpdateData.status = 'REJECTED';
             kycUpdateData.jobSuccess = false;
             kycUpdateData.allValidationPassed = false;
-            kycUpdateData.resultText = 'Verification failed - incorrect data provided';
+            kycUpdateData.resultText = verification.validationMessages || 'Verification failed - incorrect data provided';
             if (verification.validationMessages) {
               kycUpdateData.payload = { validationMessages: verification.validationMessages };
             }
@@ -279,6 +438,20 @@ router.post(
           if (verification.dateOfBirth) kycUpdateData.dateOfBirth = verification.dateOfBirth;
           if (verification.gender) kycUpdateData.gender = verification.gender;
           if (verification.idNumber) kycUpdateData.idNumber = verification.idNumber;
+
+          if (usingDojah) {
+            kycUpdateData.documentMetadata = {
+              faceMatch: verification.faceMatch === true,
+              livenessCheck: verification.livenessCheck === true,
+              nameMatched: verification.nameMatched === true,
+              namePartiallyMatched: verification.namePartiallyMatched === true,
+              profileFullName: verification.profileFullName || null,
+              idFullName: verification.idFullName || null
+            };
+            if (verification.selfieMatchConfidence != null) {
+              kycUpdateData.confidenceValue = String(verification.selfieMatchConfidence);
+            }
+          }
         }
 
         await KYC.findByIdAndUpdate(kycDoc._id, { $set: kycUpdateData });
@@ -288,28 +461,29 @@ router.post(
             if (verification.allValidationPassed === true) {
               await sendKycEmail(user.email, user.firstname, 'APPROVED', 'Your identity verification has been successfully completed.');
             } else {
-              await sendKycEmail(user.email, user.firstname, 'REJECTED', 'Incorrect data provided. Please ensure your selfie clearly shows your face and matches your ID document.');
+              await sendKycEmail(user.email, user.firstname, 'REJECTED', rejectionReason(verification));
             }
           } catch (emailErr) {
             logger.error('Failed to send KYC result email', { userId: user._id, error: emailErr.message });
           }
         }
       } else {
-        if (youverifyResult.status >= 400) {
+        logger.warn(`${providerName} submission failed`, { kycId: kycDoc._id, userId: user._id, status: providerResult.status, error: JSON.stringify(providerResult.error) });
+        if (providerResult.status >= 400) {
           await KYC.findByIdAndUpdate(kycDoc._id, {
-            $set: { status: 'PROVISIONAL', errorReason: `Youverify API error: ${JSON.stringify(youverifyResult.error)}`, lastUpdated: new Date() }
+            $set: { status: 'PROVISIONAL', errorReason: `${providerName} API error: ${JSON.stringify(providerResult.error)}`, lastUpdated: new Date() }
           });
           sendKycProvisionalAdminNotify({
             username: user.firstname || user.email,
             userId: String(user._id),
             idType,
-            provisionalReason: `Youverify API error: ${JSON.stringify(youverifyResult.error)}`,
+            provisionalReason: `${providerName} API error: ${JSON.stringify(providerResult.error)}`,
             kycId: String(kycDoc._id)
           }).catch(err => logger.error('KYC provisional admin notify failed', { error: err.message }));
         }
       }
 
-      const verification = youverifyResult.verificationResult || {};
+      const verification = providerResult.verificationResult || {};
       const finalStatus = verification.allValidationPassed === true ? 'approved' :
                          verification.allValidationPassed === false ? 'rejected' : 'pending';
 
@@ -341,7 +515,7 @@ router.post(
           userUpdate['kyc.level2.approvedAt'] = new Date();
           userUpdate['kyc.level2.rejectionReason'] = null;
         } else if (verification.allValidationPassed === false) {
-          userUpdate['kyc.level2.rejectionReason'] = 'Incorrect data provided.';
+          userUpdate['kyc.level2.rejectionReason'] = rejectionReason(verification);
         }
 
         await User.findByIdAndUpdate(user._id, { $set: userUpdate });
@@ -369,13 +543,13 @@ router.post(
         data: {
           jobId,
           kycId: kycDoc._id,
-          youverifyId: youverifyResult.youverifyId || null,
-          status: youverifyResult.status >= 400 ? "provisional" : "pending",
+          youverifyId: providerResult.youverifyId || null,
+          status: providerResult.status >= 400 ? "provisional" : "pending",
           submittedAt: kycDoc.createdAt,
           idType,
           verificationType: isBvnVerification ? 'bvn' : 'document',
           processingTime: Date.now() - startTime,
-          youverifySubmitted: youverifyResult.success
+          youverifySubmitted: providerResult.success
         }
       });
 
@@ -385,6 +559,10 @@ router.post(
       if (error.code === 11000 || (error.message && error.message.includes('duplicate key'))) {
         const duplicateField = error.message.includes('bvn') ? 'BVN' : error.message.includes('nin') ? 'NIN' : 'ID';
         return res.status(400).json({ success: false, message: `This ${duplicateField} is already registered to another account.` });
+      }
+
+      if (error.message && (error.message.includes('YOUVERIFY') || error.message.includes('DOJAH'))) {
+        return res.status(500).json({ success: false, message: "ID verification service configuration error. Please contact support." });
       }
 
       return res.status(500).json({ success: false, message: "Server error during ID verification. Please try again." });

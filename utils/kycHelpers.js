@@ -133,6 +133,130 @@ function namesMatch(nameA, nameB) {
   return shorter.every((token) => longer.includes(token));
 }
 
+/**
+ * Looser than namesMatch: true if the two names share at least one word,
+ * rather than requiring every word of the shorter name to appear in the
+ * longer one. Used as a fallback when a full name match fails - a person's
+ * name on file may hold only part of what's on their ID (added/reordered
+ * legal names, e.g. profile "Abdul Yahaya" vs ID "Yahaya Abdul Basit
+ * Omeiza" - these already pass namesMatch, but a case with no full-subset
+ * overlap at all, e.g. only a shared middle name, still shouldn't be a hard
+ * rejection when the selfie face-match confirms identity).
+ * @param {string} nameA
+ * @param {string} nameB
+ * @returns {boolean} True if the names share at least one word
+ */
+function namesPartiallyOverlap(nameA, nameB) {
+  const tokenize = (name) =>
+    (name || '')
+      .toLowerCase()
+      .normalize('NFKD')
+      .replace(/[^a-z\s]/g, ' ')
+      .split(/\s+/)
+      .filter(Boolean);
+
+  const tokensA = tokenize(nameA);
+  const tokensB = tokenize(nameB);
+
+  if (tokensA.length === 0 || tokensB.length === 0) return false;
+
+  return tokensA.some((token) => tokensB.includes(token));
+}
+
+/**
+ * Jaro similarity (0-1) between two strings - foundation for Jaro-Winkler.
+ */
+function jaroSimilarity(s1, s2) {
+  if (s1 === s2) return 1;
+  const len1 = s1.length;
+  const len2 = s2.length;
+  if (len1 === 0 || len2 === 0) return 0;
+
+  const matchDistance = Math.max(0, Math.floor(Math.max(len1, len2) / 2) - 1);
+  const s1Matches = new Array(len1).fill(false);
+  const s2Matches = new Array(len2).fill(false);
+
+  let matches = 0;
+  for (let i = 0; i < len1; i++) {
+    const start = Math.max(0, i - matchDistance);
+    const end = Math.min(i + matchDistance + 1, len2);
+    for (let j = start; j < end; j++) {
+      if (s2Matches[j] || s1[i] !== s2[j]) continue;
+      s1Matches[i] = true;
+      s2Matches[j] = true;
+      matches++;
+      break;
+    }
+  }
+  if (matches === 0) return 0;
+
+  let transpositions = 0;
+  let k = 0;
+  for (let i = 0; i < len1; i++) {
+    if (!s1Matches[i]) continue;
+    while (!s2Matches[k]) k++;
+    if (s1[i] !== s2[k]) transpositions++;
+    k++;
+  }
+
+  return (matches / len1 + matches / len2 + (matches - transpositions / 2) / matches) / 3;
+}
+
+/**
+ * Jaro-Winkler similarity (0-1): Jaro similarity boosted for strings that
+ * share a common prefix (up to 4 chars). Industry-standard algorithm for
+ * name matching (OFAC sanctions screening, UK Confirmation of Payee).
+ * Unlike word-overlap matching, it scores the strings as a whole, so a
+ * single shared word can't produce a false "match" on its own.
+ */
+function jaroWinklerSimilarity(s1, s2, prefixScale = 0.1) {
+  const jaro = jaroSimilarity(s1, s2);
+  const maxPrefix = 4;
+  let prefixLength = 0;
+  for (let i = 0; i < Math.min(maxPrefix, s1.length, s2.length); i++) {
+    if (s1[i] !== s2[i]) break;
+    prefixLength++;
+  }
+  return jaro + prefixLength * prefixScale * (1 - jaro);
+}
+
+/**
+ * Normalize a name to a canonical, order-independent form for similarity
+ * scoring: lowercase, strip non-letters, sort words alphabetically and
+ * join - so "Godspower Odion" and "Odion Godspower" compare identically.
+ */
+function normalizeNameForSimilarity(name) {
+  return (name || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[^a-z\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .sort()
+    .join(' ');
+}
+
+/**
+ * Whole-name similarity score (0-1) between two names, order-independent
+ * and tolerant of minor typos, via Jaro-Winkler.
+ */
+function nameSimilarityScore(nameA, nameB) {
+  const normA = normalizeNameForSimilarity(nameA);
+  const normB = normalizeNameForSimilarity(nameB);
+  if (!normA || !normB) return 0;
+  return jaroWinklerSimilarity(normA, normB);
+}
+
+/**
+ * True if two names are similar enough to be considered the same person.
+ * Jaro-Winkler score >= threshold (0.85 default - tolerates typos and word
+ * reordering, but rejects names that are substantially different, unlike
+ * namesPartiallyOverlap which passes on a single shared word).
+ */
+function namesSimilar(nameA, nameB, threshold = 0.85) {
+  return nameSimilarityScore(nameA, nameB) >= threshold;
+}
+
 module.exports = {
   classifyOutcome,
   parseFullName,
@@ -140,6 +264,10 @@ module.exports = {
   isBvnIdType,
   isNinIdType,
   namesMatch,
+  namesPartiallyOverlap,
+  jaroWinklerSimilarity,
+  nameSimilarityScore,
+  namesSimilar,
   APPROVED_CODES,
   PROVISIONAL_CODES,
   REJECTED_CODES

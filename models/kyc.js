@@ -99,7 +99,14 @@ const KYCSchema = new Schema(
         documentVersion: { type: String },
         faceMatch: { type: Boolean },
         livenessCheck: { type: Boolean },
-        documentAuthenticity: { type: Boolean }
+        documentAuthenticity: { type: Boolean },
+        // Name-match basis for this approval/rejection - persisted so an
+        // approval that only passed via the partial-overlap fallback (not a
+        // full name match) is auditable from the record itself, not just logs.
+        nameMatched: { type: Boolean },
+        namePartiallyMatched: { type: Boolean },
+        profileFullName: { type: String },
+        idFullName: { type: String }
       },
       default: null
     }
