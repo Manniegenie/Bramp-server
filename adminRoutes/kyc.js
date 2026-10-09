@@ -364,6 +364,7 @@ router.get('/list', async (req, res) => {
         resultCode: 1,
         resultText: 1,
         confidenceValue: 1,
+        provider: 1,
         verificationDate: 1,
         createdAt: 1,
         lastUpdated: 1,
