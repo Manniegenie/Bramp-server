@@ -10,7 +10,6 @@ const KYCBlacklist = require("../models/KYCBlacklist");
 const logger = require("../utils/logger");
 const { classifyOutcome, isNinIdType, namesMatch, namesPartiallyOverlap, namesSimilar } = require("../utils/kycHelpers");
 const dojahService = require("../services/dojahService");
-const kycImageStorage = require("../services/kycImageStorage");
 const { sendKycEmail, sendKycProvisionalAdminNotify } = require("../services/EmailService");
 
 // Youverify Configuration (still used for passport, drivers_license, voter_id)
@@ -324,8 +323,8 @@ function buildDojahResult({ kind, found, idFullName, firstName, lastName, middle
       dateOfBirth,
       gender: entity.gender || null,
       providerReference: entity.reference || null,
-      // Photo on the government record, kept for compliance (uploaded to
-      // Cloudinary by the route; never logged or returned to the app).
+      // Photo on the government record, kept for compliance (stored on the
+      // KYC record; never logged or returned to the app).
       idPhoto: entity.image || entity.photo || null,
       idNumber,
       faceMatch: selfieMatched,
@@ -441,20 +440,10 @@ const biometricVerification = [
 
       const jobId = `${user._id}_${Date.now()}_${Math.random().toString(36).substring(7)}`;
 
-      // Compress once, store in Cloudinary (private), send the same image to
-      // the provider. Inline base64 is only kept as a fallback if the upload
-      // fails, and then only the compressed copy.
+      // Compress once: the same image is stored on the KYC record (well under
+      // MongoDB's 16MB document limit) and sent to the provider.
       const compressedSelfie = await compressSelfie(selfieImage);
-      const [selfieUpload, ...livenessUploads] = await Promise.all([
-        kycImageStorage.uploadKycImage(compressedSelfie, { userId: user._id, kind: 'selfie', jobId }),
-        ...(livenessImages || []).map((img, i) => kycImageStorage.uploadKycImage(img, { userId: user._id, kind: `liveness_${i}`, jobId }))
-      ]);
-      const imageLinks = {
-        selfie_image: selfieUpload ? null : compressedSelfie,
-        selfie_public_id: selfieUpload?.publicId || null,
-        liveness_images: (livenessImages || []).filter((_, i) => !livenessUploads[i]),
-        liveness_public_ids: livenessUploads.filter(Boolean).map((u) => u.publicId)
-      };
+      const imageLinks = { selfie_image: compressedSelfie, liveness_images: livenessImages || [] };
 
       let kycDoc;
       try {
@@ -530,9 +519,7 @@ const biometricVerification = [
           if (verification.phoneNumber) kycUpdateData.phoneNumber = verification.phoneNumber;
           if (verification.providerReference) kycUpdateData.providerReference = verification.providerReference;
           if (verification.idPhoto) {
-            const idPhotoUpload = await kycImageStorage.uploadKycImage(verification.idPhoto, { userId: user._id, kind: 'id_photo', jobId });
-            if (idPhotoUpload) kycUpdateData['imageLinks.document_public_id'] = idPhotoUpload.publicId;
-            else kycUpdateData['imageLinks.document_image'] = `data:image/jpeg;base64,${verification.idPhoto.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '')}`;
+            kycUpdateData['imageLinks.document_image'] = `data:image/jpeg;base64,${verification.idPhoto.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '')}`;
           }
 
           if (usingDojah) {

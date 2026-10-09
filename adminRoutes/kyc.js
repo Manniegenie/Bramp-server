@@ -2,7 +2,6 @@ const express = require('express');
 const router = express.Router();
 const User = require('../models/user');
 const KYC = require('../models/kyc');
-const { withSignedImageUrls } = require('../services/kycImageStorage');
 const validator = require('validator');
 const logger = require('../utils/logger');
 
@@ -435,9 +434,7 @@ router.get('/details/:kycId', async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      // Stored Cloudinary ids -> short-lived signed links in the image fields
-      // the admin UI already renders.
-      data: { kyc: withSignedImageUrls(kycEntry.toObject()), user: kycEntry.userId }
+      data: { kyc: kycEntry, user: kycEntry.userId }
     });
 
   } catch (error) {
