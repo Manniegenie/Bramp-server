@@ -26,6 +26,7 @@ function maskAcct(acct) {
   return s.length <= 4 ? s : `${s.slice(0, 2)}****${s.slice(-2)}`;
 }
 function cleanStr(v) { return (v ?? '').toString().trim(); }
+const OBIEX_NARRATION_MAX = 40;
 
 function sanitizeDestination(d = {}) {
   return {
@@ -48,9 +49,13 @@ function sanitizeFiatPayload(body = {}) {
   const destination = sanitizeDestination(body.destination || {});
   const amount = Number(body.amount);
   const currency = cleanStr(body.currency || 'NGNX').toUpperCase(); // default to NGNX
-  const narration =
+  // Obiex rejects the whole debit (400) if narration is over 40 chars - e.g.
+  // "Withdrawal to CHUKWUEMEKA EMMANUEL ELEKWA" is 41 - so cap it here, the
+  // single choke point for every naira payout.
+  const narration = (
     cleanStr(body.narration) ||
-    `NGNX payout to ${destination.accountName || 'beneficiary'} (${maskAcct(destination.accountNumber)})`;
+    `NGNX payout to ${destination.accountName || 'beneficiary'} (${maskAcct(destination.accountNumber)})`
+  ).slice(0, OBIEX_NARRATION_MAX).trim();
 
   return { destination, amount, currency, narration };
 }
