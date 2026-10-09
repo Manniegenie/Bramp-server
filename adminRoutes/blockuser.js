@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const User = require('../models/user');
+const KYCBlacklist = require('../models/KYCBlacklist');
 const validator = require('validator');
 const logger = require('../utils/logger');
 
@@ -52,6 +53,10 @@ router.post('/block', async (req, res) => {
         runValidators: true
       }
     );
+
+    // Ban the user's BVN/phone/email so they can't re-register or re-verify
+    // on a fresh account (lifted again on unblock).
+    await KYCBlacklist.banUser(updatedUser, blockReason);
 
     logger.info(`User blocked: ${email}`, {
       userId: updatedUser._id,
@@ -124,6 +129,8 @@ router.post('/unblock', async (req, res) => {
         runValidators: true
       }
     );
+
+    await KYCBlacklist.unbanUser(updatedUser);
 
     logger.info(`User unblocked: ${email}`, {
       userId: updatedUser._id,

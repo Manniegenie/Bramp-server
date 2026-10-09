@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const PendingUser = require('../models/pendinguser');
 const User = require('../models/user');
+const KYCBlacklist = require('../models/KYCBlacklist');
 const { sendSignupEmail, sendOtpEmail } = require('../services/EmailService');
 const logger = require('../utils/logger');
 const validator = require('validator');
@@ -98,6 +99,16 @@ router.post('/add-user', async (req, res) => {
   }
 
   try {
+    // Check KYC blacklist before anything else
+    const [emailBanned, phoneBanned] = await Promise.all([
+      KYCBlacklist.isBanned('email', email),
+      KYCBlacklist.isBanned('phone', phonenumber)
+    ]);
+    if (emailBanned || phoneBanned) {
+      logger.warn('Signup attempt from blacklisted identifier', { email: email.slice(0, 3) + '****' });
+      return res.status(403).json({ message: 'This account is not eligible to register on this platform.' });
+    }
+
     const existingMainUser = await User.findOne({
       $or: [{ email }, { phonenumber }]
     });

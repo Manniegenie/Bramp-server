@@ -8,95 +8,13 @@ const logger = require('../utils/logger');
 
 const smileService = new SmileIDNINService();
 
-router.post('/verify-nin', async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const { nin } = req.body;
-
-    if (!nin) return res.status(400).json({ success: false, message: 'NIN is required' });
-
-    const user = await User.findById(userId);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-
-    if (!user.firstname || !user.lastname) {
-      return res.status(400).json({ success: false, message: 'Please complete your profile with first and last name' });
-    }
-    if (user.kycLevel < 1) {
-      return res.status(400).json({ success: false, message: 'Please complete phone verification first' });
-    }
-    if (!EmailVerificationService.isEmailVerifiedFromObject(user)) {
-      return res.status(400).json({ success: false, message: 'Please verify your email address first' });
-    }
-
-    if (user.kyc?.level2?.submissionLocked === true) {
-      return res.status(400).json({ success: false, message: 'NIN verification already in progress' });
-    }
-
-    if (user.kyc?.level2?.status === 'approved') {
-      return res.status(400).json({ success: false, message: 'NIN verification already completed' });
-    }
-
-    if (!smileService.validateNINFormat(nin)) {
-      return res.status(400).json({ success: false, message: 'Invalid NIN format. NIN should be 11 digits' });
-    }
-
-    // Lock submission and mark pending
-    user.kyc.level2.status = 'pending';
-    user.kyc.level2.documentType = 'NIN';
-    user.kyc.level2.documentNumber = nin;
-    user.kyc.level2.submittedAt = new Date();
-    user.kyc.level2.submissionLocked = true;
-    user.kyc.level2.canResubmit = false;
-    user.kycStatus = 'pending';
-    await user.save();
-
-    const verificationResult = await smileService.verifyNIN({
-      userId,
-      nin,
-      firstName: user.firstname,
-      lastName: user.lastname,
-      middleName: '',
-      dateOfBirth: '1990-01-01',
-      gender: 'M',
-      phoneNumber: user.phonenumber
-    });
-
-    logger.info('NIN verification submitted successfully', {
-      userId,
-      jobId: verificationResult.jobId,
-      ninMasked: nin.slice(0, 3) + '********'
-    });
-
-    res.status(200).json({
-      success: true,
-      message: 'NIN verification submitted successfully. You will be notified once verification is complete.',
-      jobId: verificationResult.jobId,
-      status: 'pending'
-    });
-
-  } catch (error) {
-    logger.error('NIN verification submission failed', { error: error.message, userId: req.user?.id });
-
-    // Unlock on error so user can retry
-    if (req.user?.id) {
-      try {
-        await User.findByIdAndUpdate(req.user.id, {
-          $set: {
-            'kyc.level2.status': 'not_submitted',
-            'kyc.level2.submittedAt': null,
-            'kyc.level2.submissionLocked': false,
-            'kyc.level2.canResubmit': true,
-            'kycStatus': 'not_verified'
-          }
-        });
-      } catch (resetError) {
-        logger.error('Failed to reset KYC status after error', { error: resetError.message });
-      }
-    }
-
-    res.status(500).json({ success: false, message: 'Failed to submit NIN verification. Please try again.' });
-  }
-});
+// Retired: submitted NIN to Smile ID without a selfie match. NIN now goes
+// through Dojah via /kyc/biometric-verification. The Smile ID callback below
+// stays so any in-flight jobs can still complete.
+router.post('/verify-nin', (req, res) => res.status(410).json({
+    success: false,
+    message: 'This verification endpoint has been retired. Please update the app and verify through /kyc/biometric-verification.'
+  }));
 
 // POST /nin/smile-callback - Webhook from Smile ID
 router.post('/smile-callback', async (req, res) => {

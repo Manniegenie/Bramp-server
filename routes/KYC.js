@@ -1,10 +1,12 @@
 const express = require("express");
 const { body, validationResult } = require("express-validator");
 const axios = require("axios");
+const sharp = require("sharp");
 const router = express.Router();
 
 const User = require("../models/user");
 const KYC = require("../models/kyc");
+const KYCBlacklist = require("../models/KYCBlacklist");
 const logger = require("../utils/logger");
 const { classifyOutcome, isNinIdType, namesMatch, namesPartiallyOverlap, namesSimilar } = require("../utils/kycHelpers");
 const dojahService = require("../services/dojahService");
@@ -50,6 +52,61 @@ const validateDojahConfig = () => {
   }
 };
 
+// Compress selfie image to stay under the provider's payload size limit
+// Modern phone cameras (especially high-megapixel Android sensors) routinely
+// produce 15-25MB+ photos at full resolution - this is a generous sanity
+// cap against genuinely pathological uploads, not a filter on normal photos.
+// The actual crash protection is the try/catch below: if sharp/libvips fails
+// on a given image for any reason (size, malformed data, etc.), we fall back
+// to the uncompressed original rather than erroring out.
+const MAX_SELFIE_BYTES = 40 * 1024 * 1024;
+
+async function compressSelfie(imageInput) {
+  let base64Data = imageInput;
+  let mimeType = 'image/jpeg';
+
+  if (imageInput.startsWith('data:')) {
+    const matches = imageInput.match(/^data:([^;]+);base64,(.+)$/s);
+    if (matches) {
+      mimeType = matches[1];
+      base64Data = matches[2];
+    }
+  }
+
+  const inputBuffer = Buffer.from(base64Data, 'base64');
+
+  if (inputBuffer.length > MAX_SELFIE_BYTES) {
+    throw new Error(`Selfie image is too large (${Math.round(inputBuffer.length / 1024 / 1024)}MB). Please retake the photo.`);
+  }
+
+  if (inputBuffer.length < 500 * 1024) {
+    return `data:${mimeType};base64,${base64Data}`;
+  }
+
+  try {
+    const compressed = await sharp(inputBuffer)
+      .resize(800, 800, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 80 })
+      .toBuffer();
+
+    logger.info('Selfie compressed', {
+      originalSizeKB: Math.round(inputBuffer.length / 1024),
+      compressedSizeKB: Math.round(compressed.length / 1024)
+    });
+
+    return `data:image/jpeg;base64,${compressed.toString('base64')}`;
+  } catch (compressError) {
+    // Compression is an optimization, not a hard requirement - if sharp
+    // fails for any reason, fall back to the original image rather than
+    // crashing the whole submission.
+    logger.warn('Selfie compression failed, using original image uncompressed', {
+      error: compressError.message,
+      originalSizeKB: Math.round(inputBuffer.length / 1024)
+    });
+    return `data:${mimeType};base64,${base64Data}`;
+  }
+}
+
 /**
  * Submit verification request to Youverify API
  */
@@ -81,11 +138,7 @@ async function submitToYouverify({ idType, idNumber, selfieImage, userId, partne
 
     const validations = {};
     if (selfieImage) {
-      let imageUri = selfieImage;
-      if (!selfieImage.startsWith('data:image/')) {
-        imageUri = `data:image/jpeg;base64,${selfieImage}`;
-      }
-      validations.selfie = { image: imageUri };
+      validations.selfie = { image: await compressSelfie(selfieImage) };
     }
 
     if (Object.keys(validations).length > 0) {
@@ -145,9 +198,11 @@ async function submitToYouverify({ idType, idNumber, selfieImage, userId, partne
  * Approval requires: record found + name overlap (or no name data) + face match.
  */
 async function submitToDojahNIN({ idNumber, selfieImage, profileFullName, partnerJobId }) {
+  const compressedSelfie = await compressSelfie(selfieImage);
+
   const [verifyResult, livenessResult] = await Promise.all([
-    dojahService.verifyNIN({ nin: idNumber, selfieImage }),
-    dojahService.checkLiveness(selfieImage)
+    dojahService.verifyNIN({ nin: idNumber, selfieImage: compressedSelfie }),
+    dojahService.checkLiveness(compressedSelfie)
   ]);
 
   if (!verifyResult.success) {
@@ -184,9 +239,11 @@ async function submitToDojahNIN({ idNumber, selfieImage, profileFullName, partne
  * (POST /api/v1/kyc/bvn/verify). Same check model as submitToDojahNIN.
  */
 async function submitToDojahBVN({ idNumber, selfieImage, profileFullName, partnerJobId }) {
+  const compressedSelfie = await compressSelfie(selfieImage);
+
   const [verifyResult, livenessResult] = await Promise.all([
-    dojahService.verifyBVN({ bvn: idNumber, selfieImage }),
-    dojahService.checkLiveness(selfieImage)
+    dojahService.verifyBVN({ bvn: idNumber, selfieImage: compressedSelfie }),
+    dojahService.checkLiveness(compressedSelfie)
   ]);
 
   if (!verifyResult.success) {
@@ -275,8 +332,7 @@ function buildDojahResult({ kind, found, idFullName, firstName, lastName, dateOf
 }
 
 // POST: /kyc/biometric-verification - NIN/BVN via Dojah, other documents via Youverify
-router.post(
-  "/biometric-verification",
+const biometricVerification = [
   [
     body("idType")
       .trim().notEmpty().withMessage("ID type is required")
@@ -319,6 +375,12 @@ router.post(
       const isBvnVerification = idType === 'bvn';
 
       if (isBvnVerification) {
+        const bvnBanned = await KYCBlacklist.isBanned('bvn', idNumber);
+        if (bvnBanned) {
+          logger.warn('Blacklisted BVN submission attempt', { userId: user._id });
+          return res.status(403).json({ success: false, message: 'This identity document is not eligible for verification on this platform.' });
+        }
+
         const existingBvnUser = await User.findOne({ bvn: idNumber, _id: { $ne: user._id } });
         if (existingBvnUser) {
           return res.status(400).json({ success: false, message: "This BVN is already registered to another account." });
@@ -565,9 +627,19 @@ router.post(
         return res.status(500).json({ success: false, message: "ID verification service configuration error. Please contact support." });
       }
 
+      // Oversized selfie (some Android devices capture far larger photos)
+      if (error.message && error.message.includes('too large')) {
+        return res.status(400).json({ success: false, message: error.message });
+      }
+
       return res.status(500).json({ success: false, message: "Server error during ID verification. Please try again." });
     }
   }
-);
+];
+
+router.post("/biometric-verification", ...biometricVerification);
+// Shared with /chatbot-kyc/chatbot-kyc so every KYC entry point runs the same
+// Dojah/Youverify checks.
+router.biometricVerification = biometricVerification;
 
 module.exports = router;

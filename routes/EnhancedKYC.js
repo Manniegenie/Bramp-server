@@ -50,75 +50,12 @@ function buildPartnerParams(kind, userId) {
 }
 
 // POST /enhanced-kyc/bvn - BVN verification via Smile ID
-router.post('/bvn', async (req, res) => {
-  try {
-    const userId = req.user?.id;
-    if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized' });
-
-    const user = await User.findById(userId);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-
-    const { bvn, phoneNumber } = req.body || {};
-    const errors = [];
-    if (!bvn || !isDigits(bvn, 11)) errors.push('bvn must be 11 digits');
-    if (!idApi || !signature) errors.push('Smile server SDK not configured for BVN');
-    if (errors.length) return res.status(400).json({ success: false, message: 'Validation failed', errors });
-
-    const partnerParams = buildPartnerParams('bvn', userId);
-    const idInfo = {
-      country: 'NG',
-      id_type: 'BVN',
-      id_number: String(bvn).trim(),
-      phone_number: phoneNumber ? String(phoneNumber).trim() : undefined,
-    };
-
-    const rawResponse = await idApi.submit_job(partnerParams, idInfo, { signature: true });
-    const providerPayload = safeJsonParse(rawResponse);
-
-    const kycDoc = await KYC.create({
-      userId,
-      provider: 'smile-id',
-      environment: process.env.NODE_ENV || 'production',
-      partnerJobId: partnerParams.job_id,
-      jobType: 'EnhancedKyc:BVN',
-      smileJobId: providerPayload?.SmileJobID || providerPayload?.smile_job_id || undefined,
-      jobComplete: !!providerPayload?.job_complete,
-      jobSuccess: providerPayload?.result?.Success ?? providerPayload?.job_success ?? undefined,
-      status: mapDecisionToStatus(providerPayload?.result?.ResultText || providerPayload?.ResultText),
-      resultCode: providerPayload?.result?.ResultCode || providerPayload?.ResultCode,
-      resultText: providerPayload?.result?.ResultText || providerPayload?.ResultText,
-      country: 'NG',
-      idType: 'BVN',
-      payload: providerPayload,
-      provisionalReason: 'Awaiting Smile ID final result (callback/poll).',
-    });
-
-    logger.info('BVN KYC submitted', { userId, partnerJobId: partnerParams.job_id });
-
-    return res.status(201).json({
-      success: true,
-      message: 'BVN verification submitted',
-      data: { kycId: kycDoc._id, partnerJobId: kycDoc.partnerJobId, smileJobId: kycDoc.smileJobId, status: kycDoc.status }
-    });
-  } catch (error) {
-    logger.error('BVN verification failed', { error: error.message });
-    return res.status(500).json({ success: false, message: 'BVN verification failed', error: error.message });
-  }
-});
-
-// POST /enhanced-kyc/address - NG Digital Address Verification
-const NG_DISCOS = new Set(['AEDC','BEDC','EKEDC','EEDC','IBEDC','IKEDC','JEDC','KAEDCO','KEDCO','PHEDC','YEDC']);
-
-function normalizeUtilityType(v) {
-  const s = String(v || '').trim().toLowerCase();
-  return (s === 'postpaid' || s === 'post-paid') ? 'PostPaid' : 'PrePaid';
-}
-
-function oneLineAddress(input) {
-  const { address, addressLine1, addressLine2, city, state, postalCode } = input || {};
-  if (address && String(address).trim()) return String(address).trim();
-  return [addressLine1, addressLine2, city, state, postalCode].map(v => (v || '').toString().trim()).filter(Boolean).join(', ');
-}
+// Retired: submitted BVN to Smile ID without a selfie match. BVN now goes
+// through Dojah via /kyc/biometric-verification.
+router.post('/bvn', (req, res) => res.status(410).json({
+    success: false,
+    message: 'This verification endpoint has been retired. Please update the app and verify through /kyc/biometric-verification.'
+  }));
 
 router.post('/address', async (req, res) => {
   try {
