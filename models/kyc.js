@@ -46,6 +46,8 @@ const KYCSchema = new Schema(
     firstName: { type: String }, // Parsed from fullName if available
     lastName: { type: String },  // Parsed from fullName if available
     middleName: { type: String },
+    phoneNumber: { type: String }, // phone number on the ID record (NIN/BVN)
+    providerReference: { type: String }, // provider's own reference for the lookup
     dateOfBirth: { type: String }, // YYYY-MM-DD format
     gender: { type: String, enum: ['Male', 'Female', 'M', 'F', null], default: null },
     documentExpiryDate: { type: String }, // Document expiration date
@@ -61,6 +63,11 @@ const KYCSchema = new Schema(
     imageLinks: {
       type: {
         selfie_image: { type: String },
+        // Cloudinary `authenticated` public_ids (see services/kycImageStorage.js).
+        // When set, the matching inline field above is left empty.
+        selfie_public_id: { type: String },
+        document_public_id: { type: String }, // photo on the ID record returned by the provider
+        liveness_public_ids: [{ type: String }],
         liveness_images: [{ type: String }],
         document_image: { type: String },
         cropped_image: { type: String },

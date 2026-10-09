@@ -10,6 +10,7 @@ const KYCBlacklist = require("../models/KYCBlacklist");
 const logger = require("../utils/logger");
 const { classifyOutcome, isNinIdType, namesMatch, namesPartiallyOverlap, namesSimilar } = require("../utils/kycHelpers");
 const dojahService = require("../services/dojahService");
+const kycImageStorage = require("../services/kycImageStorage");
 const { sendKycEmail, sendKycProvisionalAdminNotify } = require("../services/EmailService");
 
 // Youverify Configuration (still used for passport, drivers_license, voter_id)
@@ -224,13 +225,14 @@ async function submitToDojahNIN({ idNumber, selfieImage, profileFullName, partne
     idFullName: ninFullName,
     firstName: entityFirstName,
     lastName: entityLastName,
-    dateOfBirth: entity.birthdate || null,
+    middleName: entity.middlename || entity.middle_name || null,
+    phoneNumber: entity.telephoneno || entity.phone_number || null,
+    dateOfBirth: entity.birthdate || entity.date_of_birth || null,
     entity,
     livenessResult,
     idNumber,
     profileFullName,
     partnerJobId,
-    raw: { nin: verifyResult.entity, liveness: livenessResult.entity }
   });
 }
 
@@ -261,17 +263,18 @@ async function submitToDojahBVN({ idNumber, selfieImage, profileFullName, partne
     idFullName: bvnFullName,
     firstName: entity.first_name || null,
     lastName: entity.last_name || null,
+    middleName: entity.middle_name || null,
+    phoneNumber: entity.phone_number1 || entity.phone_number || null,
     dateOfBirth: entity.date_of_birth || null,
     entity,
     livenessResult,
     idNumber,
     profileFullName,
     partnerJobId,
-    raw: { bvn: verifyResult.entity, liveness: livenessResult.entity }
   });
 }
 
-function buildDojahResult({ kind, found, idFullName, firstName, lastName, dateOfBirth, entity, livenessResult, idNumber, profileFullName, partnerJobId, raw }) {
+function buildDojahResult({ kind, found, idFullName, firstName, lastName, middleName, phoneNumber, dateOfBirth, entity, livenessResult, idNumber, profileFullName, partnerJobId }) {
   const hasNameData = idFullName.trim().length > 0;
   // nameMatched (exact token subset, or Jaro-Winkler near-match) is logged
   // and persisted for audit; the gate only needs namePartiallyMatched since
@@ -294,8 +297,9 @@ function buildDojahResult({ kind, found, idFullName, firstName, lastName, dateOf
     livenessPassed,
     livenessProbability: livenessResult.entity?.liveness?.liveness_probability,
     livenessGating: false,
-    allValidationPassed,
-    rawEntity: entity
+    allValidationPassed
+    // Deliberately no raw entity: it carries the ID photo, NIN/BVN, phone
+    // and date of birth. Those are persisted on the KYC record instead.
   });
 
   let validationMessages = null;
@@ -314,8 +318,15 @@ function buildDojahResult({ kind, found, idFullName, firstName, lastName, dateOf
       allValidationPassed,
       firstName,
       lastName,
+      middleName,
+      fullName: [firstName, middleName, lastName].filter(Boolean).join(' ') || null,
+      phoneNumber,
       dateOfBirth,
       gender: entity.gender || null,
+      providerReference: entity.reference || null,
+      // Photo on the government record, kept for compliance (uploaded to
+      // Cloudinary by the route; never logged or returned to the app).
+      idPhoto: entity.image || entity.photo || null,
       idNumber,
       faceMatch: selfieMatched,
       livenessCheck: livenessPassed,
@@ -326,8 +337,7 @@ function buildDojahResult({ kind, found, idFullName, firstName, lastName, dateOf
       profileFullName,
       idFullName: idFullName || null,
       validationMessages
-    },
-    raw
+    }
   };
 }
 
@@ -431,6 +441,21 @@ const biometricVerification = [
 
       const jobId = `${user._id}_${Date.now()}_${Math.random().toString(36).substring(7)}`;
 
+      // Compress once, store in Cloudinary (private), send the same image to
+      // the provider. Inline base64 is only kept as a fallback if the upload
+      // fails, and then only the compressed copy.
+      const compressedSelfie = await compressSelfie(selfieImage);
+      const [selfieUpload, ...livenessUploads] = await Promise.all([
+        kycImageStorage.uploadKycImage(compressedSelfie, { userId: user._id, kind: 'selfie', jobId }),
+        ...(livenessImages || []).map((img, i) => kycImageStorage.uploadKycImage(img, { userId: user._id, kind: `liveness_${i}`, jobId }))
+      ]);
+      const imageLinks = {
+        selfie_image: selfieUpload ? null : compressedSelfie,
+        selfie_public_id: selfieUpload?.publicId || null,
+        liveness_images: (livenessImages || []).filter((_, i) => !livenessUploads[i]),
+        liveness_public_ids: livenessUploads.filter(Boolean).map((u) => u.publicId)
+      };
+
       let kycDoc;
       try {
         kycDoc = await KYC.create({
@@ -445,7 +470,7 @@ const biometricVerification = [
           idNumber,
           createdAt: new Date(),
           lastUpdated: new Date(),
-          imageLinks: { selfie_image: selfieImage, liveness_images: livenessImages || [] }
+          imageLinks
         });
       } catch (dbError) {
         if (dbError.code === 11000) {
@@ -464,8 +489,8 @@ const biometricVerification = [
       const providerName = usingDojah ? 'Dojah' : 'Youverify';
       const submitToDojah = isBvnVerification ? submitToDojahBVN : submitToDojahNIN;
       const providerResult = usingDojah
-        ? await submitToDojah({ idNumber, selfieImage, profileFullName: `${user.firstname} ${user.lastname}`, partnerJobId: jobId })
-        : await submitToYouverify({ idType: youverifyIdType, idNumber, selfieImage, userId: user._id, partnerJobId: jobId });
+        ? await submitToDojah({ idNumber, selfieImage: compressedSelfie, profileFullName: `${user.firstname} ${user.lastname}`, partnerJobId: jobId })
+        : await submitToYouverify({ idType: youverifyIdType, idNumber, selfieImage: compressedSelfie, userId: user._id, partnerJobId: jobId });
 
       const providerRefId = providerResult.youverifyId || providerResult.dojahId;
       // Dojah gives a specific reason per failed check; Youverify doesn't.
@@ -500,6 +525,15 @@ const biometricVerification = [
           if (verification.dateOfBirth) kycUpdateData.dateOfBirth = verification.dateOfBirth;
           if (verification.gender) kycUpdateData.gender = verification.gender;
           if (verification.idNumber) kycUpdateData.idNumber = verification.idNumber;
+          if (verification.middleName) kycUpdateData.middleName = verification.middleName;
+          if (verification.fullName) kycUpdateData.fullName = verification.fullName;
+          if (verification.phoneNumber) kycUpdateData.phoneNumber = verification.phoneNumber;
+          if (verification.providerReference) kycUpdateData.providerReference = verification.providerReference;
+          if (verification.idPhoto) {
+            const idPhotoUpload = await kycImageStorage.uploadKycImage(verification.idPhoto, { userId: user._id, kind: 'id_photo', jobId });
+            if (idPhotoUpload) kycUpdateData['imageLinks.document_public_id'] = idPhotoUpload.publicId;
+            else kycUpdateData['imageLinks.document_image'] = `data:image/jpeg;base64,${verification.idPhoto.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '')}`;
+          }
 
           if (usingDojah) {
             kycUpdateData.documentMetadata = {
