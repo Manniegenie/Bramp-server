@@ -21,7 +21,8 @@
 //   GET  /metusela/accounts/:pid/deposits
 //   POST /metusela/accounts/:pid/stake               { reference, amountUsdc }       — bet: user → pool
 //   POST /metusela/accounts/:pid/credit              { reference, amountUsdc, kind } — PAYOUT | REFUND: pool → user
-//   GET  /metusela/withdrawal-networks               — USDC networks, Obiex fee + minimum
+//   GET  /metusela/withdrawal-networks               — USDC networks with minimum + fees, cheapest first
+//   GET  /metusela/withdrawal-quote?amountUsdc=&network= — total debited, network fee, what arrives
 //   POST /metusela/accounts/:pid/withdrawals         { reference, amountUsdc, network, address }
 //   GET  /metusela/pool                              — pool + float status
 //   POST /metusela/pool/float-topups                 { reference, amountUsdc, network, address }
@@ -167,8 +168,13 @@ router.post('/accounts/:pid/credit', route(async (req, res) => {
 }, 'credit'));
 
 router.get('/withdrawal-networks', route(async (req, res) => {
-  res.json({ success: true, data: await wallet.obiexNetworks('USDC') });
+  res.json({ success: true, data: await wallet.withdrawalNetworks() });
 }, 'withdrawal networks'));
+
+// What a withdrawal costs and delivers: ?amountUsdc=&network=
+router.get('/withdrawal-quote', route(async (req, res) => {
+  res.json({ success: true, data: await wallet.quoteWithdrawal({ amountUsdc: req.query.amountUsdc, network: req.query.network }) });
+}, 'withdrawal quote'));
 
 router.post('/accounts/:pid/withdrawals', route(async (req, res) => {
   const b = req.body || {};

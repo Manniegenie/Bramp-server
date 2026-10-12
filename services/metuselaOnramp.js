@@ -19,6 +19,7 @@ const { getOnrampRate } = require('./onramppriceservice');
 const { withdrawUSDC } = require('./ObiexWithdraw');
 const { getAvailableNetworks } = require('./networkService');
 const { notifyMetusela } = require('./metuselaNotify');
+const { normalizeNetwork } = require('./metuselaNetworks');
 const logger = require('../utils/logger');
 
 const cfg = () => ({
@@ -31,7 +32,8 @@ const cfg = () => ({
   // USDC on Polygon and Arbitrum (among others) and credit pUSD on Polygon.
   // Polygon first: same chain as Polymarket, lowest fees. Arbitrum is the
   // fallback if Obiex isn't offering USDC on Polygon at the time.
-  networks: (process.env.METUSELA_PAYOUT_NETWORKS || 'POLYGON,ARBITRUM').split(',').map((s) => s.trim().toUpperCase()).filter(Boolean),
+  // Obiex codes (POLYGON is accepted and mapped to Obiex's MATIC).
+  networks: (process.env.METUSELA_PAYOUT_NETWORKS || 'MATIC,ARBITRUM').split(',').map(normalizeNetwork).filter(Boolean),
 });
 
 class OnrampError extends Error {
@@ -56,7 +58,7 @@ async function payoutNetworks() {
   const configured = cfg().networks;
   if (networkCache.list && Date.now() - networkCache.at < 10 * 60 * 1000) return networkCache.list;
   try {
-    const live = (await getAvailableNetworks('USDC')).map((n) => String(n).toUpperCase());
+    const live = (await getAvailableNetworks('USDC')).map(normalizeNetwork);
     const list = configured.filter((n) => live.includes(n));
     networkCache = { at: Date.now(), list };
     if (list.length < configured.length) {
@@ -138,7 +140,7 @@ async function createOrder({ partnerReference, partnerUserId, amountNgn, custome
   if (!customer?.firstName || !customer?.lastName || !customer?.email) {
     throw new OnrampError('customer.firstName, customer.lastName and customer.email are required.');
   }
-  const network = String(destination?.network || '').toUpperCase();
+  const network = normalizeNetwork(destination?.network);
   const address = String(destination?.address || '').trim();
   const networks = await payoutNetworks();
   if (!networks.includes(network)) throw new OnrampError(`destination.network must be one of: ${networks.join(', ') || 'none available'}.`);

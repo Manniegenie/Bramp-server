@@ -18,6 +18,7 @@ const MetuselaDeposit = require('../models/metuselaDeposit');
 const MetuselaWithdrawal = require('../models/metuselaWithdrawal');
 const { MetuselaSettings } = require('../models/metuselaSettings');
 const { notifyMetusela } = require('./metuselaNotify');
+const { networkTerms, termsFor, normalizeNetwork } = require('./metuselaNetworks');
 const logger = require('../utils/logger');
 
 class WalletError extends Error {
@@ -140,7 +141,7 @@ async function transfer({ reference, type, fromId = null, toId = null, amount, m
 
 const networkCache = new Map();
 
-/** Networks Obiex currently offers for a currency, with its fee and minimum. */
+/** Networks Obiex currently offers for a currency (live API), codes normalized. */
 async function obiexNetworks(currency) {
   const hit = networkCache.get(currency);
   if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.list;
@@ -149,11 +150,7 @@ async function obiexNetworks(currency) {
   const list = raw.map((n) => {
     const net = n.network && typeof n.network === 'object' ? n.network : n;
     return {
-      code: String(net.code || n.code).toUpperCase(),
-      name: net.name || n.name || null,
-      withdrawalFee: n.fee ?? net.fee ?? null,
-      withdrawalFeeType: n.feeType ?? net.feeType ?? null,
-      minimumWithdrawal: n.minimum ?? net.minimum ?? null,
+      code: normalizeNetwork(net.code || n.code),
       addressRegex: n.addressRegex ?? net.addressRegex ?? null,
       memoRegex: n.memoRegex ?? net.memoRegex ?? null,
     };
@@ -162,22 +159,47 @@ async function obiexNetworks(currency) {
   return list;
 }
 
-/** Deposit options: enabled currencies × networks (admin-filtered). */
+// Built-in address formats, used when Obiex's live list isn't reachable.
+const EVM = /^0x[0-9a-fA-F]{40}$/;
+const ADDRESS_FORMATS = {
+  ETH: EVM, BASE: EVM, AVAXC: EVM, ARBITRUM: EVM, MATIC: EVM, BSC: EVM,
+  SOL: /^[1-9A-HJ-NP-Za-km-z]{32,44}$/,
+  TRX: /^T[1-9A-HJ-NP-Za-km-z]{33}$/,
+};
+
+/**
+ * Networks usable right now for a currency: Obiex's terms (defaults +
+ * admin overrides), enabled, optionally limited to `allowed`, and — when
+ * Obiex's live list can be fetched — actually offered by Obiex today.
+ */
+async function availableTerms(currency, { allowed = [], settings } = {}) {
+  const s = settings || await MetuselaSettings.get();
+  let terms = networkTerms(currency, s.networkOverrides).filter((t) => t.enabled !== false);
+  const allow = allowed.map(normalizeNetwork);
+  if (allow.length) terms = terms.filter((t) => allow.includes(t.code));
+  let live = null;
+  try {
+    live = await obiexNetworks(currency);
+  } catch (err) {
+    logger.warn('Metusela: Obiex live networks unavailable, using the fee table', { currency, error: err.message });
+  }
+  if (live && live.length) {
+    const byCode = new Map(live.map((n) => [n.code, n]));
+    terms = terms.filter((t) => byCode.has(t.code)).map((t) => ({ ...t, addressRegex: byCode.get(t.code).addressRegex || null }));
+  }
+  return terms;
+}
+
+/** Deposit options: enabled currencies × available networks, with minimums. */
 async function depositOptions() {
   const s = await MetuselaSettings.get();
   const out = [];
   for (const currency of s.depositCurrencies) {
-    const allowed = s.depositNetworks?.[currency] || [];
-    let nets = [];
-    try {
-      nets = await obiexNetworks(currency);
-    } catch (err) {
-      logger.warn('Metusela: Obiex networks unavailable', { currency, error: err.message });
-    }
+    const terms = await availableTerms(currency, { allowed: s.depositNetworks?.[currency] || [], settings: s });
     out.push({
       currency,
       creditedAs: 'USDC',
-      networks: nets.filter((n) => !allowed.length || allowed.includes(n.code)).map((n) => ({ code: n.code, name: n.name })),
+      networks: terms.map((t) => ({ code: t.code, name: t.name, minDeposit: t.minDeposit, depositFee: t.depositFee })),
     });
   }
   return {
@@ -190,21 +212,20 @@ async function depositOptions() {
 /**
  * The account's deposit address for a currency + network, created on
  * Obiex (broker address, ZeusODX-style) the first time it's asked for.
+ * Accepts common network names ("POLYGON" → Obiex's "MATIC").
  */
 async function depositAddress(account, currency, network) {
   const cur = String(currency || '').toUpperCase();
-  const net = String(network || '').toUpperCase();
+  const net = normalizeNetwork(network);
   const s = await MetuselaSettings.get();
   if (!s.depositsEnabled) throw new WalletError('Deposits are paused.', 503);
   if (!s.depositCurrencies.includes(cur)) throw new WalletError(`Deposits in ${cur} aren't enabled.`);
-  const allowed = s.depositNetworks?.[cur] || [];
-  if (allowed.length && !allowed.includes(net)) throw new WalletError(`${cur} on ${net} isn't enabled.`);
 
   const existing = account.depositAddresses.find((d) => d.currency === cur && d.network === net);
   if (existing) return existing;
 
-  const live = await obiexNetworks(cur);
-  if (!live.some((n) => n.code === net)) throw new WalletError(`Obiex doesn't offer ${cur} on ${net}.`);
+  const terms = await availableTerms(cur, { allowed: s.depositNetworks?.[cur] || [], settings: s });
+  if (!terms.some((t) => t.code === net)) throw new WalletError(`${cur} deposits on ${net} aren't available.`);
 
   const purpose = `metusela-${account._id}`; // Obiex purpose: letters, digits, dashes
   const data = await obiex.addresses().createDepositAddress({ purpose, currency: cur, network: net });
@@ -251,7 +272,7 @@ async function handleObiexDeposit({ address, network, currency, amount, status, 
   if (!account) return false;
 
   const cur = String(currency).toUpperCase();
-  const net = String(network || '').toUpperCase();
+  const net = normalizeNetwork(network);
   let dep = await MetuselaDeposit.findOneAndUpdate(
     { obiexTransactionId: transactionId },
     { $setOnInsert: { accountId: account._id, obiexTransactionId: transactionId, currency: cur, network: net, address, amount: Number(amount) }, ...(hash ? { $set: { txHash: hash } } : {}) },
@@ -360,13 +381,55 @@ async function credit(partnerUserId, { reference, amountUsdc, kind = 'PAYOUT' })
 
 // ── Withdrawals & float top-ups (Obiex) ────────────────────────────────────
 
-async function checkNetworkAndAddress(network, address) {
-  const net = String(network || '').toUpperCase();
-  const live = await obiexNetworks('USDC');
-  const n = live.find((x) => x.code === net);
-  if (!n) throw new WalletError(`USDC withdrawals on ${net} aren't available.`);
-  if (n.addressRegex && !new RegExp(n.addressRegex).test(String(address))) throw new WalletError('That address is not valid for this network.');
-  return n;
+/** USDC terms for a network, or a clear error. Accepts common names. */
+async function usdcNetwork(network, settings) {
+  const code = normalizeNetwork(network);
+  const t = (await availableTerms('USDC', { settings })).find((x) => x.code === code);
+  if (!t) throw new WalletError(`USDC withdrawals on ${code} aren't available.`);
+  return t;
+}
+
+function checkAddress(terms, address) {
+  const re = terms.addressRegex ? new RegExp(terms.addressRegex) : ADDRESS_FORMATS[terms.code];
+  if (re && !re.test(String(address || ''))) throw new WalletError(`That address is not valid for ${terms.name}.`);
+}
+
+/**
+ * What a withdrawal costs and delivers. The user is debited amount + our
+ * fee; Obiex takes its network fee out of the amount, so the recipient gets
+ * amount − network fee.
+ */
+async function quoteWithdrawal({ amountUsdc, network }) {
+  const s = await MetuselaSettings.get();
+  const t = await usdcNetwork(network, s);
+  const amount = round6(Number(amountUsdc));
+  const minimum = Math.max(s.minWithdrawalUsdc, Number(t.minWithdrawal));
+  const networkFee = Number(t.withdrawalFee);
+  const platformFee = round6(s.withdrawalFeeFlatUsdc);
+  return {
+    network: t.code,
+    networkName: t.name,
+    amountUsdc: amount,
+    minimumUsdc: minimum,
+    networkFeeUsdc: networkFee,
+    platformFeeUsdc: platformFee,
+    totalDebitedUsdc: round6(amount + platformFee),
+    recipientReceivesUsdc: round6(amount - networkFee),
+    ok: Number.isFinite(amount) && amount >= minimum && amount - networkFee > 0,
+  };
+}
+
+/** Withdrawal networks for USDC with their minimums and fees. */
+async function withdrawalNetworks() {
+  const s = await MetuselaSettings.get();
+  const terms = await availableTerms('USDC', { settings: s });
+  return terms.map((t) => ({
+    code: t.code,
+    name: t.name,
+    minimumUsdc: Math.max(s.minWithdrawalUsdc, Number(t.minWithdrawal)),
+    networkFeeUsdc: Number(t.withdrawalFee),
+    platformFeeUsdc: round6(s.withdrawalFeeFlatUsdc),
+  })).sort((a, b) => a.networkFeeUsdc - b.networkFeeUsdc);
 }
 
 /**
@@ -377,46 +440,51 @@ async function checkNetworkAndAddress(network, address) {
 async function withdraw(partnerUserId, { reference, amountUsdc, network, address }) {
   const s = await MetuselaSettings.get();
   if (!s.withdrawalsEnabled) throw new WalletError('Withdrawals are paused.', 503);
-  const amount = round6(Number(amountUsdc));
-  if (!(amount >= s.minWithdrawalUsdc)) throw new WalletError(`Minimum withdrawal is ${s.minWithdrawalUsdc} USDC.`);
-  const net = await checkNetworkAndAddress(network, address);
-  if (net.minimumWithdrawal != null && amount < Number(net.minimumWithdrawal)) {
-    throw new WalletError(`Minimum on ${net.code} is ${net.minimumWithdrawal} USDC.`);
-  }
+  const q = await quoteWithdrawal({ amountUsdc, network });
+  if (!q.ok) throw new WalletError(`Minimum withdrawal on ${q.networkName} is ${q.minimumUsdc} USDC.`);
+  checkAddress(await usdcNetwork(q.network, s), address);
 
-  const existing = await MetuselaWithdrawal.findOne({ reference: `wd:${reference}` });
+  const ref = `wd:${reference}`;
+  const existing = await MetuselaWithdrawal.findOne({ reference: ref });
   if (existing) return existing;
 
   const account = await getUserAccount(partnerUserId);
-  const fee = round6(s.withdrawalFeeFlatUsdc);
-  const ref = `wd:${reference}`;
-  await transfer({ reference: ref, type: 'WITHDRAWAL', fromId: account._id, amount, meta: { network: net.code, address } });
-  if (fee > 0) {
+  await transfer({ reference: ref, type: 'WITHDRAWAL', fromId: account._id, amount: q.amountUsdc, meta: { network: q.network, address } });
+  if (q.platformFeeUsdc > 0) {
     const fees = await systemAccount('FEES');
     try {
-      await transfer({ reference: `${ref}:fee`, type: 'WITHDRAWAL_FEE', fromId: account._id, toId: fees._id, amount: fee });
+      await transfer({ reference: `${ref}:fee`, type: 'WITHDRAWAL_FEE', fromId: account._id, toId: fees._id, amount: q.platformFeeUsdc });
     } catch (err) {
-      await transfer({ reference: `${ref}:reversal`, type: 'WITHDRAWAL_REVERSAL', toId: account._id, amount });
+      await transfer({ reference: `${ref}:reversal`, type: 'WITHDRAWAL_REVERSAL', toId: account._id, amount: q.amountUsdc });
       throw err;
     }
   }
 
-  const w = await MetuselaWithdrawal.create({ kind: 'USER', accountId: account._id, reference: ref, network: net.code, address, amountUsdc: amount, feeUsdc: fee });
+  const w = await MetuselaWithdrawal.create({
+    kind: 'USER', accountId: account._id, reference: ref, network: q.network, address,
+    amountUsdc: q.amountUsdc, feeUsdc: q.platformFeeUsdc, networkFeeUsdc: q.networkFeeUsdc, recipientReceivesUsdc: q.recipientReceivesUsdc,
+  });
   return submitToObiex(w);
 }
 
 /** Send POOL funds to Metusela's Polymarket wallet (its bridge address). */
 async function floatTopup({ reference, amountUsdc, network, address }) {
-  const amount = round6(Number(amountUsdc));
-  if (!(amount > 0)) throw new WalletError('Amount must be positive.');
-  const net = await checkNetworkAndAddress(network, address);
-  const existing = await MetuselaWithdrawal.findOne({ reference: `float:${reference}` });
+  const q = await quoteWithdrawal({ amountUsdc, network });
+  if (!(q.amountUsdc >= q.minimumUsdc) || !(q.recipientReceivesUsdc > 0)) {
+    throw new WalletError(`Minimum on ${q.networkName} is ${q.minimumUsdc} USDC.`);
+  }
+  checkAddress(await usdcNetwork(q.network), address);
+
+  const ref = `float:${reference}`;
+  const existing = await MetuselaWithdrawal.findOne({ reference: ref });
   if (existing) return existing;
 
   const pool = await systemAccount('POOL');
-  const ref = `float:${reference}`;
-  await transfer({ reference: ref, type: 'FLOAT_TOPUP', fromId: pool._id, amount, allowNegative: true, meta: { network: net.code, address } });
-  const w = await MetuselaWithdrawal.create({ kind: 'FLOAT_TOPUP', accountId: pool._id, reference: ref, network: net.code, address, amountUsdc: amount });
+  await transfer({ reference: ref, type: 'FLOAT_TOPUP', fromId: pool._id, amount: q.amountUsdc, allowNegative: true, meta: { network: q.network, address } });
+  const w = await MetuselaWithdrawal.create({
+    kind: 'FLOAT_TOPUP', accountId: pool._id, reference: ref, network: q.network, address,
+    amountUsdc: q.amountUsdc, networkFeeUsdc: q.networkFeeUsdc, recipientReceivesUsdc: q.recipientReceivesUsdc,
+  });
   return submitToObiex(w);
 }
 
@@ -478,7 +546,7 @@ async function handleObiexWithdrawal({ transactionId, status, hash }) {
 function serializeWithdrawal(w) {
   return {
     reference: w.reference, kind: w.kind, network: w.network, address: w.address, amountUsdc: w.amountUsdc,
-    feeUsdc: w.feeUsdc, status: w.status, txHash: w.txHash, failureReason: w.failureReason,
+    feeUsdc: w.feeUsdc, networkFeeUsdc: w.networkFeeUsdc, recipientReceivesUsdc: w.recipientReceivesUsdc, status: w.status, txHash: w.txHash, failureReason: w.failureReason,
     createdAt: w.createdAt, completedAt: w.completedAt,
   };
 }
@@ -498,7 +566,8 @@ async function history(account, { limit = 50 } = {}) {
 
 module.exports = {
   WalletError, ensureAccount, getUserAccount, serializeAccount, systemAccount,
-  transfer, obiexNetworks, depositOptions, depositAddress,
+  transfer, obiexNetworks, availableTerms, depositOptions, depositAddress,
+  quoteWithdrawal, withdrawalNetworks,
   handleObiexDeposit, handleObiexWithdrawal, serializeDeposit, serializeWithdrawal,
   stake, credit, withdraw, floatTopup, history,
 };
