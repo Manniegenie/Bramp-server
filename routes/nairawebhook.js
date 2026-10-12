@@ -362,6 +362,11 @@ router.post('/glyde/collection', validateGlydeWebhookSignature, async (req, res)
     // its payment-confirmed handling doesn't exist yet, see routes/buy.js.)
     const account = await GlydeVirtualAccount.findOne({ reference: merchantReference });
     if (!account) {
+      // Not a Bramp user's account — it may be a Metusela on-ramp order
+      // (dynamic account issued via routes/metusela.js).
+      if (await require('../services/metuselaOnramp').handleGlydeCollection({ event, merchantReference, glydeReference, amount })) {
+        return;
+      }
       logger.warn('Glyde collection webhook: no virtual account matches merchant_reference', {
         merchantReference,
         glydeReference,

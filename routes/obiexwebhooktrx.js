@@ -250,6 +250,15 @@ router.post('/transaction', webhookAuth, async (req, res) => {
       // Find transaction by obiexTransactionId
       transaction = await Transaction.findOne({ obiexTransactionId: transactionId });
       
+      // Not a Bramp user's withdrawal — it may be a Metusela one (on-ramp
+      // payout, user withdrawal or float top-up).
+      if (!transaction && (
+        await require('../services/metuselaOnramp').handleObiexWithdrawal({ transactionId, status, hash })
+        || await require('../services/metuselaWallet').handleObiexWithdrawal({ transactionId, status, hash })
+      )) {
+        return res.status(200).json({ success: true });
+      }
+
       if (!transaction) {
         logger.warn(`No transaction found for obiexTransactionId: ${transactionId}`, {
           searchedTransactionId: transactionId,
@@ -260,6 +269,13 @@ router.post('/transaction', webhookAuth, async (req, res) => {
       
       logger.info(`Found withdrawal transaction: ${transaction._id} with obiexTransactionId: ${transaction.obiexTransactionId}, current status: ${transaction.status}`);
       user = await User.findById(transaction.userId);
+    }
+
+    // Not a Bramp user's address — it may be a Metusela deposit address.
+    if (!user && type === 'DEPOSIT' && await require('../services/metuselaWallet').handleObiexDeposit({
+      address, network, currency: normalizedCurrency, amount, status, transactionId, hash,
+    })) {
+      return res.status(200).json({ success: true });
     }
 
     if (!user) {

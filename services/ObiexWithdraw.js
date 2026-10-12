@@ -83,4 +83,39 @@ async function withdrawUSDCToArbitrum(toAddress, usdcAmount, narration = 'HL aut
   }
 }
 
-module.exports = { withdrawUSDCToArbitrum };
+/**
+ * Withdraws USDC from the platform's Obiex account to an address on any
+ * network Obiex supports for USDC (e.g. 'POLYGON', 'ARBITRUM'). Same
+ * treasury operation as withdrawUSDCToArbitrum above, with the network as
+ * a parameter — used by the Metusela on-ramp (services/metuselaOnramp.js).
+ * withdrawUSDCToArbitrum is left as-is because hlBalanceGuard depends on it.
+ *
+ * @returns {Promise<{ success: boolean, transactionId?: string, error?: string }>}
+ */
+async function withdrawUSDC(toAddress, usdcAmount, network, narration = 'Metusela on-ramp') {
+  if (!toAddress) return { success: false, error: 'MISSING_ADDRESS' };
+  if (!network) return { success: false, error: 'MISSING_NETWORK' };
+  if (!Number.isFinite(usdcAmount) || usdcAmount < MIN_WITHDRAWAL) {
+    return { success: false, error: `AMOUNT_TOO_LOW: minimum is $${MIN_WITHDRAWAL} USDC` };
+  }
+
+  try {
+    const response = await obiexAxios.post('/wallets/ext/debit/crypto', {
+      amount: usdcAmount,
+      currency: 'USDC',
+      destination: { address: toAddress, network },
+      // Obiex rejects long narrations (see the 40-char cap commit).
+      narration: String(narration).slice(0, 40),
+    });
+    const txId = response.data?.data?.id;
+    if (!txId) throw new Error('Obiex response missing transaction ID');
+    logger.info('ObiexWithdraw: USDC withdrawal submitted', { txId, usdcAmount, network });
+    return { success: true, transactionId: txId };
+  } catch (err) {
+    const detail = err.response?.data?.message || err.message;
+    logger.error('ObiexWithdraw: USDC withdrawal failed', { usdcAmount, network, error: detail, status: err.response?.status });
+    return { success: false, error: detail };
+  }
+}
+
+module.exports = { withdrawUSDCToArbitrum, withdrawUSDC };

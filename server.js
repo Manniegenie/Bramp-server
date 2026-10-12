@@ -624,6 +624,11 @@ app.use("/admin-2fa", Admin2FARoutes);
 app.use("/webhook", webhookLimiter, webhookRoutes);
 app.use("/billwebhook", webhookLimiter, billwebhookRoutes);
 app.use("/ngnbwebhook", webhookLimiter, ngnbwebhookRoutes);
+// Metusela endpoints (partner API, Naira → USDC on-ramp). Service-to-service
+// auth via X-Partner-Key — see routes/metusela.js.
+app.use("/metusela", require("./auth/partnerAuth"), require("./routes/metusela"));
+// Metusela admin: fees, limits, balances (adminRoutes/metusela.js).
+app.use("/admin/metusela", authenticateAdminToken, requireAdmin, require("./adminRoutes/metusela"));
 app.use("/whatsapp", webhookLimiter, whatsappAIRoutes);
 app.use("/chatbot", ChatbotRoutes); // Removed rate limiter - user-facing chat endpoint
 app.use("/Chatbotwebhook", webhookLimiter, ChatbotwebhookRoutes);
