@@ -380,7 +380,7 @@ async function stake(partnerUserId, { reference, amountUsdc, marketId }) {
   // A retry of a stake already taken skips the checks below.
   let bet = await MetuselaBet.findOne({ reference });
   if (!bet) {
-    if (!s.betsEnabled) throw new WalletError(s.betsPausedReason ? `Betting is paused: ${s.betsPausedReason}` : 'Betting is paused.', 503);
+    if (!s.betsEnabled) throw new WalletError(s.betsPausedReason ? `Calls, tails and fades are paused: ${s.betsPausedReason}` : 'Calls, tails and fades are paused.', 503);
     if (!market || market.length > 128) throw new WalletError('marketId is required.');
     if (!(amount > 0)) throw new WalletError('Amount must be positive.');
     // Reserve first, then check the caps including this bet: two bets racing
@@ -394,7 +394,7 @@ async function stake(partnerUserId, { reference, amountUsdc, marketId }) {
     }
     if (String(bet.accountId) !== String(account._id)) throw new WalletError('That reference was already used for a different transfer.', 409);
     const [total, inMarket] = await Promise.all([float.openBetsUsdc(), float.openBetsUsdc(market)]);
-    const over = total > s.openBetsCapUsdc + 1e-9 ? 'Open bets are at their limit right now. Try again later.'
+    const over = total > s.openBetsCapUsdc + 1e-9 ? 'Open positions are at their limit right now. Try again later.'
       : inMarket > s.perMarketCapUsdc + 1e-9 ? 'This market is at its limit right now. Try a smaller stake.' : null;
     if (over) {
       await MetuselaBet.deleteOne({ _id: bet._id, status: 'OPEN' });
@@ -439,7 +439,7 @@ async function refundStake(partnerUserId, { reference }) {
   const account = await getUserAccount(partnerUserId);
   const original = await MetuselaTransfer.findOne({ reference: `stake:${reference}`, status: 'DONE' });
   if (!original || String(original.fromAccountId) !== String(account._id)) throw new WalletError('No stake with that reference for this account.', 404);
-  if (await MetuselaBet.exists({ reference, status: 'SETTLED' })) throw new WalletError('That bet was already settled.', 409);
+  if (await MetuselaBet.exists({ reference, status: 'SETTLED' })) throw new WalletError('That position was already settled.', 409);
   const feeT = await MetuselaTransfer.findOne({ reference: `stake:${reference}:fee`, status: 'DONE' });
   const pool = await systemAccount('POOL');
   const fee = feeT ? feeT.amountUsdc : 0;
@@ -460,7 +460,7 @@ async function refundStake(partnerUserId, { reference }) {
 async function settleStake(partnerUserId, { reference, payoutUsdc }) {
   const account = await getUserAccount(partnerUserId);
   const bet = await MetuselaBet.findOne({ reference, accountId: account._id });
-  if (!bet) throw new WalletError('No bet with that reference for this account.', 404);
+  if (!bet) throw new WalletError('No position with that reference for this account.', 404);
   if (bet.status === 'REFUNDED') throw new WalletError('That stake was refunded.', 409);
   const payout = round6(Number(payoutUsdc));
   if (!(payout >= 0)) throw new WalletError('payoutUsdc must be 0 or more.');
