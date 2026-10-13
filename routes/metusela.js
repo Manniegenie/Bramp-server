@@ -19,13 +19,17 @@
 //   POST /metusela/accounts/:pid/deposit-address     { currency, network }
 //   GET  /metusela/accounts/:pid/history             — signed balance changes
 //   GET  /metusela/accounts/:pid/deposits
-//   POST /metusela/accounts/:pid/stake               { reference, amountUsdc }       — bet: user → pool
+//   POST /metusela/accounts/:pid/stake               { reference, amountUsdc, marketId } — bet (all-in): user → pool; returns budgetUsdc
+//   POST /metusela/accounts/:pid/stake/:ref/refund   — order didn't fill: whole stake back, fee included
+//   POST /metusela/accounts/:pid/stake/:ref/settle   { payoutUsdc } — market resolved: close the bet, pay winnings (0 = lost)
 //   POST /metusela/accounts/:pid/credit              { reference, amountUsdc, kind } — PAYOUT | REFUND: pool → user
 //   GET  /metusela/withdrawal-networks               — USDC networks with minimum + fees, cheapest first
 //   GET  /metusela/withdrawal-quote?amountUsdc=&network= — total debited, network fee, what arrives
 //   POST /metusela/accounts/:pid/withdrawals         { reference, amountUsdc, network, address }
 //   GET  /metusela/pool                              — pool + float status
-//   POST /metusela/pool/float-topups                 { reference, amountUsdc, network, address }
+//   GET  /metusela/pool/float                        — money at Polymarket: idle (on-chain), open bets, caps, sweepDueUsdc
+//   POST /metusela/pool/float-topups                 { reference, amountUsdc?, network, address } — capped; no amount = fill to cap
+//   POST /metusela/pool/lockout                      { reason } — Polymarket refused/restricted us: pause betting
 //
 // Status changes are pushed to METUSELA_WEBHOOK_URL, signed
 // (services/metuselaNotify.js).
@@ -37,6 +41,7 @@ const {
 const wallet = require('../services/metuselaWallet');
 const MetuselaDeposit = require('../models/metuselaDeposit');
 const MetuselaWithdrawal = require('../models/metuselaWithdrawal');
+const float = require('../services/metuselaFloat');
 const logger = require('../utils/logger');
 
 function fail(res, err, fallback) {
@@ -157,10 +162,27 @@ router.get('/accounts/:pid/deposits', route(async (req, res) => {
   res.json({ success: true, data: deps.map(wallet.serializeDeposit) });
 }, 'deposits'));
 
+// All-in stake: debits amountUsdc; returns the order budget (stake − bet fee).
 router.post('/accounts/:pid/stake', route(async (req, res) => {
-  const account = await wallet.stake(req.params.pid, { reference: reqRef(req.body?.reference), amountUsdc: req.body?.amountUsdc });
-  res.json({ success: true, data: wallet.serializeAccount(account) });
+  const b = req.body || {};
+  const r = await wallet.stake(req.params.pid, { reference: reqRef(b.reference), amountUsdc: b.amountUsdc, marketId: b.marketId });
+  res.json({
+    success: true,
+    data: { ...wallet.serializeAccount(r.account), stakeUsdc: r.stakeUsdc, betFeeUsdc: r.betFeeUsdc, budgetUsdc: r.budgetUsdc },
+  });
 }, 'stake'));
+
+// The order for that stake didn't fill: full refund, bet fee included.
+router.post('/accounts/:pid/stake/:reference/refund', route(async (req, res) => {
+  const r = await wallet.refundStake(req.params.pid, { reference: reqRef(req.params.reference) });
+  res.json({ success: true, data: { ...wallet.serializeAccount(r.account), refundedUsdc: r.refundedUsdc } });
+}, 'refund stake'));
+
+// The market resolved: close the bet; payoutUsdc 0 for a losing bet.
+router.post('/accounts/:pid/stake/:reference/settle', route(async (req, res) => {
+  const r = await wallet.settleStake(req.params.pid, { reference: reqRef(req.params.reference), payoutUsdc: req.body?.payoutUsdc });
+  res.json({ success: true, data: { ...wallet.serializeAccount(r.account), payoutUsdc: r.payoutUsdc } });
+}, 'settle stake'));
 
 router.post('/accounts/:pid/credit', route(async (req, res) => {
   const account = await wallet.credit(req.params.pid, { reference: reqRef(req.body?.reference), amountUsdc: req.body?.amountUsdc, kind: req.body?.kind });
@@ -191,9 +213,20 @@ router.get('/pool', route(async (req, res) => {
       usdcBalance: pool.usdcBalance,
       depositAddresses: wallet.serializeAccount(pool).depositAddresses,
       floatTopupsInFlight: inFlight.map(wallet.serializeWithdrawal),
+      float: await float.status(),
     },
   });
 }, 'pool'));
+
+router.get('/pool/float', route(async (req, res) => {
+  res.json({ success: true, data: await float.status() });
+}, 'float status'));
+
+// Polymarket refused an order for account reasons, or the account looks
+// restricted: stop betting and float top-ups until an admin re-enables.
+router.post('/pool/lockout', route(async (req, res) => {
+  res.json({ success: true, data: await float.lockout(req.body?.reason) });
+}, 'lockout'));
 
 // The pool's own deposit address — where Metusela sends float back.
 router.post('/pool/deposit-address', route(async (req, res) => {

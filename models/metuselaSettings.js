@@ -9,6 +9,10 @@ const metuselaSettingsSchema = new mongoose.Schema({
 
   depositFeeBps: { type: Number, default: 0, min: 0, max: 10000 },
   depositFeeFlatUsdc: { type: Number, default: 0, min: 0 },
+  // Commission on every bet (call, tail, fade): a share of the stake goes to
+  // FEES, the rest is the order budget sent to Polymarket. All-in: the user
+  // is debited exactly the stake they entered.
+  betFeeBps: { type: Number, default: 0, min: 0, max: 10000 },
   // Extra margin on USDT → USDC conversions, on top of Obiex's rate.
   usdtSwapMarkupBps: { type: Number, default: 0, min: 0, max: 10000 },
   // Our flat fee per withdrawal, on top of Obiex's network fee.
@@ -27,9 +31,18 @@ const metuselaSettingsSchema = new mongoose.Schema({
   },
 
 
+  // Limits on customer money at Polymarket (services/metuselaFloat.js).
+  // Worst case if the Polymarket account is locked: floatCap + openBetsCap.
+  floatCapUsdc: { type: Number, default: 50, min: 0 },
+  openBetsCapUsdc: { type: Number, default: 2000, min: 0 },
+  perMarketCapUsdc: { type: Number, default: 200, min: 0 },
+
   depositsEnabled: { type: Boolean, default: true },
   withdrawalsEnabled: { type: Boolean, default: true },
   betsEnabled: { type: Boolean, default: true },
+  // Set when Metusela reports a Polymarket lockout; cleared when an admin
+  // turns betting back on.
+  betsPausedReason: { type: String, default: null },
 
   updatedBy: { type: String, default: null },
 }, { timestamps: true, minimize: false });
@@ -38,8 +51,12 @@ const PATCHABLE = {
   depositFeeBps: 'bps',
   depositFeeFlatUsdc: 'usdc',
   usdtSwapMarkupBps: 'bps',
+  betFeeBps: 'bps',
   withdrawalFeeFlatUsdc: 'usdc',
   minWithdrawalUsdc: 'usdc',
+  floatCapUsdc: 'usdc',
+  openBetsCapUsdc: 'usdc',
+  perMarketCapUsdc: 'usdc',
   depositCurrencies: 'currencies',
   'depositNetworks.USDC': 'networks',
   'depositNetworks.USDT': 'networks',
@@ -56,15 +73,19 @@ metuselaSettingsSchema.statics.PATCHABLE = PATCHABLE;
 metuselaSettingsSchema.statics.FIELDS = [
   { path: 'depositFeeBps', label: 'Deposit fee', type: 'bps', unit: 'basis points (100 = 1%)', min: 0, max: 10000, help: 'Percentage taken from every crypto deposit.' },
   { path: 'depositFeeFlatUsdc', label: 'Deposit fee (flat)', type: 'usdc', unit: 'USDC', min: 0, help: 'Fixed amount taken from every deposit, on top of the percentage.' },
+  { path: 'betFeeBps', label: 'Bet fee', type: 'bps', unit: 'basis points (100 = 1%)', min: 0, max: 10000, help: 'Your commission on every call, tail and fade, taken from the stake.' },
   { path: 'usdtSwapMarkupBps', label: 'USDT → USDC markup', type: 'bps', unit: 'basis points', min: 0, max: 10000, help: 'Margin on USDT deposits, on top of Obiex’s swap rate.' },
   { path: 'withdrawalFeeFlatUsdc', label: 'Withdrawal fee', type: 'usdc', unit: 'USDC', min: 0, help: 'Our fee per withdrawal, on top of Obiex’s network fee.' },
   { path: 'minWithdrawalUsdc', label: 'Minimum withdrawal', type: 'usdc', unit: 'USDC', min: 0, help: 'Platform floor. Each network’s Obiex minimum also applies.' },
+  { path: 'floatCapUsdc', label: 'Idle cash cap at Polymarket', type: 'usdc', unit: 'USDC', min: 0, help: 'Most customer money that may sit unused in the Polymarket wallet. Top-ups only refill to this.' },
+  { path: 'openBetsCapUsdc', label: 'Open bets cap', type: 'usdc', unit: 'USDC', min: 0, help: 'Most money in live bets at once. New bets are refused above it.' },
+  { path: 'perMarketCapUsdc', label: 'Per-market cap', type: 'usdc', unit: 'USDC', min: 0, help: 'Most money in live bets on one market.' },
   { path: 'depositCurrencies', label: 'Deposit coins', type: 'currencies', options: ['USDC', 'USDT'], help: 'Coins users can deposit. Everything is credited as USDC.' },
   { path: 'depositNetworks.USDC', label: 'USDC deposit networks', type: 'networks', help: 'Empty = every network in the fee table that Obiex offers.' },
   { path: 'depositNetworks.USDT', label: 'USDT deposit networks', type: 'networks', help: 'Empty = every network in the fee table that Obiex offers.' },
   { path: 'depositsEnabled', label: 'Deposits on', type: 'bool', help: 'Turn off to stop new deposit addresses being issued.' },
   { path: 'withdrawalsEnabled', label: 'Withdrawals on', type: 'bool', help: 'Kill switch for user withdrawals.' },
-  { path: 'betsEnabled', label: 'Betting on', type: 'bool', help: 'Kill switch for new stakes.' },
+  { path: 'betsEnabled', label: 'Betting on', type: 'bool', help: 'Kill switch for new stakes and float top-ups. Also switched off automatically on a Polymarket lockout.' },
 ];
 
 metuselaSettingsSchema.statics.get = async function get() {

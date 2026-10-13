@@ -6,16 +6,21 @@
 //   Deposits    — per-user Obiex deposit addresses for USDC and USDT on every
 //                 network Obiex offers. USDT is swapped to USDC on Obiex.
 //                 Credited from the Obiex webhook, less the deposit fee.
-//   Bets        — stake: user → POOL; payout/refund: POOL → user.
+//   Bets        — stake: user → POOL; payout/refund: POOL → user. Each stake
+//                 is an OPEN bet until settled or refunded; open bets are
+//                 capped (services/metuselaFloat.js).
 //   Withdrawals — USDC on any Obiex network to an external address.
 //   Float       — POOL → Metusela's Polymarket wallet (Obiex withdrawal to its
-//                 Polymarket bridge address); money coming back lands on the
-//                 POOL's own deposit addresses.
+//                 Polymarket bridge address), only ever up to floatCapUsdc of
+//                 idle money there; money coming back lands on the POOL's own
+//                 deposit addresses.
 // Every balance change is a MetuselaTransfer with a unique reference.
 const MetuselaAccount = require('../models/metuselaAccount');
 const MetuselaTransfer = require('../models/metuselaTransfer');
 const MetuselaDeposit = require('../models/metuselaDeposit');
 const MetuselaWithdrawal = require('../models/metuselaWithdrawal');
+const MetuselaBet = require('../models/metuselaBet');
+const float = require('./metuselaFloat');
 const { MetuselaSettings } = require('../models/metuselaSettings');
 const { notifyMetusela } = require('./metuselaNotify');
 const { networkTerms, termsFor, normalizeNetwork } = require('./metuselaNetworks');
@@ -357,14 +362,120 @@ function serializeDeposit(d) {
 
 // ── Bets ───────────────────────────────────────────────────────────────────
 
-/** Stake for a call/tail/fade: user → POOL. Idempotent on reference. */
-async function stake(partnerUserId, { reference, amountUsdc }) {
+/**
+ * Stake for a call/tail/fade (all-in): the user is debited exactly
+ * `amountUsdc` into the POOL; the bet fee then moves POOL → FEES. What's left
+ * is the order budget Metusela may spend on Polymarket (including
+ * Polymarket's own fees). The bet counts towards the open-bets caps until
+ * it's settled or refunded. Idempotent on reference.
+ * Returns { account, stakeUsdc, betFeeUsdc, budgetUsdc }.
+ */
+async function stake(partnerUserId, { reference, amountUsdc, marketId }) {
   const s = await MetuselaSettings.get();
-  if (!s.betsEnabled) throw new WalletError('Betting is paused.', 503);
   const account = await getUserAccount(partnerUserId);
   const pool = await systemAccount('POOL');
-  await transfer({ reference: `stake:${reference}`, type: 'BET_STAKE', fromId: account._id, toId: pool._id, amount: amountUsdc });
-  return MetuselaAccount.findById(account._id);
+  const amount = round6(Number(amountUsdc));
+  const market = String(marketId || '').trim();
+
+  // A retry of a stake already taken skips the checks below.
+  let bet = await MetuselaBet.findOne({ reference });
+  if (!bet) {
+    if (!s.betsEnabled) throw new WalletError(s.betsPausedReason ? `Betting is paused: ${s.betsPausedReason}` : 'Betting is paused.', 503);
+    if (!market || market.length > 128) throw new WalletError('marketId is required.');
+    if (!(amount > 0)) throw new WalletError('Amount must be positive.');
+    // Reserve first, then check the caps including this bet: two bets racing
+    // for the last room can both be refused, never both let through.
+    const budget = round6(amount - floor2(amount * s.betFeeBps / 10000));
+    try {
+      bet = await MetuselaBet.create({ reference, accountId: account._id, marketId: market, budgetUsdc: budget });
+    } catch (err) {
+      if (err.code !== 11000) throw err;
+      bet = await MetuselaBet.findOne({ reference });
+    }
+    if (String(bet.accountId) !== String(account._id)) throw new WalletError('That reference was already used for a different transfer.', 409);
+    const [total, inMarket] = await Promise.all([float.openBetsUsdc(), float.openBetsUsdc(market)]);
+    const over = total > s.openBetsCapUsdc + 1e-9 ? 'Open bets are at their limit right now. Try again later.'
+      : inMarket > s.perMarketCapUsdc + 1e-9 ? 'This market is at its limit right now. Try a smaller stake.' : null;
+    if (over) {
+      await MetuselaBet.deleteOne({ _id: bet._id, status: 'OPEN' });
+      throw new WalletError(over, 409);
+    }
+  }
+
+  // One debit for the whole stake, so it's all-or-nothing for the user.
+  let t;
+  try {
+    t = await transfer({ reference: `stake:${reference}`, type: 'BET_STAKE', fromId: account._id, toId: pool._id, amount, meta: { betFeeBps: s.betFeeBps, marketId: market } });
+  } catch (err) {
+    // Not debited (e.g. insufficient balance): release the reservation.
+    const debited = await MetuselaTransfer.exists({ reference: `stake:${reference}`, debitState: 'DONE' });
+    if (!debited) await MetuselaBet.deleteOne({ _id: bet._id, status: 'OPEN' });
+    throw err;
+  }
+  // The fee rate is fixed at the first attempt (stored on the transfer), so a
+  // retry after a fee change can't charge a different fee.
+  const feeBps = Number(t.meta?.betFeeBps ?? s.betFeeBps);
+  const betFee = floor2(t.amountUsdc * feeBps / 10000);
+  if (bet.budgetUsdc !== round6(t.amountUsdc - betFee)) {
+    await MetuselaBet.updateOne({ _id: bet._id }, { budgetUsdc: round6(t.amountUsdc - betFee) });
+  }
+  if (betFee > 0) {
+    const fees = await systemAccount('FEES');
+    await transfer({ reference: `stake:${reference}:fee`, type: 'BET_FEE', fromId: pool._id, toId: fees._id, amount: betFee, allowNegative: true });
+  }
+  return {
+    account: await MetuselaAccount.findById(account._id),
+    stakeUsdc: t.amountUsdc,
+    betFeeUsdc: betFee,
+    budgetUsdc: round6(t.amountUsdc - betFee),
+  };
+}
+
+/**
+ * The order for a stake didn't go through: give the whole stake back,
+ * bet fee included (POOL → user, FEES → user). Idempotent.
+ */
+async function refundStake(partnerUserId, { reference }) {
+  const account = await getUserAccount(partnerUserId);
+  const original = await MetuselaTransfer.findOne({ reference: `stake:${reference}`, status: 'DONE' });
+  if (!original || String(original.fromAccountId) !== String(account._id)) throw new WalletError('No stake with that reference for this account.', 404);
+  if (await MetuselaBet.exists({ reference, status: 'SETTLED' })) throw new WalletError('That bet was already settled.', 409);
+  const feeT = await MetuselaTransfer.findOne({ reference: `stake:${reference}:fee`, status: 'DONE' });
+  const pool = await systemAccount('POOL');
+  const fee = feeT ? feeT.amountUsdc : 0;
+  const fromPool = round6(original.amountUsdc - fee);
+  if (fromPool > 0) await transfer({ reference: `stake:${reference}:refund`, type: 'BET_REFUND', fromId: pool._id, toId: account._id, amount: fromPool, allowNegative: true });
+  if (fee > 0) {
+    const fees = await systemAccount('FEES');
+    await transfer({ reference: `stake:${reference}:fee:refund`, type: 'BET_FEE_REFUND', fromId: fees._id, toId: account._id, amount: fee, allowNegative: true });
+  }
+  await MetuselaBet.updateOne({ reference, status: 'OPEN' }, { status: 'REFUNDED', closedAt: new Date() });
+  return { account: await MetuselaAccount.findById(account._id), refundedUsdc: original.amountUsdc };
+}
+
+/**
+ * The market resolved: close the bet and pay out what it won (0 for a
+ * losing bet). POOL → user. Idempotent; the payout can't be changed once set.
+ */
+async function settleStake(partnerUserId, { reference, payoutUsdc }) {
+  const account = await getUserAccount(partnerUserId);
+  const bet = await MetuselaBet.findOne({ reference, accountId: account._id });
+  if (!bet) throw new WalletError('No bet with that reference for this account.', 404);
+  if (bet.status === 'REFUNDED') throw new WalletError('That stake was refunded.', 409);
+  const payout = round6(Number(payoutUsdc));
+  if (!(payout >= 0)) throw new WalletError('payoutUsdc must be 0 or more.');
+  if (bet.status === 'SETTLED' && bet.payoutUsdc !== payout) throw new WalletError(`Already settled with a payout of ${bet.payoutUsdc}.`, 409);
+
+  if (bet.status === 'OPEN') {
+    // Claim the payout amount before paying, so two settles can't disagree.
+    const claimed = await MetuselaBet.findOneAndUpdate({ _id: bet._id, status: 'OPEN' }, { status: 'SETTLED', payoutUsdc: payout, closedAt: new Date() }, { new: true });
+    if (!claimed) return settleStake(partnerUserId, { reference, payoutUsdc });
+  }
+  if (payout > 0) {
+    const pool = await systemAccount('POOL');
+    await transfer({ reference: `stake:${reference}:payout`, type: 'BET_PAYOUT', fromId: pool._id, toId: account._id, amount: payout, allowNegative: true });
+  }
+  return { account: await MetuselaAccount.findById(account._id), payoutUsdc: payout };
 }
 
 /** Winnings (PAYOUT) or a returned stake (REFUND): POOL → user. */
@@ -467,17 +578,30 @@ async function withdraw(partnerUserId, { reference, amountUsdc, network, address
   return submitToObiex(w);
 }
 
-/** Send POOL funds to Metusela's Polymarket wallet (its bridge address). */
+/**
+ * Send POOL funds to Metusela's Polymarket wallet (its bridge address).
+ * Never takes the idle money there above floatCapUsdc: the wallet's balance
+ * is read from the chain first, and nothing goes out if it can't be read or
+ * betting is paused. Leave out amountUsdc to fill exactly up to the cap.
+ */
 async function floatTopup({ reference, amountUsdc, network, address }) {
-  const q = await quoteWithdrawal({ amountUsdc, network });
-  if (!(q.amountUsdc >= q.minimumUsdc) || !(q.recipientReceivesUsdc > 0)) {
-    throw new WalletError(`Minimum on ${q.networkName} is ${q.minimumUsdc} USDC.`);
-  }
-  checkAddress(await usdcNetwork(q.network), address);
-
   const ref = `float:${reference}`;
   const existing = await MetuselaWithdrawal.findOne({ reference: ref });
   if (existing) return existing;
+
+  const room = await float.status();
+  if (!room.betsEnabled) throw new WalletError('Betting is paused, so no float goes out.', 409);
+  if (!room.balanceReadable) throw new WalletError('Can’t read the float wallet balance right now, so no top-up is sent.', 503);
+  const auto = amountUsdc === undefined || amountUsdc === null || amountUsdc === '';
+  let q = await quoteWithdrawal({ amountUsdc: auto ? Math.max(room.topupRoomUsdc, 0.01) : amountUsdc, network });
+  if (auto) q = await quoteWithdrawal({ amountUsdc: floor2(room.topupRoomUsdc + q.networkFeeUsdc), network });
+  if (q.recipientReceivesUsdc > room.topupRoomUsdc + 1e-9) {
+    throw new WalletError(`That would leave more than ${room.floatCapUsdc} USDC idle at Polymarket (already there or on the way: ${round6(room.idleUsdc + room.topupsInFlightUsdc)}). Room: ${room.topupRoomUsdc}.`, 409);
+  }
+  if (!(q.amountUsdc >= q.minimumUsdc) || !(q.recipientReceivesUsdc > 0)) {
+    throw new WalletError(auto ? `The float is full enough: room ${room.topupRoomUsdc} USDC is below the ${q.networkName} minimum.` : `Minimum on ${q.networkName} is ${q.minimumUsdc} USDC.`);
+  }
+  checkAddress(await usdcNetwork(q.network), address);
 
   const pool = await systemAccount('POOL');
   await transfer({ reference: ref, type: 'FLOAT_TOPUP', fromId: pool._id, amount: q.amountUsdc, allowNegative: true, meta: { network: q.network, address } });
@@ -569,5 +693,5 @@ module.exports = {
   transfer, obiexNetworks, availableTerms, depositOptions, depositAddress,
   quoteWithdrawal, withdrawalNetworks,
   handleObiexDeposit, handleObiexWithdrawal, serializeDeposit, serializeWithdrawal,
-  stake, credit, withdraw, floatTopup, history,
+  stake, refundStake, settleStake, credit, withdraw, floatTopup, history,
 };

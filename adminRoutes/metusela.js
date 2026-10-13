@@ -6,8 +6,9 @@
 //
 // Fees (the simple way to set them)
 //   GET    /fees                             — current fees, in % and basis points, with an example
-//   PUT    /fees                             — any of: depositFeePct | depositFeeBps, depositFeeFlatUsdc,
-//                                              usdtSwapMarkupPct | usdtSwapMarkupBps, withdrawalFeeFlatUsdc   (super)
+//   PUT    /fees                             — any of: betFeePct | betFeeBps, depositFeePct | depositFeeBps,
+//                                              depositFeeFlatUsdc, usdtSwapMarkupPct | usdtSwapMarkupBps,
+//                                              withdrawalFeeFlatUsdc                                         (super)
 // Settings
 //   GET    /settings                         — values + `fields` (labels, types, units) to build the form
 //   PATCH  /settings                         — { "depositFeeBps": 50, ... }                     (super)
@@ -36,6 +37,7 @@ const MetuselaTransfer = require('../models/metuselaTransfer');
 const MetuselaDeposit = require('../models/metuselaDeposit');
 const MetuselaWithdrawal = require('../models/metuselaWithdrawal');
 const wallet = require('../services/metuselaWallet');
+const float = require('../services/metuselaFloat');
 const { networkTerms, normalizeNetwork, OBIEX_DEFAULTS } = require('../services/metuselaNetworks');
 const logger = require('../utils/logger');
 
@@ -69,7 +71,10 @@ function feesView(s) {
   const exampleDeposit = 100;
   const depositFee = Math.floor((s.depositFeeFlatUsdc + exampleDeposit * s.depositFeeBps / 10000) * 100) / 100;
   const swapMarkup = Math.floor(exampleDeposit * s.usdtSwapMarkupBps / 10000 * 100) / 100;
+  const betFee = Math.floor(10 * s.betFeeBps / 10000 * 100) / 100;
   return {
+    betFeePct: pct(s.betFeeBps),
+    betFeeBps: s.betFeeBps,
     depositFeePct: pct(s.depositFeeBps),
     depositFeeBps: s.depositFeeBps,
     depositFeeFlatUsdc: s.depositFeeFlatUsdc,
@@ -77,6 +82,7 @@ function feesView(s) {
     usdtSwapMarkupBps: s.usdtSwapMarkupBps,
     withdrawalFeeFlatUsdc: s.withdrawalFeeFlatUsdc,
     example: {
+      betOf10: { feeUsdc: betFee, orderBudgetUsdc: Math.round((10 - betFee) * 100) / 100, note: 'User is debited exactly $10; the budget includes Polymarket’s own fees.' },
       usdcDepositOf100: { feeUsdc: depositFee, creditedUsdc: Math.round((exampleDeposit - depositFee) * 100) / 100 },
       usdtDepositOf100: { extraMarkupUsdc: swapMarkup, note: 'Taken on top of the deposit fee, after Obiex swaps USDT to USDC.' },
       withdrawal: { yourFeeUsdc: s.withdrawalFeeFlatUsdc, note: 'Charged on top of the amount; Obiex’s network fee is separate.' },
@@ -96,13 +102,13 @@ router.get('/fees', route(async (req, res) => {
  */
 router.put('/fees', superOnly, route(async (req, res) => {
   const b = req.body || {};
-  const allowed = ['depositFeePct', 'depositFeeBps', 'depositFeeFlatUsdc', 'usdtSwapMarkupPct', 'usdtSwapMarkupBps', 'withdrawalFeeFlatUsdc'];
+  const allowed = ['betFeePct', 'betFeeBps', 'depositFeePct', 'depositFeeBps', 'depositFeeFlatUsdc', 'usdtSwapMarkupPct', 'usdtSwapMarkupBps', 'withdrawalFeeFlatUsdc'];
   const unknown = Object.keys(b).filter((k) => !allowed.includes(k));
   if (unknown.length) return res.status(400).json({ success: false, error: `Unknown field(s): ${unknown.join(', ')}. Allowed: ${allowed.join(', ')}.` });
   if (!Object.keys(b).length) return res.status(400).json({ success: false, error: 'Send at least one fee.' });
 
   const patch = {};
-  for (const [pctKey, bpsKey] of [['depositFeePct', 'depositFeeBps'], ['usdtSwapMarkupPct', 'usdtSwapMarkupBps']]) {
+  for (const [pctKey, bpsKey] of [['betFeePct', 'betFeeBps'], ['depositFeePct', 'depositFeeBps'], ['usdtSwapMarkupPct', 'usdtSwapMarkupBps']]) {
     if (pctKey in b && bpsKey in b) return res.status(400).json({ success: false, error: `Send ${pctKey} or ${bpsKey}, not both.` });
     if (pctKey in b) {
       const pct = Number(b[pctKey]);
@@ -152,6 +158,11 @@ router.patch('/settings', superOnly, route(async (req, res) => {
     s.set(path, to);
     if (path === 'networkOverrides') s.markModified('networkOverrides');
     changes.push({ path, from, to });
+    // Turning betting back on ends a lockout.
+    if (path === 'betsEnabled' && to === true && s.betsPausedReason) {
+      changes.push({ path: 'betsPausedReason', from: s.betsPausedReason, to: null });
+      s.betsPausedReason = null;
+    }
   }
   if (!changes.length) return res.json({ success: true, message: 'No changes.', data: s });
   s.updatedBy = req.admin.email || String(req.admin.id || '');
@@ -262,6 +273,8 @@ router.get('/overview', route(async (req, res) => {
       fees: { usdcBalance: fees.usdcBalance },
       needsAttention: { stuckTransfers, heldDeposits, failedWithdrawals },
       inFlight: { userWithdrawals: pendingWithdrawals, floatTopups: floatInFlight },
+      // "Money at Polymarket right now": idle + in flight + live bets, against the caps.
+      atPolymarket: await float.status(),
     },
   });
 }));

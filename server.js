@@ -862,6 +862,13 @@ const startServer = async () => {
     await mongoose.connect(process.env.MONGODB_URI, mongooseOptions);
     console.log("✅ MongoDB Connected");
 
+    // Metusela's partner API, reachable only from this machine (see
+    // auth/partnerAuth.js). Never proxy this port in nginx.
+    const metuselaPort = Number(process.env.METUSELA_INTERNAL_PORT) || null;
+    if (metuselaPort) {
+      app.listen(metuselaPort, "127.0.0.1", () => console.log(`🔒 Metusela partner API on 127.0.0.1:${metuselaPort}`));
+    }
+
     app.listen(PORT, "0.0.0.0", () => {
       console.log(`🔥 Server running on port ${PORT}`);
       console.log("Allowed exact origins:", [...exactOrigins].join(", ") || "(none)");

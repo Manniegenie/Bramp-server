@@ -15,7 +15,7 @@ const metuselaTransferSchema = new mongoose.Schema({
     required: true,
     enum: [
       'DEPOSIT', 'DEPOSIT_FEE', 'SWAP_FEE',
-      'BET_STAKE', 'BET_PAYOUT', 'BET_REFUND',
+      'BET_STAKE', 'BET_FEE', 'BET_FEE_REFUND', 'BET_PAYOUT', 'BET_REFUND',
       'WITHDRAWAL', 'WITHDRAWAL_FEE', 'WITHDRAWAL_REVERSAL', 'WITHDRAWAL_FEE_REVERSAL',
       'FLOAT_TOPUP', 'FLOAT_TOPUP_REVERSAL', 'FLOAT_RETURN',
       'ADJUSTMENT',
