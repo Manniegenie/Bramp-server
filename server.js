@@ -931,15 +931,6 @@ const startServer = async () => {
         console.log("🔕 Nomba jobs disabled on this instance (ENABLE_NOMBA_JOBS=false)");
       }
 
-
-      // Start Hyperliquid balance guard (hourly)
-      try {
-        const hlBalanceGuard = require('./services/hlBalanceGuard');
-        hlBalanceGuard.start();
-        console.log("🛡️  HL balance guard started");
-      } catch (cronErr) {
-        console.error("⚠️  Error starting HL balance guard:", cronErr.message);
-      }
     });
   } catch (e) {
     console.error("❌ ERROR during startup:");

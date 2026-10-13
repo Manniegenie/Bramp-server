@@ -3,16 +3,13 @@
 /**
  * ObiexWithdraw.js
  *
- * Platform-level USDC withdrawal from Obiex to an external address.
- * Used by hlBalanceGuard to auto top-up the Hyperliquid trading account.
+ * Platform-level USDC withdrawal from Obiex to an external address, on any
+ * network Obiex supports for USDC. Used by Metusela (services/metuselaWallet.js,
+ * services/metuselaOnramp.js).
  *
  * This is NOT the user-facing withdrawal (no 2FA, PIN, or KYC checks).
  * It is a platform treasury operation — the same as the internal
  * initiateObiexWithdrawal() in routes/withdraw.js, extracted for reuse.
- *
- * Obiex Arbitrum network name: 'ARBITRUM'
- * Minimum withdrawal: $1 USDC
- * Fee: ~$0.40 USDC (deducted by Obiex from the sent amount)
  */
 
 const axios  = require('axios');
@@ -26,69 +23,11 @@ const obiexAxios = axios.create({
 });
 obiexAxios.interceptors.request.use(attachObiexAuth);
 
-const ARBITRUM_NETWORK = process.env.HL_OBIEX_NETWORK ?? 'ARBITRUM';
-const MIN_WITHDRAWAL   = 1; // Obiex Arbitrum minimum in USDC
-
-/**
- * Withdraws USDC from the platform's Obiex account to an Arbitrum address.
- *
- * @param {string} toAddress  — destination Arbitrum wallet address
- * @param {number} usdcAmount — amount in USDC (must be >= $1)
- * @param {string} [narration] — optional memo; defaults to 'HL auto top-up'
- * @returns {Promise<{ success: boolean, transactionId?: string, error?: string }>}
- */
-async function withdrawUSDCToArbitrum(toAddress, usdcAmount, narration = 'HL auto top-up') {
-  if (!toAddress) return { success: false, error: 'MISSING_ADDRESS' };
-  if (!Number.isFinite(usdcAmount) || usdcAmount < MIN_WITHDRAWAL) {
-    return { success: false, error: `AMOUNT_TOO_LOW: minimum is $${MIN_WITHDRAWAL} USDC` };
-  }
-
-  const payload = {
-    amount:      usdcAmount,
-    currency:    'USDC',
-    destination: {
-      address: toAddress,
-      network: ARBITRUM_NETWORK,
-    },
-    narration,
-  };
-
-  try {
-    logger.info('ObiexWithdraw: initiating USDC → Arbitrum withdrawal', {
-      toAddress: toAddress.slice(0, 10) + '...',
-      usdcAmount,
-      network: ARBITRUM_NETWORK,
-    });
-
-    const response = await obiexAxios.post('/wallets/ext/debit/crypto', payload);
-
-    if (!response.data?.data?.id) {
-      throw new Error('Obiex response missing transaction ID');
-    }
-
-    const txId = response.data.data.id;
-    logger.info('ObiexWithdraw: withdrawal submitted', { txId, usdcAmount });
-
-    return { success: true, transactionId: txId };
-
-  } catch (err) {
-    const detail = err.response?.data?.message || err.message;
-    logger.error('ObiexWithdraw: withdrawal failed', {
-      usdcAmount,
-      network: ARBITRUM_NETWORK,
-      error: detail,
-      status: err.response?.status,
-    });
-    return { success: false, error: detail };
-  }
-}
+const MIN_WITHDRAWAL = 1; // USDC
 
 /**
  * Withdraws USDC from the platform's Obiex account to an address on any
- * network Obiex supports for USDC (e.g. 'POLYGON', 'ARBITRUM'). Same
- * treasury operation as withdrawUSDCToArbitrum above, with the network as
- * a parameter — used by the Metusela on-ramp (services/metuselaOnramp.js).
- * withdrawUSDCToArbitrum is left as-is because hlBalanceGuard depends on it.
+ * network Obiex supports for USDC (e.g. 'POLYGON', 'ARBITRUM').
  *
  * @returns {Promise<{ success: boolean, transactionId?: string, error?: string }>}
  */
@@ -118,4 +57,4 @@ async function withdrawUSDC(toAddress, usdcAmount, network, narration = 'Metusel
   }
 }
 
-module.exports = { withdrawUSDCToArbitrum, withdrawUSDC };
+module.exports = { withdrawUSDC };
