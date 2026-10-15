@@ -52,7 +52,12 @@ async function withdrawUSDC(toAddress, usdcAmount, network, narration = 'Metusel
     return { success: true, transactionId: txId };
   } catch (err) {
     const detail = err.response?.data?.message || err.message;
-    logger.error('ObiexWithdraw: USDC withdrawal failed', { usdcAmount, network, error: detail, status: err.response?.status });
+    // Obiex's message alone ("Invalid request") rarely says why; keep the
+    // whole reply (field errors, codes) in the log.
+    logger.error('ObiexWithdraw: USDC withdrawal failed', {
+      usdcAmount, network, error: detail, status: err.response?.status,
+      obiexResponse: JSON.stringify(err.response?.data ?? null).slice(0, 800),
+    });
     return { success: false, error: detail };
   }
 }
