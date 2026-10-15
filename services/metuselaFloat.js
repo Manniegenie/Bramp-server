@@ -82,6 +82,8 @@ async function status() {
     topupRoomUsdc: idle === null || !s.betsEnabled ? 0 : round6(Math.max(0, s.floatCapUsdc - idle - inFlight)),
     betsEnabled: s.betsEnabled,
     betsPausedReason: s.betsPausedReason || null,
+    // Our fee on every call, tail and fade, so Metusela can show real payouts.
+    betFeeBps: s.betFeeBps,
   };
 }
 
