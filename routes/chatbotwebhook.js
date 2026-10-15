@@ -349,6 +349,24 @@ router.post('/transaction', webhookAuth, async (req, res) => {
       return res.status(400).json({ error: `Unsupported currency: ${normalizedCurrency}` });
     }
 
+    // --- Metusela (partner) deposits and withdrawals ---
+    // Obiex sends every notice for this account here. Metusela's addresses
+    // and withdrawals (user withdrawals, float top-ups, on-ramp payouts) are
+    // handed over first: the Bramp checks below would reject a Metusela
+    // network (e.g. "Invalid token/network: USDC/BASE") or ignore a USDC
+    // withdrawal, and Obiex would keep retrying a deposit nobody credits.
+    if (type === 'DEPOSIT' && await require('../services/metuselaWallet').handleObiexDeposit({
+      address, network, currency: normalizedCurrency, amount, status, transactionId, hash,
+    })) {
+      return res.status(200).json({ success: true });
+    }
+    if (type === 'WITHDRAWAL' && (
+      await require('../services/metuselaOnramp').handleObiexWithdrawal({ transactionId, status, hash })
+      || await require('../services/metuselaWallet').handleObiexWithdrawal({ transactionId, status, hash, address })
+    )) {
+      return res.status(200).json({ success: true });
+    }
+
     // --- WITHDRAWAL callbacks ---
     if (type === 'WITHDRAWAL') {
       const result = await resolveWithdrawalCallback({ transactionId, status, narration, reference });
