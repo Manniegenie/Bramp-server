@@ -14,7 +14,7 @@ const OBIEX_DEFAULTS = {
     ETH:      { name: 'Ethereum (ERC20)', minDeposit: 1, depositFee: 0, minWithdrawal: 20, withdrawalFee: 2 },
     BASE:     { name: 'Base',             minDeposit: 0.1, depositFee: 0, minWithdrawal: 11, withdrawalFee: 1.2 },
     AVAXC:    { name: 'Avax C-Chain',     minDeposit: 1, depositFee: 0, minWithdrawal: 0.4, withdrawalFee: 0.2 },
-    ARBITRUM: { name: 'Arbitrum One',     minDeposit: 1, depositFee: 0, minWithdrawal: 1, withdrawalFee: 0.5 },
+    ARBITRUM: { name: 'Arbitrum One',     minDeposit: 1, depositFee: 0, minWithdrawal: 1, withdrawalFee: 1 }, // seen live 2026-10-15: $1, not the published $0.50
     SOL:      { name: 'Solana',           minDeposit: 1, depositFee: 0, minWithdrawal: 10, withdrawalFee: 3 },
     MATIC:    { name: 'Polygon (MATIC)',  minDeposit: 1, depositFee: 0, minWithdrawal: 10, withdrawalFee: 1 },
     BSC:      { name: 'BSC (BEP20)',      minDeposit: 1, depositFee: 0, minWithdrawal: 10, withdrawalFee: 0.5 },
