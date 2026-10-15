@@ -222,8 +222,42 @@ async function notify(event, order) {
 // ── Payment in (Glyde) → USDC out (Obiex) ──────────────────────────────────
 
 /**
- * From routes/nairawebhook.js /glyde/collection, for payments whose
- * merchant_reference isn't a Bramp user's virtual account. Returns true if
+ * Entry point from routes/nairawebhook.js /glyde/collection for any Glyde
+ * collection event. Accepts both payload shapes: the one confirmed against
+ * real payloads in ZeusODX (event virtual_account.funded, reference at
+ * data.payee.reference, per-payment id at data.transaction_reference, amount
+ * in Naira at data.amount / data.total_collected) and the documented
+ * collection.success with data.merchant_reference / data.reference. Matches
+ * an order by reference, virtual-account uid or account number. Returns
+ * true if it was a Metusela order.
+ */
+async function handleGlydeEvent(event, data) {
+  const funded = event === 'virtual_account.funded' || event === 'collection.success';
+  if (!data || (!funded && event !== 'collection.failed')) return false;
+  const ref = data.payee?.reference || data.merchant_reference || data.customer?.reference || null;
+  const uid = data.uid || data.virtual_account_uid || null;
+  const accountNumber = data.account_number || data.payee?.account_number || null;
+  const or = [];
+  if (ref) or.push({ reference: ref });
+  if (uid) or.push({ 'virtualAccount.uid': uid });
+  if (accountNumber) or.push({ 'virtualAccount.accountNumber': accountNumber });
+  if (!or.length) return false;
+  const order = await MetuselaOnrampOrder.findOne({ $or: or }).sort({ createdAt: -1 });
+  if (!order) return false;
+
+  const glydeReference = data.transaction_reference || data.reference || data.id
+    || `fp-${crypto.createHash('sha256').update(JSON.stringify(data)).digest('hex').slice(0, 16)}`;
+  const amount = Number(data.amount ?? data.total_collected);
+  logger.info('Metusela on-ramp: Glyde event', { event, reference: order.reference, glydeReference, amount, matchedBy: ref ? 'reference' : uid ? 'uid' : 'account' });
+  if (funded && !(amount > 0)) {
+    logger.error('Metusela on-ramp: Glyde payment without an amount — check manually', { reference: order.reference, glydeReference });
+    return true;
+  }
+  return handleGlydeCollection({ event: funded ? 'collection.success' : 'collection.failed', merchantReference: order.reference, glydeReference, amount });
+}
+
+/**
+ * Processes one payment for a known order (see handleGlydeEvent). Returns true if
  * it was a Metusela order (handled or already processed), false otherwise.
  */
 async function handleGlydeCollection({ event, merchantReference, glydeReference, amount }) {
@@ -340,5 +374,5 @@ async function handleObiexWithdrawal({ transactionId, status, hash }) {
 
 module.exports = {
   quote, createOrder, findOrder, serializeOrder, payoutNetworks,
-  handleGlydeCollection, handleObiexWithdrawal, OnrampError,
+  handleGlydeEvent, handleGlydeCollection, handleObiexWithdrawal, OnrampError,
 };

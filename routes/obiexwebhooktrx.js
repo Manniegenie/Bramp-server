@@ -254,7 +254,7 @@ router.post('/transaction', webhookAuth, async (req, res) => {
       // payout, user withdrawal or float top-up).
       if (!transaction && (
         await require('../services/metuselaOnramp').handleObiexWithdrawal({ transactionId, status, hash })
-        || await require('../services/metuselaWallet').handleObiexWithdrawal({ transactionId, status, hash })
+        || await require('../services/metuselaWallet').handleObiexWithdrawal({ transactionId, status, hash, address })
       )) {
         return res.status(200).json({ success: true });
       }

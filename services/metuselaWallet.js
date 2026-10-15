@@ -272,8 +272,15 @@ async function swapUsdtToUsdc(amount) {
  * From routes/obiexwebhooktrx.js for DEPOSIT events whose address isn't a
  * Bramp user's. Returns true if the address is a Metusela one.
  */
+// EVM (0x…) addresses are case-insensitive and Obiex doesn't always send them
+// in the case it issued them (ZeusODX lowercases for the same reason);
+// Solana/Tron addresses are case-sensitive, so those must match exactly.
+const isEvm = (a) => /^0x[0-9a-fA-F]{40}$/.test(String(a || ''));
+const sameAddress = (a) => (isEvm(a) ? new RegExp(`^${a}$`, 'i') : a);
+
 async function handleObiexDeposit({ address, network, currency, amount, status, transactionId, hash }) {
-  const account = await MetuselaAccount.findOne({ 'depositAddresses.address': address });
+  const account = await MetuselaAccount.findOne({ 'depositAddresses.address': address })
+    || (isEvm(address) ? await MetuselaAccount.findOne({ 'depositAddresses.address': sameAddress(address) }) : null);
   if (!account) return false;
 
   const cur = String(currency).toUpperCase();
@@ -647,8 +654,17 @@ async function failWithdrawal(w, reason) {
  * From routes/obiexwebhooktrx.js for WITHDRAWAL events. Returns true if
  * the withdrawal is a Metusela one.
  */
-async function handleObiexWithdrawal({ transactionId, status, hash }) {
-  const w = await MetuselaWithdrawal.findOne({ obiexWithdrawalId: transactionId });
+async function handleObiexWithdrawal({ transactionId, status, hash, address }) {
+  let w = await MetuselaWithdrawal.findOne({ obiexWithdrawalId: transactionId });
+  // Obiex sometimes reports a different id than the one it returned when the
+  // withdrawal was submitted (ZeusODX has the same fallback): match the most
+  // recent pending withdrawal to that address and remember the new id.
+  if (!w && address) {
+    w = await MetuselaWithdrawal.findOne({ status: 'SUBMITTED', address: sameAddress(address) }).sort({ createdAt: -1 });
+    if (!w) return false;
+    logger.warn('Metusela withdrawal matched by address (Obiex sent a different id)', { reference: w.reference, stored: w.obiexWithdrawalId, webhook: transactionId });
+    await MetuselaWithdrawal.updateOne({ _id: w._id }, { obiexWithdrawalId: transactionId });
+  }
   if (!w) return false;
   const s = String(status || '').toUpperCase();
   if (['SUCCESSFUL', 'CONFIRMED', 'COMPLETED'].includes(s)) {

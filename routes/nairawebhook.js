@@ -335,6 +335,13 @@ router.post('/glyde/collection', validateGlydeWebhookSignature, async (req, res)
       return;
     }
 
+    // Metusela on-ramp orders first: it understands Glyde's real virtual-
+    // account payloads (virtual_account.funded, data.payee.reference), which
+    // the Bramp checks below would drop as "missing required fields".
+    if (await require('../services/metuselaOnramp').handleGlydeEvent(event, data)) {
+      return;
+    }
+
     const { reference: glydeReference, merchant_reference: merchantReference, amount, status } = data;
     if (!glydeReference || !merchantReference || !amount) {
       logger.warn('Glyde collection webhook: missing required fields', { glydeReference, merchantReference, amount });
