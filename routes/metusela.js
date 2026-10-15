@@ -87,7 +87,8 @@ router.get('/onramp/quote', async (req, res) => {
  *   partnerUserId: "u_456",
  *   amountNgn: 15000,
  *   customer: { firstName, lastName, email },   // shown to Glyde for the virtual account
- *   destination: { network: "POLYGON", address: "0x…" }  // the user's own wallet
+ *   destination: { type: "BALANCE" }                     // credit the user's balance here, or
+ *              { network: "POLYGON", address: "0x…" }  // send USDC to the user's own wallet
  * }
  * → 201 (new) / 200 (existing) with the order, incl. bankTransfer details
  *   to show the user and expiresAt.

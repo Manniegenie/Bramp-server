@@ -32,9 +32,12 @@ const metuselaOnrampOrderSchema = new mongoose.Schema({
   feeBps: { type: Number, required: true, min: 0 },
   quotedUsdc: { type: Number, required: true, min: 0 },
 
+  // WALLET: USDC is sent on-chain to `address`. BALANCE: it's credited to
+  // the user's Metusela balance at Bramp (services/metuselaWallet.js).
   destination: {
-    network: { type: String, required: true, uppercase: true }, // Obiex network code, e.g. POLYGON
-    address: { type: String, required: true },
+    type: { type: String, enum: ['WALLET', 'BALANCE'], default: 'WALLET' },
+    network: { type: String, uppercase: true, required() { return this.destination?.type !== 'BALANCE'; } }, // Obiex network code, e.g. POLYGON
+    address: { type: String, required() { return this.destination?.type !== 'BALANCE'; } },
   },
 
   virtualAccount: {

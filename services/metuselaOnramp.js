@@ -7,8 +7,10 @@
 //                       account for the exact Naira amount.
 //   3. handleGlydeCollection() — called from the Glyde collection webhook
 //                       when money lands on one of these accounts: converts
-//                       what was paid and sends USDC from Bramp's Obiex
-//                       treasury to the user's own wallet.
+//                       what was paid, then either credits the user's
+//                       Metusela balance at Bramp (destination BALANCE) or
+//                       sends USDC from Bramp's Obiex treasury to the user's
+//                       own wallet (destination WALLET).
 //   4. handleObiexWithdrawal() — called from the Obiex transaction webhook
 //                       when that USDC payout settles (or fails).
 // Every state change is pushed to Metusela's webhook, signed.
@@ -21,6 +23,8 @@ const { getAvailableNetworks } = require('./networkService');
 const { notifyMetusela } = require('./metuselaNotify');
 const { normalizeNetwork } = require('./metuselaNetworks');
 const logger = require('../utils/logger');
+// Lazy: metuselaWallet is only needed for BALANCE orders.
+const wallet = () => require('./metuselaWallet');
 
 const cfg = () => ({
   feeBps: Number(process.env.METUSELA_ONRAMP_FEE_BPS || 0),
@@ -140,11 +144,20 @@ async function createOrder({ partnerReference, partnerUserId, amountNgn, custome
   if (!customer?.firstName || !customer?.lastName || !customer?.email) {
     throw new OnrampError('customer.firstName, customer.lastName and customer.email are required.');
   }
-  const network = normalizeNetwork(destination?.network);
-  const address = String(destination?.address || '').trim();
-  const networks = await payoutNetworks();
-  if (!networks.includes(network)) throw new OnrampError(`destination.network must be one of: ${networks.join(', ') || 'none available'}.`);
-  if (!validAddress(network, address)) throw new OnrampError('destination.address is not a valid address for that network.');
+  const toBalance = String(destination?.type || '').toUpperCase() === 'BALANCE';
+  let dest;
+  if (toBalance) {
+    // The Naira lands as USDC in the user's balance here, so they need an account.
+    await wallet().getUserAccount(partnerUserId).catch(() => { throw new OnrampError('No Metusela account for that partnerUserId.', 404); });
+    dest = { type: 'BALANCE' };
+  } else {
+    const network = normalizeNetwork(destination?.network);
+    const address = String(destination?.address || '').trim();
+    const networks = await payoutNetworks();
+    if (!networks.includes(network)) throw new OnrampError(`destination.network must be one of: ${networks.join(', ') || 'none available'}.`);
+    if (!validAddress(network, address)) throw new OnrampError('destination.address is not a valid address for that network.');
+    dest = { type: 'WALLET', network, address };
+  }
 
   const q = await quote(amountNgn);
   if (q.usdc < 1) throw new OnrampError('That amount converts to less than 1 USDC.');
@@ -171,12 +184,12 @@ async function createOrder({ partnerReference, partnerUserId, amountNgn, custome
     ngnPerUsdc: q.ngnPerUsdc,
     feeBps: q.feeBps,
     quotedUsdc: q.usdc,
-    destination: { network, address },
+    destination: dest,
     virtualAccount: { uid: d.uid, accountNumber: d.account_number, accountName: d.account_name, bankName: d.bank_name || d.bank?.name || null },
     // Whichever comes first: our rate-lock window or Glyde's own expiry.
     expiresAt: glydeExpiry && glydeExpiry < ttlExpiry ? glydeExpiry : ttlExpiry,
   });
-  logger.info('Metusela on-ramp order created', { reference, partnerReference, amountNgn: q.amountNgn, network });
+  logger.info('Metusela on-ramp order created', { reference, partnerReference, amountNgn: q.amountNgn, destination: dest.type, network: dest.network || null });
   return { order, created: true };
 }
 
@@ -253,6 +266,8 @@ async function handleGlydeCollection({ event, merchantReference, glydeReference,
     return true;
   }
 
+  if (claimed.destination?.type === 'BALANCE') return creditBalance(claimed, payoutUsdc, rate);
+
   const result = await withdrawUSDC(claimed.destination.address, payoutUsdc, claimed.destination.network, `Metusela ${claimed.reference.slice(-8)}`);
   const updated = await MetuselaOnrampOrder.findOneAndUpdate(
     { _id: claimed._id },
@@ -265,6 +280,34 @@ async function handleGlydeCollection({ event, merchantReference, glydeReference,
     reference: updated.reference, payoutUsdc, network: updated.destination.network, ok: result.success, error: result.error,
   });
   notify(result.success ? 'onramp.payout_submitted' : 'onramp.failed', updated);
+  return true;
+}
+
+/**
+ * BALANCE orders: credit the converted USDC to the user's Metusela balance.
+ * Idempotent on the transfer reference, so a retried webhook can't credit
+ * twice. Bramp's own USDC at Obiex backs it (the Naira stays with Glyde).
+ */
+async function creditBalance(order, payoutUsdc, rate) {
+  try {
+    const w = wallet();
+    const account = await w.getUserAccount(order.partnerUserId);
+    await w.transfer({
+      reference: `onramp:${order.reference}`, type: 'NGN_DEPOSIT', toId: account._id, amount: payoutUsdc,
+      meta: { amountNgn: order.receivedNgn, ngnPerUsdc: rate, order: order.reference },
+    });
+    const done = await MetuselaOnrampOrder.findOneAndUpdate(
+      { _id: order._id }, { status: 'COMPLETED', payoutUsdc, ngnPerUsdc: rate, completedAt: new Date() }, { new: true }
+    );
+    logger.info('Metusela on-ramp: credited to balance', { reference: done.reference, payoutUsdc });
+    notify('onramp.completed', done);
+  } catch (err) {
+    const failed = await MetuselaOnrampOrder.findOneAndUpdate(
+      { _id: order._id }, { status: 'PAYOUT_FAILED', payoutUsdc, failureReason: `CREDIT_ERROR: ${err.message} — needs manual credit` }, { new: true }
+    );
+    logger.error('Metusela on-ramp: balance credit failed', { reference: order.reference, error: err.message });
+    notify('onramp.failed', failed);
+  }
   return true;
 }
 
