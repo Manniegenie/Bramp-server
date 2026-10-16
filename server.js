@@ -864,9 +864,13 @@ const startServer = async () => {
 
     // Metusela's partner API, reachable only from this machine (see
     // auth/partnerAuth.js). Never proxy this port in nginx.
+    // METUSELA_INTERNAL_HOST: 127.0.0.1 when Metusela runs on this machine, or
+    // this server's private-network address (e.g. 10.0.0.2) when it runs on
+    // another server in the same private network. Never a public address.
     const metuselaPort = Number(process.env.METUSELA_INTERNAL_PORT) || null;
+    const metuselaHost = process.env.METUSELA_INTERNAL_HOST || "127.0.0.1";
     if (metuselaPort) {
-      app.listen(metuselaPort, "127.0.0.1", () => console.log(`🔒 Metusela partner API on 127.0.0.1:${metuselaPort}`));
+      app.listen(metuselaPort, metuselaHost, () => console.log(`🔒 Metusela partner API on ${metuselaHost}:${metuselaPort}`));
     }
 
     app.listen(PORT, "0.0.0.0", () => {
