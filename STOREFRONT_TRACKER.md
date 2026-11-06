@@ -20,9 +20,11 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 
 - [x] **M1. Storefront server code committed.** `3358259`, local, not pushed.
 - [x] **M2. Stella webhook rework** (`AI/whatsapp.js`): Meta signature checked on every request, reply 200 first, body parsed from `req.rawBody`, duplicates checked in Mongo, one sender. Committed locally, **not deployed**. Tested locally: 11/11 checks (signature, ack first, duplicates, statuses, Flows ping).
-- [ ] **M3. Mount in `server.js`:**
-  - storefront routes and jobs
-  - take `/whatsapp` off `webhookLimiter` (50 per 15 minutes per IP is too low for Meta)
+- [x] **M3. Mount in `server.js`.** Committed locally, **not deployed**. Tested by booting the real `server.js` on a throwaway local Mongo: 14/14 checks.
+  - `/storefront` (platform key or per-store key), `/storefront-onboarding` (platform key), `/storefront-link` (Bramp app login), `/admin/storefront` (admin).
+  - Storefront job every minute, after listen. `ENABLE_STOREFRONT_JOBS=false` turns it off per instance.
+  - `/whatsapp` taken off `webhookLimiter` (50 per 15 minutes) and skipped by the general limiter (500 per 15 minutes). Meta sends from a few IPs, and every request has to pass the signature check instead.
+  - With `STOREFRONT_PLATFORM_KEY` unset on the server, `/storefront` returns 401 and `/storefront-onboarding` returns 503, so mounting is safe before keys exist.
 - [x] **M4. Customer identity:** a WhatsApp number is linked to a Bramp `User`. Committed locally, **not deployed**. Tested on a throwaway local Mongo: 26/26 checks.
   - New number: full name (as on BVN/NIN) → email → 6-digit code by email → a Bramp account is created (`source: CREATED`).
   - Number already on a Bramp account: "Is that you?" → code to that account's email → linked (`LINKED`). An email that's already a Bramp account also links after its code.
@@ -30,6 +32,7 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
   - Left out of Bramp marketing: Bramp's campaigns only target users with an app push token (`expoPushToken`), which Stella customers don't have, so no `User` change was needed. Stella sign-ups don't send Bramp's welcome email or the Facebook registration event.
 - [ ] **M5. One-time KYC:** Stella sends a one-time link to bramp.shop `/verify` (ID number and a camera selfie), which runs `biometricVerification`.
 - [ ] **M6. Desk routing:** `@username`, the sticky desk, confirm before switching, "this trade only".
+  - **Rule (user, 2026-11-06):** once a customer connects to a desk, it's saved and stays their desk. It changes **only** when the customer explicitly switches (types another `@username`, says "change desk", or taps another desk's link and confirms). Never because of silence, a new chat, the 24-hour window closing, the desk being closed or paused, or a one-off trade elsewhere. A suspended desk asks the customer to choose; it never reassigns them silently.
 - [ ] **M7. Claude agent, read-only tools:** desk info, rates, order status.
 - [ ] **M8. Webhooks hand storefront events over**, one at a time:
   - Glyde payments (`nairawebhook.js`)
@@ -105,7 +108,7 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
   - [ ] add sells, gift cards, refunds, rate cards, Stella conversations
 - [x] `auth/storefrontAuth.js`, `auth/storefrontPlatformAuth.js`
 - [x] `routes/passwordpin.js`: exports `generateUniqueUsername` for Stella (no behaviour change)
-- [ ] `server.js`: mount storefront routes and jobs, take `/whatsapp` off `webhookLimiter`
+- [x] `server.js`: storefront routes and jobs mounted; `/whatsapp` off both rate limiters (M3)
 
 ### Chatbramp-app (the Bramp app)
 - [ ] `app/storefront-link.tsx`, `services/storefrontLinkService.js`, `hooks/useStorefrontLink.js`
@@ -133,7 +136,14 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 
 ## Known issues found
 - Before M2, `/whatsapp` ignored every message. `server.js` reads the raw body first, so `req.body` was empty. M2 parses `req.rawBody`.
-- `webhookLimiter` (50 per 15 minutes per IP) also covers `/whatsapp`. Fix in M3.
+- Fixed in M3: `webhookLimiter` (50 per 15 minutes per IP) and the general limiter (500 per 15 minutes) both covered `/whatsapp`.
+- Running `server.js` locally needs `OBIEX_API_KEY`, `OBIEX_API_SECRET` and `OBIEX_BASE_URL` (dummies are fine), plus `MONGODB_URI` pointing at the local test Mongo. Local `.env` has none of them.
+
+## Before deploying (server `.env`)
+- `META_APP_SECRET`: required. Without it Stella refuses everything from Meta.
+- `STOREFRONT_PLATFORM_KEY`: 32+ characters; the same value goes into bramp.shop's Vercel env. Can wait until bramp.shop is wired (M13).
+- `BREVO_TEMPLATE_STOREFRONT_LINK`: the desk-link email template. Can wait until M13.
+- `ENABLE_STOREFRONT_JOBS=false` on any staging instance that shares the prod database.
 - Webhook URL to set in Meta: `https://<server>/whatsapp/whatsapp`. It's mounted at `/whatsapp`, and the router path is also `/whatsapp`.
 - Local `.env` has no Obiex settings, so `services/networkService.js` (and the storefront and Metusela code) can't load on this PC without a placeholder `OBIEX` base URL.
 
@@ -144,3 +154,4 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - **2026-11-06:** M1 committed (`3358259`, local). Tracker created.
 - **2026-11-06:** M2 committed locally. `AI/whatsapp.js` now refuses requests without a valid Meta signature, including Flows; check `META_APP_SECRET` is set on the server before deploying. The OpenAI import is removed (it was never used). The welcome message is unchanged until M4.
 - **2026-11-06:** M4 committed locally: `AI/stellaCustomers.js`, `models/stellaCustomer.js`, `models/stellaConversation.js`. It replaces the old "Bramp AI / Get Started" welcome and the welcome timers kept in memory. Messages from one number are handled one at a time (per process; fine while the server runs one instance). Next: M3 (`server.js`), which is waiting on how to handle the user's own uncommitted `server.js` edits.
+- **2026-11-06:** M3 committed locally. Only the storefront and Stella lines of `server.js` were committed. The user's uncommitted Glyde deposit mounts (`/admin/deposits`, `/admin/glyde-review`) were left uncommitted in the file. Desk-stickiness rule added to M6. Next: M5.

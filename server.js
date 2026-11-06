@@ -292,7 +292,11 @@ const generalLimiter = rateLimit({
     const path = req.path.toLowerCase();
     return path === '/' ||
       path === '/health' ||
-      path.includes('webhook');
+      path.includes('webhook') ||
+      // Stella (Meta): every request must pass Meta's signature check in
+      // AI/whatsapp.js, and Meta sends from a few IPs, so a per-IP cap would
+      // throttle real customers.
+      path.startsWith('/whatsapp');
   }
 });
 
@@ -629,7 +633,17 @@ app.use("/ngnbwebhook", webhookLimiter, ngnbwebhookRoutes);
 app.use("/metusela", require("./auth/partnerAuth"), require("./routes/metusela"));
 // Metusela admin: fees, limits, balances (adminRoutes/metusela.js).
 app.use("/admin/metusela", authenticateAdminToken, requireAdmin, require("./adminRoutes/metusela"));
-app.use("/whatsapp", webhookLimiter, whatsappAIRoutes);
+// Stella by Bramp (Storefront's WhatsApp channel). No webhookLimiter: Meta's
+// signature is checked on every request instead (AI/whatsapp.js).
+app.use("/whatsapp", whatsappAIRoutes);
+// Bramp Storefront (STOREFRONT_TRACKER.md). bramp.shop's backend or a desk's
+// own server, with the platform key or a per-store key (auth/storefrontAuth.js).
+app.use("/storefront", require("./auth/storefrontAuth"), require("./routes/storefront"));
+// bramp.shop linking a desk to a Bramp account (platform key only).
+app.use("/storefront-onboarding", require("./auth/storefrontPlatformAuth"), require("./routes/storefrontOnboarding"));
+// The Bramp app approving or declining a link request.
+app.use("/storefront-link", authenticateToken, require("./routes/storefrontLink"));
+app.use("/admin/storefront", authenticateAdminToken, requireAdmin, require("./adminRoutes/storefront"));
 app.use("/chatbot", ChatbotRoutes); // Removed rate limiter - user-facing chat endpoint
 app.use("/Chatbotwebhook", webhookLimiter, ChatbotwebhookRoutes);
 
@@ -933,6 +947,20 @@ const startServer = async () => {
         }
       } else {
         console.log("🔕 Nomba jobs disabled on this instance (ENABLE_NOMBA_JOBS=false)");
+      }
+
+      // Storefront (every minute): delayed first-payer payouts and releasing
+      // held desk proceeds. Moves money, so ENABLE_STOREFRONT_JOBS=false
+      // turns it off per instance (e.g. staging sharing the prod database).
+      if (process.env.ENABLE_STOREFRONT_JOBS !== 'false') {
+        try {
+          require('./services/storefrontJobs').startStorefrontJobs();
+          console.log("🏪 Storefront jobs started");
+        } catch (storefrontJobErr) {
+          console.error("⚠️  Error starting Storefront jobs:", storefrontJobErr.message);
+        }
+      } else {
+        console.log("🔕 Storefront jobs disabled on this instance (ENABLE_STOREFRONT_JOBS=false)");
       }
 
     });
