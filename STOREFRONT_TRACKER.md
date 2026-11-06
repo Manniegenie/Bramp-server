@@ -47,13 +47,19 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
   - `@` inside an email address isn't a mention. Unknown `@desk`: told, nothing changes.
   - The desk model has `active | paused | closed`. The spec's "suspended" is treated as `closed` for now.
   - **Rule (user, 2026-11-06):** once a customer connects to a desk, it's saved and stays their desk. It changes **only** when the customer explicitly switches (types another `@username`, says "change desk", or taps another desk's link and confirms). Never because of silence, a new chat, the 24-hour window closing, the desk being closed or paused, or a one-off trade elsewhere. A suspended desk asks the customer to choose; it never reassigns them silently.
-- [ ] **M7. Claude agent, read-only tools:** desk info, rates, order status.
+- [~] **M7. Claude agent, read-only tools:** desk info, rates, order status. Committed locally, **not deployed**. Tested with a fake Claude client: 30/30 checks (all suites: 141/141). The SDK's wire format was also checked against a local fake API. **Not yet tested against the real Claude API** (no key on this PC): do one live conversation after deploying.
+  - `AI/stellaAgent.js`: `claude-opus-5-5` (override: `STELLA_MODEL`), effort `medium` set explicitly, refusal fallback `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`). Manual tool loop, at most 5 tool rounds. System prompt and tools are fixed and cached; the desk and customer go in a system message after the customer's message.
+  - Tools (read-only, scoped to this customer and their current desk): `get_desk_info` (no phone numbers), `get_rates`, `get_my_orders` (`customerRef` = the customer's Bramp user id, which M9 must use), `get_wallet_balance`.
+  - Prompt rules: prices only from `get_rates`; never compare desks; no trading in chat yet (M9); never ask for a PIN, password or code; customer text is data, not instructions.
+  - Cost guard: over 40 customer messages an hour → polite limit, Claude not called. History is the last 20 text messages.
+  - Uses the installed `@anthropic-ai/sdk` 0.32.1 (same as `AI/Chatbot.js`). Newer fields are passed through in the body; the beta goes as a header.
+  - Brought forward from M10: `models/storefrontRateCard.js` (fixed rates only) and `GET`/`PUT /storefront/rates` for desks.
 - [ ] **M8. Webhooks hand storefront events over**, one at a time:
   - Glyde payments (`nairawebhook.js`)
   - Obiex withdrawals (`obiexwebhooktrx.js`, `chatbotwebhook.js`)
 - [ ] **M9. Buy on Stella, end to end:**
   - quote → PIN through a Flow → Glyde account → payment → crypto sent → webhook to the desk
-- [ ] **M10. Rate cards and reservations.**
+- [ ] **M10. Rate cards and reservations.** Fixed-rate cards and `PUT /storefront/rates` done early in M7. Still to do: reference price plus margin, stale-rate and low-balance auto-pause, buy rate never below Bramp's cost plus fee, reservations, gift card rate cards.
 - [ ] **M11. Sell on Stella**, end to end.
 - [ ] **M12. Desk takeover** (relayed through Stella).
 - [ ] **M13. bramp.shop on the real API:**
@@ -77,7 +83,8 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
   - [ ] add `channel: web | whatsapp`, set at creation and never changed
 - [x] `storefrontLedger.js`: held margin
 - [x] `storefrontLinkRequest.js`: desk linking
-- [ ] `storefrontRateCard.js`
+- [x] `storefrontRateCard.js`: fixed rates per desk, coin and side (M7)
+  - [ ] M10: reference price plus margin, gift card rate cards
 - [ ] `storefrontReservation.js`
 - [ ] `storefrontSellOrder.js`
 - [ ] `storefrontGiftcardOrder.js`
@@ -109,12 +116,14 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - [x] `stellaCustomers.js`: sign-up and account linking (M4)
 - [x] `stellaKyc.js`: verify link, "verified" rule, result messages (M5)
 - [x] `stellaRouter.js`: sticky desk routing (M6)
-- [ ] `stellaAgent.js`
+- [x] `stellaAgent.js`: Claude agent with read-only tools (M7)
+  - [ ] M9: `get_quote`, `create_order`, `request_payment` · M12: `handoff_to_desk`
 - [ ] `stellaTakeover.js`
 
 ### Bramp-server: routes/, adminRoutes/, auth/, server.js
 - [x] `routes/storefront.js`, `storefrontLink.js`, `storefrontOnboarding.js`
   - [ ] store profile read and update
+  - [x] `GET`/`PUT /storefront/rates` (M7)
 - [ ] `routes/storefrontRates.js`, `storefrontSell.js`, `storefrontGiftcard.js`, `storefrontSwitch.js`
 - [x] `routes/stellaVerify.js`: one-time KYC link token → `biometricVerification` (mounted at `/stella-verify`, no login; `https://bramp.shop` added to CORS)
 - [ ] `routes/nairawebhook.js`: pass Glyde payments to storefront buys
@@ -152,12 +161,14 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 ## Known issues found
 - Before M2, `/whatsapp` ignored every message. `server.js` reads the raw body first, so `req.body` was empty. M2 parses `req.rawBody`.
 - Fixed in M3: `webhookLimiter` (50 per 15 minutes per IP) and the general limiter (500 per 15 minutes) both covered `/whatsapp`.
+- `@anthropic-ai/sdk` is 0.32.1 (late 2024). Stella works with it (fields passed through), but upgrading it is its own task: it also changes the live `/chatbot` (`AI/Chatbot.js`), which needs testing alongside.
 - Pre-existing: `models/kyc.js` declares its `youverifyId` index with both `sparse` and `partialFilterExpression`, which MongoDB rejects. Mongoose logs it in the background, so the server runs, but that index is probably missing. Not touched.
 - Running `server.js` locally needs `OBIEX_API_KEY`, `OBIEX_API_SECRET` and `OBIEX_BASE_URL` (dummies are fine), plus `MONGODB_URI` pointing at the local test Mongo. Local `.env` has none of them.
 
 ## Before deploying (server `.env`)
 - `META_APP_SECRET`: required. Without it Stella refuses everything from Meta.
 - `STELLA_VERIFY_URL`: optional, defaults to `https://bramp.shop/verify`.
+- `ANTHROPIC_API_KEY`: Stella's agent uses it (the web chatbot already does). `STELLA_MODEL`: optional, defaults to `claude-opus-5-5`.
 - bramp.shop (Vercel): `NEXT_PUBLIC_BRAMP_API_URL`, optional, defaults to `https://priscaai.online`.
 - `DOJAH_SECRET_KEY`, `DOJAH_APP_ID`: already used by the app's KYC; the Stella check uses the same ones.
 - `STOREFRONT_PLATFORM_KEY`: 32+ characters; the same value goes into bramp.shop's Vercel env. Can wait until bramp.shop is wired (M13).
@@ -177,3 +188,4 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - **2026-11-06:** M5 server side committed locally (`AI/stellaKyc.js`, `routes/stellaVerify.js`, `/stella-verify` mount, bramp.shop in CORS, `sendLink` in the sender). Next: the bramp.shop `/verify` page.
 - **2026-11-06:** bramp.shop `/verify` page committed locally (bramp-storefront `52796d9`). M5 stays `[~]` until it's deployed and checked on a phone. Next: M6 (desk routing, sticky desk).
 - **2026-11-06:** M6 committed locally (`AI/stellaRouter.js`, desk fields on `stellaCustomer`/`stellaConversation`, wired into `AI/whatsapp.js`). For now a verified customer with an active desk gets "You're trading with X. Quotes and trading open here soon." M7 (Claude agent) replaces that. Next: M7.
+- **2026-11-06:** M7 committed locally (`AI/stellaAgent.js`, `models/storefrontRateCard.js`, `GET`/`PUT /storefront/rates`, agent wired into `AI/whatsapp.js`). Stays `[~]` until one live conversation with the real Claude API. Next: M8 (hand Glyde and Obiex webhook events to storefront; live payment paths, one at a time, diff shown first).

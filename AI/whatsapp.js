@@ -20,6 +20,7 @@ const sender = require('./stellaSender');
 const customers = require('./stellaCustomers');
 const stellaKyc = require('./stellaKyc');
 const deskRouter = require('./stellaRouter');
+const agent = require('./stellaAgent');
 const logger = require('../utils/logger');
 
 // ===== ENV =====
@@ -190,8 +191,11 @@ async function handleMessage(msg, contact) {
   const desk = await deskRouter.route({ waId, customer, text, replyId: reply?.id ?? null });
   if (!desk) return;
 
-  // The Claude agent (M7) takes over from here, scoped to this desk.
-  await sender.sendText(waId, `You're trading with *${desk.brandName || `@${desk.slug}`}*. Quotes and trading open here soon.`);
+  // Free text goes to the Claude agent, scoped to this desk (AI/stellaAgent.js).
+  // Taps on buttons that aren't routing's have nothing to answer yet.
+  if (!text) return;
+  const answer = await agent.reply({ waId, messageId: msg.id, text, desk, customer });
+  await sender.sendText(waId, answer);
 }
 
 async function handleStatus(st) {

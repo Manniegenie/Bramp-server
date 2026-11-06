@@ -20,6 +20,9 @@
 //   GET   /storefront/balance                 — held proceeds, released, next release
 //   GET   /storefront/settings                — mismatch policy, limits, hold
 //   PATCH /storefront/settings                — { mismatchPolicy?, autoLimitNgn?, webhookUrl? }
+//   GET   /storefront/rates                   — the desk's rate card (what Stella quotes from)
+//   PUT   /storefront/rates                   — { rates: [{ asset, side: BUY|SELL, rateNgn, minNgn?, maxNgn?, active? }] }
+//                                               fixed rates, upserted per asset + side
 //
 // Status changes are pushed to the trader's webhookUrl, signed
 // (services/storefrontNotify.js): buy.held_review, buy.held_delay,
@@ -28,6 +31,7 @@ const express = require('express');
 const router = express.Router();
 const buy = require('../services/storefrontBuy');
 const ledger = require('../services/storefrontLedger');
+const StorefrontRateCard = require('../models/storefrontRateCard');
 const logger = require('../utils/logger');
 
 const route = (fn) => async (req, res) => {
@@ -127,6 +131,40 @@ router.patch('/settings', route(async (req, res) => {
   await m.save();
   logger.info('Storefront settings changed', { merchant: m.slug, mismatchPolicy: m.mismatchPolicy, autoLimitNgn: m.autoLimitNgn });
   res.json({ success: true, data: settingsOf(m, req) });
+}));
+
+const rateOf = (r) => ({ asset: r.asset, side: r.side, mode: r.mode, rateNgn: r.rateNgn, minNgn: r.minNgn, maxNgn: r.maxNgn, active: r.active, updatedAt: r.updatedAt });
+
+router.get('/rates', route(async (req, res) => {
+  const rates = await StorefrontRateCard.find({ merchantId: req.merchant._id }).sort({ asset: 1, side: 1 });
+  res.json({ success: true, data: rates.map(rateOf) });
+}));
+
+router.put('/rates', route(async (req, res) => {
+  const rows = req.body?.rates;
+  if (!Array.isArray(rows) || rows.length === 0 || rows.length > 20) {
+    return res.status(400).json({ success: false, message: 'rates must be a list of 1 to 20 entries.' });
+  }
+  const num = (v) => (v === undefined || v === null ? null : Number(v));
+  for (const r of rows) {
+    if (!buy.ASSETS.includes(r.asset)) return res.status(400).json({ success: false, message: `asset must be one of: ${buy.ASSETS.join(', ')}.` });
+    if (!['BUY', 'SELL'].includes(r.side)) return res.status(400).json({ success: false, message: 'side must be BUY or SELL.' });
+    if (!(Number(r.rateNgn) > 0)) return res.status(400).json({ success: false, message: 'rateNgn must be more than 0.' });
+    const min = num(r.minNgn); const max = num(r.maxNgn);
+    if ((min !== null && !(min >= 0)) || (max !== null && !(max > 0)) || (min !== null && max !== null && min > max)) {
+      return res.status(400).json({ success: false, message: 'minNgn and maxNgn must be numbers, with minNgn ≤ maxNgn.' });
+    }
+  }
+  for (const r of rows) {
+    await StorefrontRateCard.findOneAndUpdate(
+      { merchantId: req.merchant._id, asset: r.asset, side: r.side },
+      { $set: { mode: 'MANUAL', rateNgn: Number(r.rateNgn), minNgn: num(r.minNgn), maxNgn: num(r.maxNgn), active: r.active !== false } },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+  }
+  logger.info('Storefront rates set', { merchant: req.merchant.slug, count: rows.length });
+  const rates = await StorefrontRateCard.find({ merchantId: req.merchant._id }).sort({ asset: 1, side: 1 });
+  res.json({ success: true, data: rates.map(rateOf) });
 }));
 
 module.exports = router;
