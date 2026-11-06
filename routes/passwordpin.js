@@ -381,3 +381,4 @@ router.get('/wallet-status/:userId', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.generateUniqueUsername = generateUniqueUsername; // also used by Stella sign-up (AI/stellaCustomers.js)

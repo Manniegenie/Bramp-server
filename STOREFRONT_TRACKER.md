@@ -23,7 +23,11 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - [ ] **M3. Mount in `server.js`:**
   - storefront routes and jobs
   - take `/whatsapp` off `webhookLimiter` (50 per 15 minutes per IP is too low for Meta)
-- [ ] **M4. Customer identity:** a WhatsApp number is linked to a Bramp `User`, with a short sign-up in the chat. Customers are tagged `source: 'stella'` and left out of Bramp's own marketing.
+- [x] **M4. Customer identity:** a WhatsApp number is linked to a Bramp `User`. Committed locally, **not deployed**. Tested on a throwaway local Mongo: 26/26 checks.
+  - New number: full name (as on BVN/NIN) → email → 6-digit code by email → a Bramp account is created (`source: CREATED`).
+  - Number already on a Bramp account: "Is that you?" → code to that account's email → linked (`LINKED`). An email that's already a Bramp account also links after its code.
+  - The code always goes to the account's email, so a recycled number can't take over an account. No PIN at sign-up (PIN through a Flow in M9).
+  - Left out of Bramp marketing: Bramp's campaigns only target users with an app push token (`expoPushToken`), which Stella customers don't have, so no `User` change was needed. Stella sign-ups don't send Bramp's welcome email or the Facebook registration event.
 - [ ] **M5. One-time KYC:** Stella sends a one-time link to bramp.shop `/verify` (ID number and a camera selfie), which runs `biometricVerification`.
 - [ ] **M6. Desk routing:** `@username`, the sticky desk, confirm before switching, "this trade only".
 - [ ] **M7. Claude agent, read-only tools:** desk info, rates, order status.
@@ -61,8 +65,10 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - [ ] `storefrontSellOrder.js`
 - [ ] `storefrontGiftcardOrder.js`
 - [ ] `storefrontSwitch.js`
-- [ ] `stellaCustomer.js`: WhatsApp ID ↔ `User`, the sticky desk, switch history
-- [ ] `stellaConversation.js`: 24-hour window, takeover, order in progress
+- [x] `stellaCustomer.js`: WhatsApp ID ↔ `User`, source (CREATED or LINKED)
+  - [ ] M6: the sticky desk, first desk, switch history
+- [x] `stellaConversation.js`: sign-up state, 24-hour window (`lastInboundAt`)
+  - [ ] takeover (M12), order in progress (M9)
 - [x] `stellaMessage.js`: messages in and out, duplicate check, delivery status
 
 ### Bramp-server: services/
@@ -83,6 +89,7 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - [x] `whatsapp.js`: the webhook (setup check, Flows encryption, messages)
   - [ ] replace the placeholder Flow handlers (`/signin/signin-pin` accepts any PIN, so it must not be wired to anything)
 - [x] `stellaSender.js`: the only file that calls Meta's send API
+- [x] `stellaCustomers.js`: sign-up and account linking (M4)
 - [ ] `stellaRouter.js`
 - [ ] `stellaAgent.js`
 - [ ] `stellaTakeover.js`
@@ -97,6 +104,7 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - [x] `adminRoutes/storefront.js`
   - [ ] add sells, gift cards, refunds, rate cards, Stella conversations
 - [x] `auth/storefrontAuth.js`, `auth/storefrontPlatformAuth.js`
+- [x] `routes/passwordpin.js`: exports `generateUniqueUsername` for Stella (no behaviour change)
 - [ ] `server.js`: mount storefront routes and jobs, take `/whatsapp` off `webhookLimiter`
 
 ### Chatbramp-app (the Bramp app)
@@ -118,7 +126,6 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 ---
 
 ## Open decisions
-- In-chat sign-up: WhatsApp number plus email with a code (recommended), or number only.
 - Trader dashboard login on bramp.shop.
 - Static or one-time Glyde account for buys. The code uses a one-time account per order.
 - Fee per trade and per gift card; security deposit per desk tier; gift card verification provider.
@@ -130,6 +137,10 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - Webhook URL to set in Meta: `https://<server>/whatsapp/whatsapp`. It's mounted at `/whatsapp`, and the router path is also `/whatsapp`.
 - Local `.env` has no Obiex settings, so `services/networkService.js` (and the storefront and Metusela code) can't load on this PC without a placeholder `OBIEX` base URL.
 
+## Decided
+- In-chat sign-up: WhatsApp number plus email with a 6-digit code (2026-11-06).
+
 ## Log
 - **2026-11-06:** M1 committed (`3358259`, local). Tracker created.
 - **2026-11-06:** M2 committed locally. `AI/whatsapp.js` now refuses requests without a valid Meta signature, including Flows; check `META_APP_SECRET` is set on the server before deploying. The OpenAI import is removed (it was never used). The welcome message is unchanged until M4.
+- **2026-11-06:** M4 committed locally: `AI/stellaCustomers.js`, `models/stellaCustomer.js`, `models/stellaConversation.js`. It replaces the old "Bramp AI / Get Started" welcome and the welcome timers kept in memory. Messages from one number are handled one at a time (per process; fine while the server runs one instance). Next: M3 (`server.js`), which is waiting on how to handle the user's own uncommitted `server.js` edits.

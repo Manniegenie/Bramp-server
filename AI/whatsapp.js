@@ -17,6 +17,7 @@ const router = express.Router();
 const crypto = require('crypto');
 const StellaMessage = require('../models/stellaMessage');
 const sender = require('./stellaSender');
+const customers = require('./stellaCustomers');
 const logger = require('../utils/logger');
 
 // ===== ENV =====
@@ -26,17 +27,18 @@ const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'vibecode';
 const APP_SECRET  = process.env.META_APP_SECRET || ''; // HMAC for every POST from Meta
 const PRIVATE_KEY = (process.env.PRIVATE_KEY || '').replace(/\\n/g, '\n'); // PEM with BEGIN/END lines
 
-// ===== In-memory state (replaced by models/stellaConversation.js, tracker M4) =====
-const lastWelcomeAt    = new Map();
-const followUpSentOnce = new Map();
-
-function canSendWelcome(waId) {
-  const last = lastWelcomeAt.get(waId) || 0;
-  return (Date.now() - last) > 45 * 1000;
+// ===== One message at a time per customer =====
+// A customer who sends two messages quickly mustn't have both race through
+// the same conversation state. Per process: fine while the server runs as
+// one instance.
+const queues = new Map();
+function inOrder(waId, fn) {
+  const prev = queues.get(waId) || Promise.resolve();
+  const next = prev.then(fn, fn);
+  queues.set(waId, next);
+  next.finally(() => { if (queues.get(waId) === next) queues.delete(waId); });
+  return next;
 }
-function markWelcomeSent(waId) { lastWelcomeAt.set(waId, Date.now()); }
-function hasSentFollowUp(waId) { return !!followUpSentOnce.get(waId); }
-function markFollowUpSent(waId) { followUpSentOnce.set(waId, true); }
 
 // ===== Body (server.js captures it raw for /whatsapp) =====
 function parseBody(req) {
@@ -160,28 +162,20 @@ async function handleMessage(msg, contact) {
   if (!(await recordInbound(msg))) return;
 
   const displayName = contact?.profile?.name || 'there';
+  const reply = msg.interactive?.button_reply || msg.interactive?.list_reply || null;
   logger.info('Stella: message in', { id: msg.id, from: sender.mask(waId), type: msg.type });
 
-  // Stella's real handling (customer, desk routing, agent) replaces this
-  // welcome in tracker M4–M7.
-  if (msg.type === 'interactive') return;
+  await sender.markReadWithTyping(msg.id);
+  const customer = await customers.handleIncoming({
+    waId,
+    text: msg.text?.body ?? null,
+    replyId: reply?.id ?? null,
+    displayName,
+  });
+  if (!customer) return; // still signing up: AI/stellaCustomers.js replied
 
-  if (canSendWelcome(waId)) {
-    await sender.markReadWithTyping(msg.id);
-    await new Promise(r => setTimeout(r, 2200));
-    const welcome = await sender.sendButtons(waId,
-      `👋 Welcome ${displayName}, Welcome to Bramp AI where you can buy and sell digital assets like USDT, USDC, BTC, ETH, BSC and many more with your local bank bank account. Click the button to get started. 🚀`,
-      [{ id: 'start_signup', title: 'Get Started' }]);
-    if (welcome.ok) markWelcomeSent(waId);
-    return;
-  }
-
-  if (!hasSentFollowUp(waId)) {
-    await sender.markReadWithTyping(msg.id);
-    await new Promise(r => setTimeout(r, 2200));
-    const followUp = await sender.sendText(waId, `🤖 Click the button and we can get right into it, ${displayName}.`);
-    if (followUp.ok) markFollowUpSent(waId);
-  }
+  // Desk routing (M6) and the Claude agent (M7) take over from here.
+  await sender.sendText(waId, "You're all set on Stella. Trading with desks opens soon, and I'll be able to help right here.");
 }
 
 async function handleStatus(st) {
@@ -199,8 +193,8 @@ async function processWebhook(b) {
       const value = change.value || {};
       for (const msg of value.messages || []) {
         const contact = (value.contacts || []).find(c => c.wa_id === msg.from) || value.contacts?.[0];
-        try { await handleMessage(msg, contact); }
-        catch (err) { logger.error('Stella: message handling failed', { id: msg.id, error: err.message, stack: err.stack }); }
+        await inOrder(sender.waDigits(msg.from), () => handleMessage(msg, contact))
+          .catch(err => logger.error('Stella: message handling failed', { id: msg.id, error: err.message, stack: err.stack }));
       }
       for (const st of value.statuses || []) {
         try { await handleStatus(st); }
