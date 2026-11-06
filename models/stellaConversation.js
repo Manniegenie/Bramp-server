@@ -18,6 +18,20 @@ const stellaConversationSchema = new mongoose.Schema({
   // after the customer's last message; after that only templates.
   lastInboundAt: { type: Date, default: null },
 
+  // Desk routing (AI/stellaRouter.js).
+  entryDeskSlug: { type: String, default: null }, // @desk in a message before they were set up; applied once verified
+  awaitingDesk: { type: String, enum: ['CHOOSE', 'SWITCH', 'ONCE', null], default: null }, // waiting for an @username, and why
+  pendingSwitch: {
+    deskId: { type: mongoose.Schema.Types.ObjectId, ref: 'StorefrontMerchant', default: null },
+    askedAt: { type: Date, default: null },
+  },
+  // "Another desk, this trade only": used by the next order (M9), never
+  // touches the customer's own desk.
+  tradeDesk: {
+    deskId: { type: mongoose.Schema.Types.ObjectId, ref: 'StorefrontMerchant', default: null },
+    until: { type: Date, default: null },
+  },
+
   signup: {
     firstname: { type: String, default: null },
     middlename: { type: String, default: '' },

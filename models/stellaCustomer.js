@@ -14,6 +14,24 @@ const stellaCustomerSchema = new mongoose.Schema({
   source: { type: String, enum: ['CREATED', 'LINKED'], required: true },
   linkedAt: { type: Date, required: true, default: Date.now },
 
+  // The customer's desk (AI/stellaRouter.js). Sticky: set once and kept
+  // until the customer explicitly switches; never changed by silence, a new
+  // chat, the 24-hour window, a paused or closed desk, or a one-off trade
+  // with another desk. Orders keep the desk they were created with.
+  deskId: { type: mongoose.Schema.Types.ObjectId, ref: 'StorefrontMerchant', default: null, index: true },
+  deskSetVia: { type: String, enum: ['ENTRY', 'MENTION', 'SWITCH', null], default: null },
+  deskSetAt: { type: Date, default: null },
+  firstDeskId: { type: mongoose.Schema.Types.ObjectId, ref: 'StorefrontMerchant', default: null }, // the desk that brought them
+  deskHistory: {
+    type: [{
+      fromDeskId: { type: mongoose.Schema.Types.ObjectId, ref: 'StorefrontMerchant', default: null },
+      toDeskId: { type: mongoose.Schema.Types.ObjectId, ref: 'StorefrontMerchant', required: true },
+      via: { type: String, required: true },
+      changedAt: { type: Date, default: Date.now },
+    }],
+    default: [],
+  },
+
   // One-time identity check (AI/stellaKyc.js, routes/stellaVerify.js): a
   // link to bramp.shop/verify. Only one is live at a time; only its sha256
   // is kept. Each attempt is a paid Dojah check, so attempts are capped.

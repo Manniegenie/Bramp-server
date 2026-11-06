@@ -38,7 +38,14 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
     - Outcomes: verified → link retired and "You're verified ✅". Rejected → reason and tries left. Provider down → PROVISIONAL, "review by our team, email to follow".
   - [x] bramp.shop `/verify` page, committed locally in bramp-storefront (`52796d9`), **not deployed**. `next build` passes. NIN/BVN → front-camera selfie (no upload) → straight to Bramp-server from the browser. **Not yet tested on a real phone** (camera can't be tested here).
   - To switch on: deploy Bramp-server and bramp.shop, then do one real check from a phone.
-- [ ] **M6. Desk routing:** `@username`, the sticky desk, confirm before switching, "this trade only".
+- [x] **M6. Desk routing:** `@username`, the sticky desk, confirm before switching, "this trade only". Committed locally, **not deployed**. Tested on a throwaway local Mongo: 34/34 checks (all suites: 111/111).
+  - First desk: `@username` (or a bare username right after Stella asks) sets it at once. Saved on `StellaCustomer` with `firstDeskId` and a switch history.
+  - Desk from the very first message: an `@desk` sent while signing up or before verifying is remembered (first one wins) and applied once verified (`via: ENTRY`). A desk's link isn't lost on the way through sign-up.
+  - Switching: another `@username`, "change desk", or another desk's link → [Switch to X] [Stay with Y]. Confirmation expires after an hour.
+  - Paused desk: [Wait] [Another desk, once]. "Once" sets `StellaConversation.tradeDesk` (1 hour) for the next order (M9); the customer's desk is untouched.
+  - Closed desk: told and asked to choose; the desk stays as it was until they do.
+  - `@` inside an email address isn't a mention. Unknown `@desk`: told, nothing changes.
+  - The desk model has `active | paused | closed`. The spec's "suspended" is treated as `closed` for now.
   - **Rule (user, 2026-11-06):** once a customer connects to a desk, it's saved and stays their desk. It changes **only** when the customer explicitly switches (types another `@username`, says "change desk", or taps another desk's link and confirms). Never because of silence, a new chat, the 24-hour window closing, the desk being closed or paused, or a one-off trade elsewhere. A suspended desk asks the customer to choose; it never reassigns them silently.
 - [ ] **M7. Claude agent, read-only tools:** desk info, rates, order status.
 - [ ] **M8. Webhooks hand storefront events over**, one at a time:
@@ -76,8 +83,8 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - [ ] `storefrontGiftcardOrder.js`
 - [ ] `storefrontSwitch.js`
 - [x] `stellaCustomer.js`: WhatsApp ID ↔ `User`, source (CREATED or LINKED)
-  - [ ] M6: the sticky desk, first desk, switch history
-- [x] `stellaConversation.js`: sign-up state, 24-hour window (`lastInboundAt`)
+  - [x] M6: the sticky desk, first desk, switch history
+- [x] `stellaConversation.js`: sign-up state, 24-hour window (`lastInboundAt`), desk prompts (entry desk, pending switch, one-off trade desk)
   - [ ] takeover (M12), order in progress (M9)
 - [x] `stellaMessage.js`: messages in and out, duplicate check, delivery status
 
@@ -101,7 +108,7 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - [x] `stellaSender.js`: the only file that calls Meta's send API
 - [x] `stellaCustomers.js`: sign-up and account linking (M4)
 - [x] `stellaKyc.js`: verify link, "verified" rule, result messages (M5)
-- [ ] `stellaRouter.js`
+- [x] `stellaRouter.js`: sticky desk routing (M6)
 - [ ] `stellaAgent.js`
 - [ ] `stellaTakeover.js`
 
@@ -169,3 +176,4 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - **2026-11-06:** M3 committed locally. Only the storefront and Stella lines of `server.js` were committed. The user's uncommitted Glyde deposit mounts (`/admin/deposits`, `/admin/glyde-review`) were left uncommitted in the file. Desk-stickiness rule added to M6. Next: M5.
 - **2026-11-06:** M5 server side committed locally (`AI/stellaKyc.js`, `routes/stellaVerify.js`, `/stella-verify` mount, bramp.shop in CORS, `sendLink` in the sender). Next: the bramp.shop `/verify` page.
 - **2026-11-06:** bramp.shop `/verify` page committed locally (bramp-storefront `52796d9`). M5 stays `[~]` until it's deployed and checked on a phone. Next: M6 (desk routing, sticky desk).
+- **2026-11-06:** M6 committed locally (`AI/stellaRouter.js`, desk fields on `stellaCustomer`/`stellaConversation`, wired into `AI/whatsapp.js`). For now a verified customer with an active desk gets "You're trading with X. Quotes and trading open here soon." M7 (Claude agent) replaces that. Next: M7.
