@@ -13,6 +13,16 @@ const stellaCustomerSchema = new mongoose.Schema({
   // existing Bramp user connected WhatsApp to their account.
   source: { type: String, enum: ['CREATED', 'LINKED'], required: true },
   linkedAt: { type: Date, required: true, default: Date.now },
+
+  // One-time identity check (AI/stellaKyc.js, routes/stellaVerify.js): a
+  // link to bramp.shop/verify. Only one is live at a time; only its sha256
+  // is kept. Each attempt is a paid Dojah check, so attempts are capped.
+  verifyLink: {
+    tokenHash: { type: String, default: null, index: true, sparse: true },
+    expiresAt: { type: Date, default: null },
+    attempts: { type: Number, default: 0 },
+    sentAt: { type: [Date], default: [] }, // for the per-day limit
+  },
 }, { timestamps: true });
 
 module.exports = mongoose.models.StellaCustomer || mongoose.model('StellaCustomer', stellaCustomerSchema);

@@ -24,6 +24,7 @@ const StellaConversation = require('../models/stellaConversation');
 const { generateUniqueUsername } = require('../routes/passwordpin');
 const { sendOtpEmail } = require('../services/EmailService');
 const sender = require('./stellaSender');
+const stellaKyc = require('./stellaKyc');
 const logger = require('../utils/logger');
 
 const CODE_TTL_MINUTES = 10;
@@ -213,14 +214,16 @@ async function finish(to, convo) {
     return sender.sendText(to, 'That Bramp account is already linked to another WhatsApp number. Please contact Bramp support to move it.');
   }
 
-  await StellaCustomer.create({ waId: to, userId, source });
+  const customer = await StellaCustomer.create({ waId: to, userId, source });
   convo.state = 'READY';
   convo.signup = {};
   await convo.save();
   logger.info('Stella: customer ready', { waId: sender.mask(to), source });
-  return sender.sendText(to, source === 'LINKED'
+  await sender.sendText(to, source === 'LINKED'
     ? "You're linked ✅ Stella now uses your Bramp account."
-    : "You're set up ✅ Your Bramp account is ready.\n\nNext is a one-time identity check (BVN or NIN and a selfie). After that you can trade with any desk on Stella.");
+    : "You're set up ✅ Your Bramp account is ready.");
+  // Straight on to the one-time identity check, unless the account already has it.
+  return stellaKyc.promptIfNeeded(to, customer);
 }
 
 // ── Steps ──────────────────────────────────────────────────────────────────

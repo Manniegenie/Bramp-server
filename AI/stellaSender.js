@@ -66,4 +66,19 @@ async function sendButtons(to, body, buttons, { orderReference } = {}) {
   return result;
 }
 
-module.exports = { markReadWithTyping, sendText, sendButtons, waDigits, mask };
+/** A message with one button that opens a URL (WhatsApp "cta_url"); label at most 20 characters. */
+async function sendLink(to, body, label, url) {
+  const result = await post({
+    to: waDigits(to),
+    type: 'interactive',
+    interactive: {
+      type: 'cta_url',
+      body: { text: body },
+      action: { name: 'cta_url', parameters: { display_text: label, url } },
+    },
+  });
+  await logOutbound(to, 'interactive', body, result);
+  return result;
+}
+
+module.exports = { markReadWithTyping, sendText, sendButtons, sendLink, waDigits, mask };

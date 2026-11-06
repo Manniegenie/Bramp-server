@@ -30,7 +30,13 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
   - Number already on a Bramp account: "Is that you?" → code to that account's email → linked (`LINKED`). An email that's already a Bramp account also links after its code.
   - The code always goes to the account's email, so a recycled number can't take over an account. No PIN at sign-up (PIN through a Flow in M9).
   - Left out of Bramp marketing: Bramp's campaigns only target users with an app push token (`expoPushToken`), which Stella customers don't have, so no `User` change was needed. Stella sign-ups don't send Bramp's welcome email or the Facebook registration event.
-- [ ] **M5. One-time KYC:** Stella sends a one-time link to bramp.shop `/verify` (ID number and a camera selfie), which runs `biometricVerification`.
+- [~] **M5. One-time KYC:** Stella sends a one-time link to bramp.shop `/verify` (ID number and a camera selfie), which runs `biometricVerification`.
+  - [x] Server, committed locally, **not deployed**. Tested with the real Dojah handler (only Dojah's API faked) on a throwaway local Mongo: 22/22 checks, plus 3 more in the server boot test (route mounted, CORS).
+    - The link is sent right after sign-up or linking, and again whenever an unverified customer messages (at most every 2 minutes, 5 a day). It expires after 30 minutes and allows 3 attempts; only the token's hash is stored.
+    - **"Verified" for Stella** = KYC level 2 (NIN) **or** `bvnVerified` (BVN). In Bramp today a passed BVN check doesn't raise `kycLevel`. ⚠ Confirm with the user.
+    - Dojah approval = record found + names overlap + selfie matches the government photo. Liveness is logged but **not** gating (existing Bramp behaviour).
+    - Outcomes: verified → link retired and "You're verified ✅". Rejected → reason and tries left. Provider down → PROVISIONAL, "review by our team, email to follow".
+  - [ ] bramp.shop `/verify` page (camera selfie)
 - [ ] **M6. Desk routing:** `@username`, the sticky desk, confirm before switching, "this trade only".
   - **Rule (user, 2026-11-06):** once a customer connects to a desk, it's saved and stays their desk. It changes **only** when the customer explicitly switches (types another `@username`, says "change desk", or taps another desk's link and confirms). Never because of silence, a new chat, the 24-hour window closing, the desk being closed or paused, or a one-off trade elsewhere. A suspended desk asks the customer to choose; it never reassigns them silently.
 - [ ] **M7. Claude agent, read-only tools:** desk info, rates, order status.
@@ -93,6 +99,7 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
   - [ ] replace the placeholder Flow handlers (`/signin/signin-pin` accepts any PIN, so it must not be wired to anything)
 - [x] `stellaSender.js`: the only file that calls Meta's send API
 - [x] `stellaCustomers.js`: sign-up and account linking (M4)
+- [x] `stellaKyc.js`: verify link, "verified" rule, result messages (M5)
 - [ ] `stellaRouter.js`
 - [ ] `stellaAgent.js`
 - [ ] `stellaTakeover.js`
@@ -101,7 +108,7 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - [x] `routes/storefront.js`, `storefrontLink.js`, `storefrontOnboarding.js`
   - [ ] store profile read and update
 - [ ] `routes/storefrontRates.js`, `storefrontSell.js`, `storefrontGiftcard.js`, `storefrontSwitch.js`
-- [ ] `routes/stellaVerify.js`: one-time KYC link token → `biometricVerification`
+- [x] `routes/stellaVerify.js`: one-time KYC link token → `biometricVerification` (mounted at `/stella-verify`, no login; `https://bramp.shop` added to CORS)
 - [ ] `routes/nairawebhook.js`: pass Glyde payments to storefront buys
 - [ ] `routes/obiexwebhooktrx.js`, `routes/chatbotwebhook.js`: pass withdrawals and sell deposits to storefront
 - [x] `adminRoutes/storefront.js`
@@ -137,10 +144,13 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 ## Known issues found
 - Before M2, `/whatsapp` ignored every message. `server.js` reads the raw body first, so `req.body` was empty. M2 parses `req.rawBody`.
 - Fixed in M3: `webhookLimiter` (50 per 15 minutes per IP) and the general limiter (500 per 15 minutes) both covered `/whatsapp`.
+- Pre-existing: `models/kyc.js` declares its `youverifyId` index with both `sparse` and `partialFilterExpression`, which MongoDB rejects. Mongoose logs it in the background, so the server runs, but that index is probably missing. Not touched.
 - Running `server.js` locally needs `OBIEX_API_KEY`, `OBIEX_API_SECRET` and `OBIEX_BASE_URL` (dummies are fine), plus `MONGODB_URI` pointing at the local test Mongo. Local `.env` has none of them.
 
 ## Before deploying (server `.env`)
 - `META_APP_SECRET`: required. Without it Stella refuses everything from Meta.
+- `STELLA_VERIFY_URL`: optional, defaults to `https://bramp.shop/verify`.
+- `DOJAH_SECRET_KEY`, `DOJAH_APP_ID`: already used by the app's KYC; the Stella check uses the same ones.
 - `STOREFRONT_PLATFORM_KEY`: 32+ characters; the same value goes into bramp.shop's Vercel env. Can wait until bramp.shop is wired (M13).
 - `BREVO_TEMPLATE_STOREFRONT_LINK`: the desk-link email template. Can wait until M13.
 - `ENABLE_STOREFRONT_JOBS=false` on any staging instance that shares the prod database.
@@ -155,3 +165,4 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - **2026-11-06:** M2 committed locally. `AI/whatsapp.js` now refuses requests without a valid Meta signature, including Flows; check `META_APP_SECRET` is set on the server before deploying. The OpenAI import is removed (it was never used). The welcome message is unchanged until M4.
 - **2026-11-06:** M4 committed locally: `AI/stellaCustomers.js`, `models/stellaCustomer.js`, `models/stellaConversation.js`. It replaces the old "Bramp AI / Get Started" welcome and the welcome timers kept in memory. Messages from one number are handled one at a time (per process; fine while the server runs one instance). Next: M3 (`server.js`), which is waiting on how to handle the user's own uncommitted `server.js` edits.
 - **2026-11-06:** M3 committed locally. Only the storefront and Stella lines of `server.js` were committed. The user's uncommitted Glyde deposit mounts (`/admin/deposits`, `/admin/glyde-review`) were left uncommitted in the file. Desk-stickiness rule added to M6. Next: M5.
+- **2026-11-06:** M5 server side committed locally (`AI/stellaKyc.js`, `routes/stellaVerify.js`, `/stella-verify` mount, bramp.shop in CORS, `sendLink` in the sender). Next: the bramp.shop `/verify` page.

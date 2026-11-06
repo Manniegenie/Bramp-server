@@ -126,6 +126,8 @@ const chatbrampOrigins = [
   "https://www.chatbramp.com",
   "https://brampay.online",
   "https://www.brampay.online",
+  // Storefront: bramp.shop/verify calls /stella-verify from the customer's browser.
+  "https://bramp.shop",
 ];
 chatbrampOrigins.forEach(origin => {
   exactOrigins.add(origin);
@@ -644,6 +646,9 @@ app.use("/storefront-onboarding", require("./auth/storefrontPlatformAuth"), requ
 // The Bramp app approving or declining a link request.
 app.use("/storefront-link", authenticateToken, require("./routes/storefrontLink"));
 app.use("/admin/storefront", authenticateAdminToken, requireAdmin, require("./adminRoutes/storefront"));
+// Stella's one-time identity check, from bramp.shop/verify. No login: the
+// link's token is the key (routes/stellaVerify.js).
+app.use("/stella-verify", require("./routes/stellaVerify"));
 app.use("/chatbot", ChatbotRoutes); // Removed rate limiter - user-facing chat endpoint
 app.use("/Chatbotwebhook", webhookLimiter, ChatbotwebhookRoutes);
 

@@ -18,6 +18,7 @@ const crypto = require('crypto');
 const StellaMessage = require('../models/stellaMessage');
 const sender = require('./stellaSender');
 const customers = require('./stellaCustomers');
+const stellaKyc = require('./stellaKyc');
 const logger = require('../utils/logger');
 
 // ===== ENV =====
@@ -173,6 +174,9 @@ async function handleMessage(msg, contact) {
     displayName,
   });
   if (!customer) return; // still signing up: AI/stellaCustomers.js replied
+
+  // Nothing else until the one-time identity check is done (AI/stellaKyc.js).
+  if ((await stellaKyc.promptIfNeeded(waId, customer)) !== 'verified') return;
 
   // Desk routing (M6) and the Claude agent (M7) take over from here.
   await sender.sendText(waId, "You're all set on Stella. Trading with desks opens soon, and I'll be able to help right here.");
