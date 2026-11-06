@@ -36,7 +36,8 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
     - **"Verified" for Stella** = KYC level 2 (NIN) **or** `bvnVerified` (BVN). In Bramp today a passed BVN check doesn't raise `kycLevel`. ⚠ Confirm with the user.
     - Dojah approval = record found + names overlap + selfie matches the government photo. Liveness is logged but **not** gating (existing Bramp behaviour).
     - Outcomes: verified → link retired and "You're verified ✅". Rejected → reason and tries left. Provider down → PROVISIONAL, "review by our team, email to follow".
-  - [ ] bramp.shop `/verify` page (camera selfie)
+  - [x] bramp.shop `/verify` page, committed locally in bramp-storefront (`52796d9`), **not deployed**. `next build` passes. NIN/BVN → front-camera selfie (no upload) → straight to Bramp-server from the browser. **Not yet tested on a real phone** (camera can't be tested here).
+  - To switch on: deploy Bramp-server and bramp.shop, then do one real check from a phone.
 - [ ] **M6. Desk routing:** `@username`, the sticky desk, confirm before switching, "this trade only".
   - **Rule (user, 2026-11-06):** once a customer connects to a desk, it's saved and stays their desk. It changes **only** when the customer explicitly switches (types another `@username`, says "change desk", or taps another desk's link and confirms). Never because of silence, a new chat, the 24-hour window closing, the desk being closed or paused, or a one-off trade elsewhere. A suspended desk asks the customer to choose; it never reassigns them silently.
 - [ ] **M7. Claude agent, read-only tools:** desk info, rates, order status.
@@ -126,7 +127,7 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 
 ### bramp-storefront (bramp.shop)
 - [x] landing page, sample store, setup form (mock data)
-- [ ] `src/app/verify/*`: customer KYC page (camera selfie)
+- [x] `src/app/verify/*`: customer KYC page (camera selfie), `BRAMP_API_URL` in `src/lib/site.ts`, `/verify` blocked in robots.txt
 - [ ] `src/lib/bramp.ts`: server-only API client
 - [ ] `src/lib/stores.ts`: load stores from the API
 - [ ] `src/app/api/link/*`, `api/orders/*`, `api/webhooks/bramp`
@@ -150,6 +151,7 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 ## Before deploying (server `.env`)
 - `META_APP_SECRET`: required. Without it Stella refuses everything from Meta.
 - `STELLA_VERIFY_URL`: optional, defaults to `https://bramp.shop/verify`.
+- bramp.shop (Vercel): `NEXT_PUBLIC_BRAMP_API_URL`, optional, defaults to `https://priscaai.online`.
 - `DOJAH_SECRET_KEY`, `DOJAH_APP_ID`: already used by the app's KYC; the Stella check uses the same ones.
 - `STOREFRONT_PLATFORM_KEY`: 32+ characters; the same value goes into bramp.shop's Vercel env. Can wait until bramp.shop is wired (M13).
 - `BREVO_TEMPLATE_STOREFRONT_LINK`: the desk-link email template. Can wait until M13.
@@ -166,3 +168,4 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - **2026-11-06:** M4 committed locally: `AI/stellaCustomers.js`, `models/stellaCustomer.js`, `models/stellaConversation.js`. It replaces the old "Bramp AI / Get Started" welcome and the welcome timers kept in memory. Messages from one number are handled one at a time (per process; fine while the server runs one instance). Next: M3 (`server.js`), which is waiting on how to handle the user's own uncommitted `server.js` edits.
 - **2026-11-06:** M3 committed locally. Only the storefront and Stella lines of `server.js` were committed. The user's uncommitted Glyde deposit mounts (`/admin/deposits`, `/admin/glyde-review`) were left uncommitted in the file. Desk-stickiness rule added to M6. Next: M5.
 - **2026-11-06:** M5 server side committed locally (`AI/stellaKyc.js`, `routes/stellaVerify.js`, `/stella-verify` mount, bramp.shop in CORS, `sendLink` in the sender). Next: the bramp.shop `/verify` page.
+- **2026-11-06:** bramp.shop `/verify` page committed locally (bramp-storefront `52796d9`). M5 stays `[~]` until it's deployed and checked on a phone. Next: M6 (desk routing, sticky desk).
