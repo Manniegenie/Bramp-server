@@ -1,68 +1,35 @@
-// routes/whatsapp.js
-// Single endpoint for everything:
-// - Normal WhatsApp webhook (messages)
-// - Flows: health ping (unencrypted OR encrypted → Base64 text/plain)
-// - Flows: async error ack (unencrypted, Base64 text/plain)
-// - Flows: data_exchange (AES-GCM encrypted, Base64 text/plain)
+// AI/whatsapp.js — Stella by Bramp, Storefront's WhatsApp channel.
+// Mounted at /whatsapp in server.js, so Meta's webhook URL is
+// https://<server>/whatsapp/whatsapp. One endpoint for everything Meta sends:
+// - GET: webhook verification (META_VERIFY_TOKEN)
+// - POST, Flows: health ping, async error ack, data_exchange (AES-GCM encrypted)
+// - POST, messages and delivery statuses
+//
+// Every POST must carry a valid X-Hub-Signature-256 (META_APP_SECRET); with
+// no secret configured we refuse rather than trust. server.js reads the body
+// into req.rawBody before express.json runs, so req.body is empty here: we
+// parse req.rawBody ourselves. Messages are acknowledged with 200 at once and
+// handled afterwards, so a slow reply never makes Meta retry. Sending is done
+// by AI/stellaSender.js; models/stellaMessage.js is the duplicate check.
 
 const express = require('express');
 const router = express.Router();
-const axios = require('axios');
-const OpenAI = require('openai');
 const crypto = require('crypto');
+const StellaMessage = require('../models/stellaMessage');
+const sender = require('./stellaSender');
 const logger = require('../utils/logger');
 
 // ===== ENV =====
-const META_ACCESS_TOKEN    = process.env.META_ACCESS_TOKEN;
-const META_PHONE_NUMBER_ID = process.env.META_PHONE_NUMBER_ID;
-const META_VERIFY_TOKEN    = process.env.META_VERIFY_TOKEN || 'vibecode';
+const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'vibecode';
 
 // Flows security
-const APP_SECRET  = process.env.META_APP_SECRET || ''; // HMAC for flows requests
+const APP_SECRET  = process.env.META_APP_SECRET || ''; // HMAC for every POST from Meta
 const PRIVATE_KEY = (process.env.PRIVATE_KEY || '').replace(/\\n/g, '\n'); // PEM with BEGIN/END lines
 
-// Optional placeholders
-const SIGNUP_FLOW_ID = process.env.SIGNUP_FLOW_ID || '';
-const OTP_FLOW_ID    = process.env.OTP_FLOW_ID || '';
+// ===== In-memory state (replaced by models/stellaConversation.js, tracker M4) =====
+const lastWelcomeAt    = new Map();
+const followUpSentOnce = new Map();
 
-// ===== AI (idle) =====
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-let openai = null;
-if (OPENAI_API_KEY && OPENAI_API_KEY.startsWith('sk-')) {
-  try { openai = new OpenAI({ apiKey: OPENAI_API_KEY }); console.log('✅ OpenAI ready'); }
-  catch (e) { console.error('❌ OpenAI init failed:', e.message); }
-} else {
-  console.log('ℹ️ OPENAI_API_KEY missing/invalid; AI idle');
-}
-async function getAIResponse(_userId, _text) { return openai ? '...' : '...'; }
-
-// ===== In-memory state =====
-const seenMessages      = new Map();
-const lastWelcomeAt     = new Map();
-const followUpSentOnce  = new Map();
-
-// ===== Helpers =====
-function toWabaId(v) { return String(v || '').replace(/[^\d]/g, ''); }
-function normalizePhoneNumber(phone) {
-  if (!phone) return '';
-  let c = phone.replace(/[^\d]/g, '');
-  if (c.startsWith('234') && c.length === 13) return '+' + c;
-  if (c.startsWith('0') && c.length === 11)  return '+234' + c.slice(1);
-  if (c.length >= 10 && c.length <= 15)      return '+' + c;
-  return c;
-}
-function isValidPhoneNumber(phone) { return /^\+?\d{10,15}$/.test(phone); }
-
-function rememberSeen(id) {
-  const now = Date.now();
-  seenMessages.set(id, now);
-  for (const [k, ts] of seenMessages) if (now - ts > 5 * 60 * 1000) seenMessages.delete(k);
-}
-function alreadySeen(id) {
-  if (!id) return false;
-  const ts = seenMessages.get(id);
-  return ts ? (Date.now() - ts) < 5 * 60 * 1000 : false;
-}
 function canSendWelcome(waId) {
   const last = lastWelcomeAt.get(waId) || 0;
   return (Date.now() - last) > 45 * 1000;
@@ -71,86 +38,13 @@ function markWelcomeSent(waId) { lastWelcomeAt.set(waId, Date.now()); }
 function hasSentFollowUp(waId) { return !!followUpSentOnce.get(waId); }
 function markFollowUpSent(waId) { followUpSentOnce.set(waId, true); }
 
-// ===== WhatsApp senders (Graph v22.0) =====
-async function sendTypingIndicator(messageId, toWaId) {
-  try {
-    if (!META_ACCESS_TOKEN || !META_PHONE_NUMBER_ID) return;
-    const payload = {
-      messaging_product: 'whatsapp',
-      status: 'read',
-      message_id: messageId,
-      typing_indicator: { type: 'text' },
-      to: toWabaId(toWaId)
-    };
-    const resp = await axios.post(
-      `https://graph.facebook.com/v22.0/${META_PHONE_NUMBER_ID}/messages`,
-      payload,
-      { headers: { Authorization: `Bearer ${META_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
-    );
-    logger.info('📝 Typing indicator sent', {
-      messageId,
-      status: resp.status,
-      fbMsgId: resp.data?.messages?.[0]?.id || null
-    });
-  } catch (e) {
-    logger.warn('Typing indicator failed (non-critical)', {
-      error: e.message, status: e.response?.status, data: e.response?.data
-    });
+// ===== Body (server.js captures it raw for /whatsapp) =====
+function parseBody(req) {
+  if (typeof req.rawBody === 'string' && req.rawBody.length) {
+    try { return JSON.parse(req.rawBody); } catch { return null; }
   }
+  return req.body && typeof req.body === 'object' ? req.body : null;
 }
-
-async function sendInteractiveWelcome(to, displayName) {
-  if (!META_ACCESS_TOKEN || !META_PHONE_NUMBER_ID) throw new Error('Missing Meta WhatsApp credentials');
-  const waTo = toWabaId(to);
-  const txt =
-    `👋 Welcome ${displayName || 'there'}, Welcome to Bramp AI where you can buy and sell digital assets like USDT, USDC, BTC, ETH, BSC and many more with your local bank bank account. Click the button to get started. 🚀`;
-  const payload = {
-    messaging_product: 'whatsapp',
-    to: waTo,
-    type: 'interactive',
-    interactive: {
-      type: 'button',
-      body: { text: txt },
-      action: {
-        buttons: [
-          { type: 'reply', reply: { id: 'start_signup', title: 'Get Started' } }
-        ]
-      }
-    }
-  };
-  const resp = await axios.post(
-    `https://graph.facebook.com/v22.0/${META_PHONE_NUMBER_ID}/messages`,
-    payload,
-    { headers: { Authorization: `Bearer ${META_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
-  );
-  const msgId = resp.data?.messages?.[0]?.id;
-  logger.info('📤 Welcome interactive sent', { id: msgId, to: waTo.slice(0, 8) + '****' });
-  return msgId;
-}
-
-async function sendTextMessage(to, text) {
-  if (!META_ACCESS_TOKEN || !META_PHONE_NUMBER_ID) throw new Error('Missing Meta WhatsApp credentials');
-  const waTo = toWabaId(to);
-  const payload = {
-    messaging_product: 'whatsapp',
-    to: waTo,
-    type: 'text',
-    text: { body: text }
-  };
-  const resp = await axios.post(
-    `https://graph.facebook.com/v22.0/${META_PHONE_NUMBER_ID}/messages`,
-    payload,
-    { headers: { Authorization: `Bearer ${META_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
-  );
-  const msgId = resp.data?.messages?.[0]?.id;
-  logger.info('📤 Text sent', { id: msgId, to: waTo.slice(0, 8) + '****' });
-  return msgId;
-}
-
-// ===== Body parser for this route that preserves raw body (for HMAC) =====
-router.use('/whatsapp', express.json({
-  verify: (req, _res, buf) => { req.rawBody = buf; }
-}));
 
 // ===== Webhook verification (GET) =====
 router.get('/whatsapp', (req, res) => {
@@ -165,13 +59,13 @@ router.get('/whatsapp', (req, res) => {
   return res.status(403).end();
 });
 
-// ===== HMAC validation (Flows requests) =====
+// ===== HMAC validation (every POST) =====
 function validateMetaSignature(req) {
-  if (!APP_SECRET) return true; // skip if not configured
-  const header = req.get('X-Hub-Signature-256') || req.get('x-hub-signature-256') || '';
+  if (!APP_SECRET) return false; // not configured: refuse, never trust
+  const header = req.get('X-Hub-Signature-256') || '';
   const their = header.replace(/^sha256=/i, '');
   const hmac = crypto.createHmac('sha256', APP_SECRET);
-  hmac.update(req.rawBody || Buffer.alloc(0));
+  hmac.update(req.rawBody || '');
   const ours = hmac.digest('hex');
   try { return crypto.timingSafeEqual(Buffer.from(their, 'hex'), Buffer.from(ours, 'hex')); }
   catch { return false; }
@@ -214,6 +108,8 @@ function sendBase64Plain(res, obj, status = 200) {
 }
 
 // ===== Simple flow handlers (your business logic goes here) =====
+// Placeholders: neither checks anything yet. Don't wire their result to
+// anything until they're real (tracker: AI/whatsapp.js).
 const phoneRe = /^\+?\d{10,15}$/;
 const pinRe   = /^\d{6}$/;
 function success(flow_token, extraParams = {}) {
@@ -237,28 +133,107 @@ const flowHandlers = {
   }
 };
 
+// ===== Messages =====
+
+/** Records an inbound message; false if we've already handled it (Meta retry). */
+async function recordInbound(msg) {
+  const reply = msg.interactive?.button_reply || msg.interactive?.list_reply || null;
+  try {
+    await StellaMessage.create({
+      waMessageId: msg.id,
+      direction: 'IN',
+      waId: sender.waDigits(msg.from),
+      type: msg.type || 'unknown',
+      text: msg.text?.body ?? reply?.title ?? null,
+      replyId: reply?.id ?? null,
+    });
+    return true;
+  } catch (err) {
+    if (err.code === 11000) return false;
+    throw err;
+  }
+}
+
+async function handleMessage(msg, contact) {
+  const waId = sender.waDigits(msg.from);
+  if (!msg.id || waId.length < 10 || waId.length > 15) return;
+  if (!(await recordInbound(msg))) return;
+
+  const displayName = contact?.profile?.name || 'there';
+  logger.info('Stella: message in', { id: msg.id, from: sender.mask(waId), type: msg.type });
+
+  // Stella's real handling (customer, desk routing, agent) replaces this
+  // welcome in tracker M4–M7.
+  if (msg.type === 'interactive') return;
+
+  if (canSendWelcome(waId)) {
+    await sender.markReadWithTyping(msg.id);
+    await new Promise(r => setTimeout(r, 2200));
+    const welcome = await sender.sendButtons(waId,
+      `👋 Welcome ${displayName}, Welcome to Bramp AI where you can buy and sell digital assets like USDT, USDC, BTC, ETH, BSC and many more with your local bank bank account. Click the button to get started. 🚀`,
+      [{ id: 'start_signup', title: 'Get Started' }]);
+    if (welcome.ok) markWelcomeSent(waId);
+    return;
+  }
+
+  if (!hasSentFollowUp(waId)) {
+    await sender.markReadWithTyping(msg.id);
+    await new Promise(r => setTimeout(r, 2200));
+    const followUp = await sender.sendText(waId, `🤖 Click the button and we can get right into it, ${displayName}.`);
+    if (followUp.ok) markFollowUpSent(waId);
+  }
+}
+
+async function handleStatus(st) {
+  if (!st.id || !['sent', 'delivered', 'read', 'failed'].includes(st.status)) return;
+  const error = st.status === 'failed' ? (st.errors?.[0]?.title || st.errors?.[0]?.message || 'failed') : null;
+  // 'read' can arrive before 'delivered'; never move a read message back.
+  const filter = st.status === 'read' ? { waMessageId: st.id } : { waMessageId: st.id, status: { $ne: 'read' } };
+  await StellaMessage.updateOne(filter, { $set: { status: st.status, statusError: error } });
+}
+
+async function processWebhook(b) {
+  for (const entry of b.entry || []) {
+    for (const change of entry.changes || []) {
+      if (change.field !== 'messages') continue;
+      const value = change.value || {};
+      for (const msg of value.messages || []) {
+        const contact = (value.contacts || []).find(c => c.wa_id === msg.from) || value.contacts?.[0];
+        try { await handleMessage(msg, contact); }
+        catch (err) { logger.error('Stella: message handling failed', { id: msg.id, error: err.message, stack: err.stack }); }
+      }
+      for (const st of value.statuses || []) {
+        try { await handleStatus(st); }
+        catch (err) { logger.warn('Stella: status update failed', { id: st.id, error: err.message }); }
+      }
+    }
+  }
+}
+
 // ===== Unified endpoint =====
 router.post('/whatsapp', async (req, res) => {
   try {
-    const b = req.body || {};
+    if (!validateMetaSignature(req)) {
+      logger.warn('Stella: rejected request with a bad or missing Meta signature', { ip: req.ip, secretConfigured: !!APP_SECRET });
+      return res.status(401).send('');
+    }
+    const b = parseBody(req);
+    if (!b) return res.status(400).send('');
 
     // 1) Health check (unencrypted)
     if (!b.encrypted_aes_key && String(b.action || '').toLowerCase() === 'ping') {
-      if (!validateMetaSignature(req)) return res.status(401).send(''); // empty on failure
       logger.info('Flow health ping (UNENCRYPTED) @ /whatsapp');
       return sendBase64Plain(res, { data: { status: 'active' } }, 200);
     }
 
     // 2) Async error (unencrypted)
     if (!b.encrypted_aes_key && b.data?.error) {
-      if (!validateMetaSignature(req)) return res.status(401).send('');
-      logger.warn('Flow async error notification', { body: b });
+      logger.warn('Flow async error notification', { error: b.data.error });
       return sendBase64Plain(res, { data: { acknowledged: true } }, 200);
     }
 
     // 3) Encrypted (health or data_exchange)
     if (b.encrypted_aes_key && b.encrypted_flow_data && b.initial_vector) {
-      if (!validateMetaSignature(req)) return res.status(401).send('');
       if (!PRIVATE_KEY) return res.status(500).send('');
       try {
         // Decrypt key and payload
@@ -311,77 +286,13 @@ router.post('/whatsapp', async (req, res) => {
       }
     }
 
-    // --- Not a Flows call → normal WhatsApp webhook handling below ---
-    logger.info('🔔 Incoming webhook', {
-      headers: req.headers,
-      preview: JSON.stringify(b).slice(0, 600),
-      timestamp: new Date().toISOString()
-    });
-
-    const entry   = b.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const value   = changes?.value;
-
-    if (changes?.field === 'messages' && value?.messages?.[0]) {
-      const msg         = value.messages[0];
-      const messageId   = msg.id;
-      const fromWaId    = msg.from;
-      const waFrom      = toWabaId(fromWaId);
-      const contact     = value.contacts?.[0];
-      const displayName = contact?.profile?.name || 'there';
-
-      if (alreadySeen(messageId)) return res.status(200).json({ status: 'ok' });
-      rememberSeen(messageId);
-
-      const normalized = normalizePhoneNumber(fromWaId);
-      if (!isValidPhoneNumber(normalized)) {
-        logger.warn('Invalid phone; ignoring', { from: normalized || fromWaId });
-        return res.status(200).json({ status: 'ok' });
-      }
-
-      if (msg.interactive && msg.interactive.type === 'button_reply') {
-        logger.info('Button pressed (ignored for now)', { id: msg.interactive.button_reply?.id });
-        return res.status(200).json({ status: 'ok' });
-      }
-
-      if (canSendWelcome(waFrom)) {
-        await sendTypingIndicator(messageId, fromWaId);
-        await new Promise(r => setTimeout(r, 2200));
-        try {
-          await sendInteractiveWelcome(waFrom, displayName);
-          markWelcomeSent(waFrom);
-        } catch (e) {
-          logger.error('Failed to send welcome interactive', {
-            error: e.message, status: e.response?.status, data: e.response?.data
-          });
-        }
-        return res.status(200).json({ status: 'ok' });
-      }
-
-      if (!hasSentFollowUp(waFrom)) {
-        await sendTypingIndicator(messageId, fromWaId);
-        await new Promise(r => setTimeout(r, 2200));
-        const followUp = `🤖 Click the button and we can get right into it, ${displayName}.`;
-        try {
-          await sendTextMessage(waFrom, followUp);
-          markFollowUpSent(waFrom);
-        } catch (e) {
-          logger.error('Failed to send follow-up text', {
-            error: e.message, status: e.response?.status, data: e.response?.data
-          });
-        }
-        return res.status(200).json({ status: 'ok' });
-      }
-
-      return res.status(200).json({ status: 'ok' });
-    }
-
-    // Status/other
-    return res.status(200).json({ status: 'ok' });
+    // --- Not a Flows call → messages and statuses: acknowledge first, then handle ---
+    res.status(200).json({ status: 'ok' });
+    processWebhook(b).catch(err => logger.error('Stella: webhook processing failed', { error: err.message, stack: err.stack }));
 
   } catch (err) {
     logger.error('Webhook error', { error: err.message, stack: err.stack });
-    return res.status(200).json({ status: 'error' });
+    if (!res.headersSent) return res.status(200).json({ status: 'error' });
   }
 });
 
