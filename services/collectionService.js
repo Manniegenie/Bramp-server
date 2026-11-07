@@ -673,6 +673,41 @@ async function deactivateVirtualAccount(uid) {
     };
   }
 }
+/**
+ * Live Glyde business wallet balance (admin deposits view).
+ */
+async function checkWalletBalance(currency) {
+  try {
+    const client = getCollectionClient();
+    const res = await client.get('/v1/check-balance', { params: currency ? { currency } : {} });
+    return { success: true, data: res?.data?.data || res?.data };
+  } catch (err) {
+    logger.error('Glyde check wallet balance failed', {
+      httpStatus: err.response?.status,
+      providerBody: err.response?.data,
+    });
+    return {
+      success: false,
+      statusCode: err.response?.status || 500,
+      message: err.response?.data?.message || err.message,
+    };
+  }
+}
+
+/**
+ * Pull the array of transaction items out of a Glyde list response. The
+ * nesting varies by endpoint (ZeusODX confirmed { transactions: { data: [...] } }
+ * for GET /v1/transactions), so every plausible shape is tried.
+ */
+function extractGlydeTransactionList(raw) {
+  const candidate = raw?.transactions?.data
+    || raw?.data?.data
+    || raw?.data
+    || raw?.transactions
+    || raw?.items
+    || raw;
+  return Array.isArray(candidate) ? candidate : [];
+}
 
 module.exports = {
   initializeCollection,
@@ -685,4 +720,6 @@ module.exports = {
   getVirtualAccount,
   getVirtualAccountTransactions,
   deactivateVirtualAccount,
+  checkWalletBalance,
+  extractGlydeTransactionList,
 };

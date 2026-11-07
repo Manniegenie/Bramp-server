@@ -574,8 +574,121 @@ async function sendTawkMessageNotify({ visitorName, visitorEmail, message, chatI
   return { success: failed.length < adminEmails.length };
 }
 
+// === Glyde deposit outcome emails (ported from ZeusODX) ===
+
+function formatNaira(amount) {
+  return `₦${Number(amount || 0).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+async function sendDepositNameMismatchEmail(to, name, amount, currency, reference, payerName) {
+  const templateId = safeParseTemplateId(process.env.BREVO_TEMPLATE_DEPOSIT_NAME_MISMATCH);
+  if (!templateId) throw new Error('Deposit name-mismatch email template ID not configured');
+  return sendEmail({
+    to, name, templateId,
+    params: {
+      username: String(name || 'User'),
+      amountWithCurrency: formatNaira(amount),
+      reference: String(reference || ''),
+      date: formatDate(new Date()),
+      payerName: String(payerName || 'the sender'),
+    }
+  });
+}
+
+async function sendDepositLimitExceededEmail(to, name, amount, currency, reference, limit) {
+  const templateId = safeParseTemplateId(process.env.BREVO_TEMPLATE_DEPOSIT_LIMIT_EXCEEDED);
+  if (!templateId) throw new Error('Deposit limit-exceeded email template ID not configured');
+  return sendEmail({
+    to, name, templateId,
+    params: {
+      username: String(name || 'User'),
+      amountWithCurrency: formatNaira(amount),
+      limitWithCurrency: formatNaira(limit),
+      reference: String(reference || ''),
+      date: formatDate(new Date()),
+    }
+  });
+}
+
+async function sendDepositFeeShortfallEmail(to, name, grossAmount, feeAmount, currency, reference) {
+  const templateId = safeParseTemplateId(process.env.BREVO_TEMPLATE_DEPOSIT_FEE_SHORTFALL);
+  if (!templateId) throw new Error('Deposit fee-shortfall email template ID not configured');
+  return sendEmail({
+    to, name, templateId,
+    params: {
+      username: String(name || 'User'),
+      amountWithCurrency: formatNaira(grossAmount),
+      feeWithCurrency: formatNaira(feeAmount),
+      reference: String(reference || ''),
+      date: formatDate(new Date()),
+    }
+  });
+}
+
+async function sendDepositRejectedEmail(to, name, amount, currency, reference) {
+  const templateId = safeParseTemplateId(process.env.BREVO_TEMPLATE_DEPOSIT_REJECTED);
+  if (!templateId) throw new Error('Deposit rejected email template ID not configured');
+  return sendEmail({
+    to, name, templateId,
+    params: {
+      username: String(name || 'User'),
+      amountWithCurrency: formatNaira(amount),
+      reference: String(reference || ''),
+      date: formatDate(new Date()),
+    }
+  });
+}
+
+/**
+ * Notify giftcard admins that a Glyde naira (NGNB) deposit was credited.
+ * Never throws - logs failures.
+ */
+async function sendGlydeDepositAdminNotify({ username, userId, grossAmount, feeAmount, creditedAmount, reference, glydeReference, accountNumber, payerName, transactionId }) {
+  const adminEmails = getGiftcardAdminEmails();
+  if (!adminEmails.length) {
+    console.warn('No recipients for Glyde deposit notify (GIFTCARD_ADMIN_EMAILS)');
+    return { success: false };
+  }
+  const reviewUrl = APP_WEB_BASE_URL ? `${APP_WEB_BASE_URL}/admin/deposits` : '';
+  const results = await Promise.allSettled(
+    adminEmails.map(admin => {
+      const email = new brevo.SendSmtpEmail();
+      email.to = [{ email: admin.email, name: admin.name }];
+      email.sender = { email: SENDER_EMAIL, name: SENDER_NAME };
+      email.subject = `New Glyde naira deposit: ${formatNaira(creditedAmount)} — ${username || userId}`;
+      email.htmlContent = `
+        <div style="font-family:Arial,sans-serif;font-size:14px;color:#111">
+          <h2 style="margin:0 0 12px">New Glyde Naira Deposit</h2>
+          <table cellpadding="6" style="border-collapse:collapse">
+            <tr><td><b>User</b></td><td>${username || ''} (${userId || ''})</td></tr>
+            <tr><td><b>Credited</b></td><td>${formatNaira(creditedAmount)} NGNB</td></tr>
+            <tr><td><b>Gross</b></td><td>${formatNaira(grossAmount)}</td></tr>
+            <tr><td><b>Fee</b></td><td>${formatNaira(feeAmount)}</td></tr>
+            <tr><td><b>Payer name</b></td><td>${payerName || 'N/A'}</td></tr>
+            <tr><td><b>Virtual account</b></td><td>${accountNumber || 'N/A'}</td></tr>
+            <tr><td><b>Reference</b></td><td>${reference || ''}</td></tr>
+            <tr><td><b>Glyde ref</b></td><td>${glydeReference || ''}</td></tr>
+            <tr><td><b>Txn ID</b></td><td>${transactionId || ''}</td></tr>
+            <tr><td><b>Time</b></td><td>${formatDate(new Date())}</td></tr>
+          </table>
+          ${reviewUrl ? `<p style="margin-top:14px"><a href="${reviewUrl}">View in admin</a></p>` : ''}
+          <p style="color:#666;font-size:12px;margin-top:14px">${COMPANY_NAME} — automated alert</p>
+        </div>`;
+      return apiInstance.sendTransacEmail(email);
+    })
+  );
+  const failed = results.filter(r => r.status === 'rejected');
+  failed.forEach(r => console.error('Glyde deposit admin notify failed:', r.reason?.message));
+  return { success: failed.length < adminEmails.length };
+}
+
 module.exports = {
   sendDepositEmail,
+  sendDepositNameMismatchEmail,
+  sendDepositLimitExceededEmail,
+  sendDepositFeeShortfallEmail,
+  sendDepositRejectedEmail,
+  sendGlydeDepositAdminNotify,
   sendWithdrawalEmail,
   sendUtilityEmail,
   sendGiftcardEmail,

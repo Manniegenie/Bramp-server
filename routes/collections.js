@@ -71,7 +71,12 @@ router.post('/virtual-accounts', async (req, res) => {
       return res.status(400).json({ success: false, message: 'BVN is required for a static virtual account' });
     }
 
-    const reference = `bramp-va-${userId}-${type}`;
+    // Includes a timestamp so re-creating after a deactivation never collides
+    // with the prior (now-inactive) record's reference - both our unique
+    // index on GlydeVirtualAccount.reference and Glyde's API reject a reused
+    // reference, even for a deactivated account (confirmed in ZeusODX
+    // production 2026-09-28: "account with this reference already exists").
+    const reference = `bramp-va-${userId}-${type}-${Date.now()}`;
 
     const result = await createVirtualAccount({
       type,

@@ -589,6 +589,8 @@ const AdminKYCRoutes = require("./adminRoutes/kyc");
 const KYCBypassRoutes = require("./adminRoutes/kyc-bypass");
 const adminRequire2FA = require("./middleware/adminRequire2FA");
 const AdminNombadepositRoutes = require("./adminRoutes/Nombadeposit");
+const adminDepositsRoutes = require("./adminRoutes/deposits");
+const glydeDepositReviewRoutes = require("./adminRoutes/glydeDepositReview");
 const AdminWithdrawalsRoutes = require("./adminRoutes/withdrawals");
 const scheduledNotificationRoutes = require("./adminRoutes/scheduledNotifications");
 const scheduledGiftCardNotificationRoutes = require("./adminRoutes/scheduledGiftCardNotifications");
@@ -680,6 +682,9 @@ app.use("/admin/kyc-bypass", authenticateAdminToken, requireAdmin, KYCBypassRout
 app.use("/deleteuser", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, deleteuserRoutes);
 app.use("/fund", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, FunduserRoutes);
 app.use("/admin/Nombadeposit", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, AdminNombadepositRoutes);
+// Glyde virtual account deposits - same gates as ZeusODX
+app.use("/admin/deposits", authenticateAdminToken, requireModerator, adminDepositsRoutes);
+app.use("/admin/glyde-review", authenticateAdminToken, requireAdmin, requireManageBalances, adminRequire2FA, glydeDepositReviewRoutes);
 app.use("/admin/withdrawals", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, AdminWithdrawalsRoutes);
 app.use("/unlockaccount", authenticateAdminToken, requireSuperAdmin, adminRequire2FA, unlockaccountRoutes);
 app.use("/delete-pin", authenticateAdminToken, requireSuperAdmin, deletepinRoutes);

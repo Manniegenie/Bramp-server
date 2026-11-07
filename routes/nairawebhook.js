@@ -3,8 +3,8 @@ const router = express.Router();
 const crypto = require('crypto');
 const User = require('../models/user');
 const Transaction = require('../models/transaction');
-const GlydeVirtualAccount = require('../models/glydeVirtualAccount');
 const { updateUserBalance } = require('../services/portfolio');
+const { creditGlydeDepositIfNeeded } = require('../services/glydeDepositCrediting');
 const logger = require('../utils/logger');
 
 /**
@@ -306,125 +306,61 @@ const validateGlydeWebhookSignature = (req, res, next) => {
 
 /**
  * @route   POST /ngnbwebhook/glyde/collection
- * @desc    Credit a user's balance when money arrives - either a hosted
- *          checkout payment (routes/collections.js /initialize) or an
- *          unsolicited Virtual Account deposit (models/glydeVirtualAccount.js).
- *          Handles collection.success / collection.failed per Glyde's docs.
+ * @desc    Money arriving on a Glyde virtual account: a Metusela on-ramp
+ *          order, or a Bramp user's dedicated account (credited to NGNB via
+ *          services/glydeDepositCrediting.js, same rules as ZeusODX).
  * @access  Webhook (signature validated)
  */
 router.post('/glyde/collection', validateGlydeWebhookSignature, async (req, res) => {
-  const body = req.body;
+  // Parse the exact bytes the signature was checked against rather than
+  // relying on express.json, which runs after the raw-body capture above.
+  let body;
+  try {
+    body = req.rawBody ? JSON.parse(req.rawBody) : req.body;
+  } catch (parseErr) {
+    logger.warn('Glyde collection webhook: invalid JSON payload', { error: parseErr.message });
+    return res.status(400).json({ error: 'Invalid JSON payload' });
+  }
 
+  // Summary only - the full payload carries the depositor's bank account
+  // number/email; creditGlydeDepositIfNeeded logs full detail where it matters.
   logger.info('Glyde collection webhook - received', {
-    event: body.event,
-    reference: body.data?.reference,
-    merchant_reference: body.data?.merchant_reference,
-    status: body.data?.status,
-    amount: body.data?.amount,
+    event: body?.event,
+    uid: body?.data?.uid,
+    amount: body?.data?.amount,
+    payerAccountName: body?.data?.payer?.account_name,
+    payeeReference: body?.data?.payee?.reference,
   });
 
   // Respond immediately per Glyde's documented best practice, then process -
-  // everything below is idempotent on data.reference, so a retry (Glyde
-  // retries on any non-2xx) is safe even if this instance restarts mid-way.
+  // everything below is idempotent, so a retry (Glyde retries on any non-2xx)
+  // is safe even if this instance restarts mid-way.
   res.status(200).json({ success: true });
 
   try {
-    const { event, data } = body;
+    const { event, data } = body || {};
     if (!event || !data) {
-      logger.warn('Glyde collection webhook: invalid payload structure', body);
+      logger.warn('Glyde collection webhook: invalid payload structure', { event });
       return;
     }
 
-    // Metusela on-ramp orders first: it understands Glyde's real virtual-
-    // account payloads (virtual_account.funded, data.payee.reference), which
-    // the Bramp checks below would drop as "missing required fields".
+    // Metusela on-ramp orders first (matched by reference, uid or account number).
     if (await require('../services/metuselaOnramp').handleGlydeEvent(event, data)) {
       return;
     }
 
-    const { reference: glydeReference, merchant_reference: merchantReference, amount, status } = data;
-    if (!glydeReference || !merchantReference || !amount) {
-      logger.warn('Glyde collection webhook: missing required fields', { glydeReference, merchantReference, amount });
-      return;
-    }
-
-    if (event !== 'collection.success' && event !== 'collection.failed') {
+    // virtual_account.funded is the real event for a VA deposit (confirmed
+    // against ZeusODX production payloads); collection.success is kept in
+    // case Glyde also sends it.
+    if (event !== 'virtual_account.funded' && event !== 'collection.success') {
       logger.info('Glyde collection webhook: ignoring unhandled event', { event });
       return;
     }
 
-    // Idempotency: has this exact Glyde reference already been processed?
-    const alreadyProcessed = await Transaction.findOne({ 'metadata.glyde_reference': glydeReference });
-    if (alreadyProcessed) {
-      logger.info('Glyde collection webhook: already processed, skipping', { glydeReference, merchantReference });
-      return;
-    }
-
-    // This route only handles Virtual Account deposits - merchant_reference
-    // matches a VA's customer reference (bramp-va-{userId}-{type}), which is
-    // recurring/unsolicited so there's never a pre-existing pending
-    // transaction to update, unlike a one-shot checkout. (routes/buy.js also
-    // calls initializeCollection for its own hosted-checkout payment step,
-    // but tracks that via ChatbotTransaction/webhookRef, not this route -
-    // its payment-confirmed handling doesn't exist yet, see routes/buy.js.)
-    const account = await GlydeVirtualAccount.findOne({ reference: merchantReference });
-    if (!account) {
-      // Not a Bramp user's account — it may be a Metusela on-ramp order
-      // (dynamic account issued via routes/metusela.js).
-      if (await require('../services/metuselaOnramp').handleGlydeCollection({ event, merchantReference, glydeReference, amount })) {
-        return;
-      }
-      logger.warn('Glyde collection webhook: no virtual account matches merchant_reference', {
-        merchantReference,
-        glydeReference,
-        event,
-      });
-      return;
-    }
-
-    if (event === 'collection.failed') {
-      logger.info('Glyde virtual account deposit failed', { accountUid: account.uid, merchantReference, glydeReference });
-      return;
-    }
-
-    // event === 'collection.success'
-
-    const user = await User.findById(account.userId);
-    if (!user) {
-      logger.error('Glyde collection webhook: user not found for virtual account', {
-        accountUid: account.uid,
-        userId: account.userId,
-      });
-      return;
-    }
-
-    const creditedAmount = Number(amount);
-    const transaction = await Transaction.create({
-      userId: user._id,
-      type: 'DEPOSIT',
-      currency: 'NGNB',
-      amount: creditedAmount,
-      status: 'SUCCESSFUL',
-      source: 'BANK',
-      reference: `${merchantReference}-${glydeReference}`,
-      narration: `Deposit via virtual account ${account.accountNumber}`,
-      metadata: {
-        glyde_reference: glydeReference,
-        glyde_status: status,
-        virtual_account_uid: account.uid,
-        webhook_received_at: new Date(),
-      },
-    });
-
-    await updateUserBalance(user._id, 'NGNB', creditedAmount);
-    logger.info('Glyde virtual account deposit credited', {
-      transactionId: transaction._id,
-      userId: user._id,
-      accountUid: account.uid,
-      amount: creditedAmount,
-    });
+    const result = await creditGlydeDepositIfNeeded(data);
+    logger.info('Glyde collection webhook: processed', { event, outcome: result.outcome });
   } catch (error) {
-    logger.error('Glyde collection webhook processing failed:', { error: error.message, stack: error.stack, body });
+    logger.error('Glyde collection webhook processing failed:', { error: error.message, stack: error.stack });
   }
 });
 
