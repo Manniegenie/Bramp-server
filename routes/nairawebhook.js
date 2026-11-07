@@ -349,6 +349,11 @@ router.post('/glyde/collection', validateGlydeWebhookSignature, async (req, res)
       return;
     }
 
+    // Storefront buy orders (one-time accounts, matched the same way).
+    if (await require('../services/storefrontBuy').handleGlydeEvent(event, data)) {
+      return;
+    }
+
     // virtual_account.funded is the real event for a VA deposit (confirmed
     // against ZeusODX production payloads); collection.success is kept in
     // case Glyde also sends it.

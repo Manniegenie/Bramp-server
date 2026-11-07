@@ -54,9 +54,12 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
   - Cost guard: over 40 customer messages an hour → polite limit, Claude not called. History is the last 20 text messages.
   - Uses the installed `@anthropic-ai/sdk` 0.32.1 (same as `AI/Chatbot.js`). Newer fields are passed through in the body; the beta goes as a header.
   - Brought forward from M10: `models/storefrontRateCard.js` (fixed rates only) and `GET`/`PUT /storefront/rates` for desks.
-- [ ] **M8. Webhooks hand storefront events over**, one at a time:
-  - Glyde payments (`nairawebhook.js`)
-  - Obiex withdrawals (`obiexwebhooktrx.js`, `chatbotwebhook.js`)
+- [~] **M8. Webhooks hand storefront events over.** Committed locally, **not deployed**. Tested on the three real webhook routes with real signatures on a throwaway local Mongo (Obiex, Glyde deactivation and the trader's webhook faked): 18/18 checks. All earlier suites still pass.
+  - Glyde payments (`nairawebhook.js`): `storefrontBuy.handleGlydeEvent` straight after Metusela's and before the Bramp user deposit crediting. It only matches storefront orders (reference, one-time account uid or account number); anything else falls through unchanged.
+  - Obiex withdrawals (`obiexwebhooktrx.js`, `chatbotwebhook.js`): `storefrontBuy.handleObiexWithdrawal` added after Metusela's two handlers. A Bramp user's own withdrawal is found first and never reaches it. Storefront payouts don't create a Bramp `Transaction`.
+  - Checked: payment → payout → completed → margin credited once; Glyde and Obiex retries change nothing; a failed payout is marked and the trader told; unknown withdrawal ids answer as before (404 on `/webhook`, ignored on `/Chatbotwebhook`).
+  - If Obiex reports a payout before its id is saved, the webhook answers 404 and Obiex retries (same as Metusela).
+  - To switch on: deploy, then watch the first real storefront order through the logs.
 - [ ] **M9. Buy on Stella, end to end:**
   - quote → PIN through a Flow → Glyde account → payment → crypto sent → webhook to the desk
 - [ ] **M10. Rate cards and reservations.** Fixed-rate cards and `PUT /storefront/rates` done early in M7. Still to do: reference price plus margin, stale-rate and low-balance auto-pause, buy rate never below Bramp's cost plus fee, reservations, gift card rate cards.
@@ -126,8 +129,9 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
   - [x] `GET`/`PUT /storefront/rates` (M7)
 - [ ] `routes/storefrontRates.js`, `storefrontSell.js`, `storefrontGiftcard.js`, `storefrontSwitch.js`
 - [x] `routes/stellaVerify.js`: one-time KYC link token → `biometricVerification` (mounted at `/stella-verify`, no login; `https://bramp.shop` added to CORS)
-- [ ] `routes/nairawebhook.js`: pass Glyde payments to storefront buys
-- [ ] `routes/obiexwebhooktrx.js`, `routes/chatbotwebhook.js`: pass withdrawals and sell deposits to storefront
+- [x] `routes/nairawebhook.js`: pass Glyde payments to storefront buys (M8)
+- [x] `routes/obiexwebhooktrx.js`, `routes/chatbotwebhook.js`: pass withdrawals to storefront (M8)
+  - [ ] sell deposits (M11)
 - [x] `adminRoutes/storefront.js`
   - [ ] add sells, gift cards, refunds, rate cards, Stella conversations
 - [x] `auth/storefrontAuth.js`, `auth/storefrontPlatformAuth.js`
@@ -189,3 +193,4 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - **2026-11-06:** bramp.shop `/verify` page committed locally (bramp-storefront `52796d9`). M5 stays `[~]` until it's deployed and checked on a phone. Next: M6 (desk routing, sticky desk).
 - **2026-11-06:** M6 committed locally (`AI/stellaRouter.js`, desk fields on `stellaCustomer`/`stellaConversation`, wired into `AI/whatsapp.js`). For now a verified customer with an active desk gets "You're trading with X. Quotes and trading open here soon." M7 (Claude agent) replaces that. Next: M7.
 - **2026-11-06:** M7 committed locally (`AI/stellaAgent.js`, `models/storefrontRateCard.js`, `GET`/`PUT /storefront/rates`, agent wired into `AI/whatsapp.js`). Stays `[~]` until one live conversation with the real Claude API. Next: M8 (hand Glyde and Obiex webhook events to storefront; live payment paths, one at a time, diff shown first).
+- **2026-11-07:** The user's Glyde deposit work committed as theirs (`35d806f`) before M8, so M8 builds on it. M8 committed locally: one handover line in each of the three webhooks. Stays `[~]` until deployed and the first real order is watched. Next: M9 (buy on Stella end to end).

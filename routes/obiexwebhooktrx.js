@@ -251,10 +251,11 @@ router.post('/transaction', webhookAuth, async (req, res) => {
       transaction = await Transaction.findOne({ obiexTransactionId: transactionId });
       
       // Not a Bramp user's withdrawal — it may be a Metusela one (on-ramp
-      // payout, user withdrawal or float top-up).
+      // payout, user withdrawal or float top-up) or a storefront payout.
       if (!transaction && (
         await require('../services/metuselaOnramp').handleObiexWithdrawal({ transactionId, status, hash })
         || await require('../services/metuselaWallet').handleObiexWithdrawal({ transactionId, status, hash, address })
+        || await require('../services/storefrontBuy').handleObiexWithdrawal({ transactionId, status, hash })
       )) {
         return res.status(200).json({ success: true });
       }

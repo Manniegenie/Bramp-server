@@ -363,6 +363,7 @@ router.post('/transaction', webhookAuth, async (req, res) => {
     if (type === 'WITHDRAWAL' && (
       await require('../services/metuselaOnramp').handleObiexWithdrawal({ transactionId, status, hash })
       || await require('../services/metuselaWallet').handleObiexWithdrawal({ transactionId, status, hash, address })
+      || await require('../services/storefrontBuy').handleObiexWithdrawal({ transactionId, status, hash })
     )) {
       return res.status(200).json({ success: true });
     }
