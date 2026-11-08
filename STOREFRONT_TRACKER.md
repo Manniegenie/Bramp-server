@@ -228,6 +228,8 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
   - Flows (drafts):
     - "Stella sign-up" `28903003975994624` → `STELLA_SIGNUP_FLOW_ID`. Endpoint active, health check passed.
     - "Stella identity" `4670154319909818` → `STELLA_KYC_FLOW_ID`.
+    - "Stella sign-in" `3406382872896915` → `STELLA_SIGNIN_FLOW_ID`. Endpoint active, health check passed.
+    - Publish is blocked so far; likely business verification and/or the app still in Development mode. Testing in draft.
     - `STELLA_FLOW_MODE=draft` until both are published. A published Flow can't be edited; clone it instead.
 - Local `.env` has no Obiex settings, so `services/networkService.js` (and the storefront and Metusela code) can't load on this PC without a placeholder `OBIEX` base URL.
 
