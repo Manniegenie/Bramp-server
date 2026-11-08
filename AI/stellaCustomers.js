@@ -27,13 +27,14 @@ const KYCBlacklist = require('../models/KYCBlacklist');
 const StellaCustomer = require('../models/stellaCustomer');
 const StellaConversation = require('../models/stellaConversation');
 const { generateUniqueUsername } = require('../routes/passwordpin');
-const { sendOtpEmail } = require('../services/EmailService');
+const { sendEmailVerificationOTP } = require('../services/EmailService');
 const sender = require('./stellaSender');
 const stellaKyc = require('./stellaKyc');
 const flowTokens = require('./stellaFlowTokens');
 const logger = require('../utils/logger');
 
 const CODE_TTL_MINUTES = 10;
+const STELLA_CHAT_URL = `https://wa.me/${process.env.STELLA_WA_NUMBER || '2349020883541'}`;
 const MAX_ATTEMPTS = 5;
 const MAX_CODES_PER_HOUR = 3;
 
@@ -152,8 +153,15 @@ async function issueCode(to, convo) {
   const recent = (convo.signup.codesSentAt || []).filter((d) => d.getTime() > hourAgo);
   if (recent.length >= MAX_CODES_PER_HOUR) return { ok: false, error: 'LIMIT' };
   const code = crypto.randomInt(0, 1000000).toString().padStart(6, '0');
+  // Linking has no name step: greet them by the account's name.
+  const name = convo.signup.firstname
+    || (convo.signup.linkUserId && (await User.findById(convo.signup.linkUserId).select('firstname'))?.firstname)
+    || 'there';
   try {
-    await sendOtpEmail(convo.signup.email, convo.signup.firstname || 'there', code, CODE_TTL_MINUTES);
+    // The same code email as the Bramp app's email verification and PIN reset.
+    await sendEmailVerificationOTP(convo.signup.email, name, code, CODE_TTL_MINUTES, {
+      ctaText: 'Back to WhatsApp', verifyUrl: STELLA_CHAT_URL, appDeepLink: STELLA_CHAT_URL,
+    });
   } catch (err) {
     logger.error('Stella: code email failed', { waId: sender.mask(to), error: err.message });
     return { ok: false, error: 'EMAIL_FAILED' };
