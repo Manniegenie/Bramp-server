@@ -234,6 +234,10 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
     - "Stella sign-in" `3406382872896915` → `STELLA_SIGNIN_FLOW_ID`. Endpoint active, health check passed.
     - Publishing needs the app's webhook subscribed to the `flows` field as well as `messages`. Meta's `health_status` said so; the Manager page showed an empty list. `AI/whatsapp.js` logs those alerts.
     - `STELLA_FLOW_MODE=draft` until both are published. A published Flow can't be edited; clone it instead.
+    - Publishing still fails: "Blocked by Integrity" (139000/4233020). Meta support's reasons (2026-11-08):
+      1. App 982500627295352 is UNAPPROVED for the WhatsApp Business API; an app review was rejected.
+      2. The account is low trust (TIER_0, ML decision BLOCK). Onboarding is 80%; the last step is "First Message Sent".
+    - Meta says no manual review is possible. The block lifts automatically once the app is approved and the account has a good messaging history.
 - Local `.env` has no Obiex settings, so `services/networkService.js` (and the storefront and Metusela code) can't load on this PC without a placeholder `OBIEX` base URL.
 
 ## Decided
@@ -251,3 +255,7 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - **2026-11-07:** The user's Glyde deposit work committed as theirs (`35d806f`) before M8, so M8 builds on it. M8 committed locally: one handover line in each of the three webhooks. Stays `[~]` until deployed and the first real order is watched. Next: M9 (buy on Stella end to end).
 - **2026-11-08:** Meta set up for Stella (see "Before deploying"). Desk voice built (`AI/stellaProfile.js`). Next: deploy on the server, set the env, test Stella from a phone.
 - **2026-11-08:** User deployed (their own pull and restart). Sign-up and KYC built as WhatsApp Flows, off until their IDs are set. Next: Flows key, create both Flows in WhatsApp Manager, test in draft from a phone.
+- **2026-11-08:** Meta support explained the publishing block (see "Before deploying"): the app review was rejected, and the account is low trust. Next:
+  1. read the rejection and resubmit;
+  2. business verification;
+  3. once `stella_account_moved_v2` is approved, send the first template message.
