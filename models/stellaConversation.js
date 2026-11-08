@@ -43,6 +43,17 @@ const stellaConversationSchema = new mongoose.Schema({
     attempts: { type: Number, default: 0 }, // wrong codes for the current code
     codesSentAt: { type: [Date], default: [] }, // for the per-hour limit
   },
+
+  // The WhatsApp Flow last sent (AI/stellaFlowTokens.js). Its token is the
+  // only thing Meta sends back with a Flow's screens; only the hash is kept,
+  // and a new Flow replaces the old one.
+  flow: {
+    tokenHash: { type: String, default: null },
+    purpose: { type: String, enum: ['SIGNUP', 'KYC', null], default: null },
+    expiresAt: { type: Date, default: null },
+  },
 }, { timestamps: true });
+
+stellaConversationSchema.index({ 'flow.tokenHash': 1 }, { sparse: true });
 
 module.exports = mongoose.models.StellaConversation || mongoose.model('StellaConversation', stellaConversationSchema);

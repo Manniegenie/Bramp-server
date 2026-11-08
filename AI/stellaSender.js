@@ -81,4 +81,56 @@ async function sendLink(to, body, label, url) {
   return result;
 }
 
-module.exports = { markReadWithTyping, sendText, sendButtons, sendLink, waDigits, mask };
+/**
+ * A WhatsApp Flow (a form inside the chat). It opens on `screen` with `data`;
+ * `token` comes back with every screen (AI/stellaFlowTokens.js). cta at most
+ * 30 characters, no emoji.
+ */
+async function sendFlow(to, { body, cta, flowId, token, screen, data, mode = 'published' }) {
+  const result = await post({
+    to: waDigits(to),
+    type: 'interactive',
+    interactive: {
+      type: 'flow',
+      body: { text: body },
+      action: {
+        name: 'flow',
+        parameters: {
+          flow_message_version: '3',
+          flow_id: flowId,
+          flow_token: token,
+          flow_cta: cta,
+          flow_action: 'navigate',
+          flow_action_payload: { screen, ...(data && Object.keys(data).length ? { data } : {}) },
+          mode,
+        },
+      },
+    },
+  });
+  await logOutbound(to, 'interactive', body, result);
+  return result;
+}
+
+/**
+ * Downloads media a customer sent (e.g. a Flow's photo) by its media id:
+ * Meta gives a short-lived URL, fetched with the same token. Resolves to
+ * { ok, buffer, mimeType, error } and never throws.
+ */
+async function downloadMedia(mediaId, { maxBytes = 10 * 1024 * 1024 } = {}) {
+  const token = process.env.META_ACCESS_TOKEN;
+  if (!token) return { ok: false, error: 'NOT_CONFIGURED' };
+  if (!/^\d{5,30}$/.test(String(mediaId || ''))) return { ok: false, error: 'BAD_MEDIA_ID' };
+  try {
+    const auth = { Authorization: `Bearer ${token}` };
+    const meta = await axios.get(`https://graph.facebook.com/${GRAPH_VERSION}/${mediaId}`, { timeout: 10000, headers: auth });
+    if (Number(meta.data?.file_size) > maxBytes) return { ok: false, error: 'TOO_LARGE' };
+    const file = await axios.get(meta.data.url, { timeout: 20000, headers: auth, responseType: 'arraybuffer', maxContentLength: maxBytes });
+    return { ok: true, buffer: Buffer.from(file.data), mimeType: meta.data?.mime_type || file.headers['content-type'] || null, error: null };
+  } catch (err) {
+    const error = err.response?.data?.error?.message || err.message;
+    logger.error('Stella: media download failed', { status: err.response?.status, error });
+    return { ok: false, error };
+  }
+}
+
+module.exports = { markReadWithTyping, sendText, sendButtons, sendLink, sendFlow, downloadMedia, waDigits, mask };

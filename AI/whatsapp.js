@@ -21,6 +21,7 @@ const customers = require('./stellaCustomers');
 const stellaKyc = require('./stellaKyc');
 const deskRouter = require('./stellaRouter');
 const agent = require('./stellaAgent');
+const flows = require('./stellaFlows');
 const logger = require('../utils/logger');
 
 // ===== ENV =====
@@ -112,32 +113,6 @@ function sendBase64Plain(res, obj, status = 200) {
   return res.status(status).send(b64);
 }
 
-// ===== Simple flow handlers (your business logic goes here) =====
-// Placeholders: neither checks anything yet. Don't wire their result to
-// anything until they're real (tracker: AI/whatsapp.js).
-const phoneRe = /^\+?\d{10,15}$/;
-const pinRe   = /^\d{6}$/;
-function success(flow_token, extraParams = {}) {
-  return { screen: 'SUCCESS', data: { extension_message_response: { params: { flow_token, ...extraParams } } } };
-}
-const flowHandlers = {
-  '/signin/signin-pin': async (form, flow_token) => {
-    const phonenumber = String(form.phonenumber || '');
-    const pin = String(form.passwordpin || '').padStart(6, '0');
-    if (!phoneRe.test(phonenumber)) return { screen: 'SIGN_IN', data: { error_message: 'Enter a valid phone number.' } };
-    if (!pinRe.test(pin))           return { screen: 'SIGN_IN', data: { error_message: 'PIN must be exactly 6 digits.' } };
-    // TODO: real auth
-    return success(flow_token, { login: 'ok' });
-  },
-  '/signup/add-user': async (form, flow_token) => {
-    const { firstname, lastname, email, phonenumber } = form || {};
-    if (!firstname || !lastname || !email || !phonenumber) return { screen: 'SIGN_UP', data: { error_message: 'Fill all required fields.' } };
-    if (!phoneRe.test(phonenumber)) return { screen: 'SIGN_UP', data: { error_message: 'Invalid phone number.' } };
-    // TODO: real create-user
-    return success(flow_token, { signup: 'ok' });
-  }
-};
-
 // ===== Messages =====
 
 /** Records an inbound message; false if we've already handled it (Meta retry). */
@@ -169,6 +144,11 @@ async function handleMessage(msg, contact) {
   logger.info('Stella: message in', { id: msg.id, from: sender.mask(waId), type: msg.type });
 
   await sender.markReadWithTyping(msg.id);
+  // A completed Flow (the identity form's answers) comes in as a message.
+  if (flows.isFlowCompletion(msg)) {
+    await flows.handleCompletion(waId, msg);
+    return;
+  }
   const customer = await customers.handleIncoming({
     waId,
     text: msg.text?.body ?? null,
@@ -266,25 +246,13 @@ router.post('/whatsapp', async (req, res) => {
           return res.status(200).send(encryptedResponse);
         }
 
-        // Normal data-exchange routing
+        // A Flow's screen (AI/stellaFlows.js answers with the next one)
         let responsePayload;
-        if (action === 'init' || action === 'back') {
-          responsePayload = { screen: 'SIGN_IN', data: {} };
-        } else if (action === 'data_exchange') {
-          const endpoint = payload?.data?.endpoint;
-          const handler  = endpoint && flowHandlers[endpoint];
-          if (!handler) {
-            responsePayload = { screen: payload.screen || 'SIGN_IN', data: { error_message: 'Unknown action. Please try again.' } };
-          } else {
-            try {
-              responsePayload = await handler(payload.data, payload.flow_token);
-            } catch (e) {
-              logger.error('Flow handler error', { endpoint, error: e.message, stack: e.stack });
-              responsePayload = { screen: payload.screen || 'SIGN_IN', data: { error_message: 'Something went wrong. Please try again.' } };
-            }
-          }
-        } else {
-          responsePayload = { screen: 'SIGN_IN', data: { error_message: 'Unsupported action.' } };
+        try {
+          responsePayload = await flows.handleExchange(payload);
+        } catch (e) {
+          logger.error('Flow handler error', { screen: payload.screen, action, error: e.message, stack: e.stack });
+          responsePayload = { screen: payload.screen || 'NAME', data: { error_message: 'Something went wrong. Please try again.' } };
         }
 
         // Encrypt response and return Base64 text/plain

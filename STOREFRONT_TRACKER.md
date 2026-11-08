@@ -120,7 +120,9 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 
 ### Bramp-server: AI/ (Stella)
 - [x] `whatsapp.js`: the webhook (setup check, Flows encryption, messages)
-  - [ ] replace the placeholder Flow handlers (`/signin/signin-pin` accepts any PIN, so it must not be wired to anything)
+  - [x] placeholder Flow handlers replaced by `stellaFlows.js`
+- [x] `stellaFlows.js`, `stellaFlowTokens.js`, `stellaIdentity.js`, `flows/stella-signup.json`, `flows/stella-kyc.json`: sign-up and KYC as WhatsApp Flows
+  - [ ] PIN Flow (M9)
 - [x] `stellaSender.js`: the only file that calls Meta's send API
 - [x] `stellaCustomers.js`: sign-up and account linking (M4)
 - [x] `stellaKyc.js`: verify link, "verified" rule, result messages (M5)
@@ -209,3 +211,4 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - **2026-11-06:** M7 committed locally (`AI/stellaAgent.js`, `models/storefrontRateCard.js`, `GET`/`PUT /storefront/rates`, agent wired into `AI/whatsapp.js`). Stays `[~]` until one live conversation with the real Claude API. Next: M8 (hand Glyde and Obiex webhook events to storefront; live payment paths, one at a time, diff shown first).
 - **2026-11-07:** The user's Glyde deposit work committed as theirs (`35d806f`) before M8, so M8 builds on it. M8 committed locally: one handover line in each of the three webhooks. Stays `[~]` until deployed and the first real order is watched. Next: M9 (buy on Stella end to end).
 - **2026-11-08:** Meta set up for Stella (see "Before deploying"). Desk voice built (`AI/stellaProfile.js`). Next: deploy on the server, set the env, test Stella from a phone.
+- **2026-11-08:** User deployed (their own pull and restart). Sign-up and KYC built as WhatsApp Flows, off until their IDs are set. Next: Flows key, create both Flows in WhatsApp Manager, test in draft from a phone.

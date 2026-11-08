@@ -1,0 +1,80 @@
+{
+  "version": "7.3",
+  "screens": [
+    {
+      "id": "ID",
+      "title": "Verify your identity",
+      "sensitive": ["id_number"],
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          { "type": "TextBody", "text": "You only do this once. It counts for every desk on Stella." },
+          {
+            "type": "RadioButtonsGroup",
+            "name": "id_type",
+            "label": "ID type",
+            "required": true,
+            "data-source": [
+              { "id": "nin", "title": "NIN" },
+              { "id": "bvn", "title": "BVN" }
+            ]
+          },
+          {
+            "type": "TextInput",
+            "name": "id_number",
+            "label": "ID number",
+            "input-type": "text",
+            "required": true,
+            "min-chars": 11,
+            "max-chars": 11,
+            "pattern": "^[0-9]{11}$",
+            "helper-text": "11 digits"
+          },
+          {
+            "type": "Footer",
+            "label": "Continue",
+            "on-click-action": {
+              "name": "navigate",
+              "next": { "type": "screen", "name": "SELFIE" },
+              "payload": { "id_type": "${form.id_type}", "id_number": "${form.id_number}" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "SELFIE",
+      "title": "Take a selfie",
+      "terminal": true,
+      "success": true,
+      "data": {
+        "id_type": { "type": "string", "__example__": "nin" },
+        "id_number": { "type": "string", "__example__": "12345678901" }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          { "type": "TextBody", "text": "Face the camera in good light, with nothing covering your face. We compare it with the photo on your ID record." },
+          {
+            "type": "PhotoPicker",
+            "name": "selfie",
+            "label": "Selfie",
+            "description": "Use your front camera",
+            "photo-source": "camera",
+            "min-uploaded-photos": 1,
+            "max-uploaded-photos": 1,
+            "max-file-size-kb": 10240
+          },
+          {
+            "type": "Footer",
+            "label": "Submit",
+            "on-click-action": {
+              "name": "complete",
+              "payload": { "id_type": "${data.id_type}", "id_number": "${data.id_number}", "selfie": "${form.selfie}" }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -15,6 +15,11 @@
 //
 // handleIncoming() returns the StellaCustomer once the number is linked;
 // until then it runs the sign-up and returns null.
+//
+// A new number gets the sign-up as a WhatsApp Flow when one is set up
+// (AI/stellaFlows.js), and can still answer by text. Both run the same steps
+// below (setName, setEmail, issueCode, checkCode, complete), which only change
+// the conversation and say what happened; the text path adds the replies.
 const crypto = require('crypto');
 const validator = require('validator');
 const User = require('../models/user');
@@ -25,6 +30,7 @@ const { generateUniqueUsername } = require('../routes/passwordpin');
 const { sendOtpEmail } = require('../services/EmailService');
 const sender = require('./stellaSender');
 const stellaKyc = require('./stellaKyc');
+const flowTokens = require('./stellaFlowTokens');
 const logger = require('../utils/logger');
 
 const CODE_TTL_MINUTES = 10;
@@ -68,7 +74,19 @@ function parseFullName(text) {
 
 // ── Prompts ────────────────────────────────────────────────────────────────
 
-const askName = (to) => sender.sendText(to, "What's your full name, as it appears on your BVN or NIN?");
+async function askName(to) {
+  if (flowTokens.enabled('SIGNUP')) {
+    return sender.sendFlow(to, {
+      body: 'Tap below to set up your account, or just reply with your full name as it appears on your BVN or NIN.',
+      cta: 'Set up my account',
+      flowId: flowTokens.flowId('SIGNUP'),
+      token: await flowTokens.issue(to, 'SIGNUP'),
+      screen: 'NAME',
+      mode: flowTokens.mode(),
+    });
+  }
+  return sender.sendText(to, "What's your full name, as it appears on your BVN or NIN?");
+}
 const askEmail = (to, firstname) => sender.sendText(to,
   `Thanks, ${firstname}. What's your email address? I'll send a 6-digit code to confirm it, and your receipts go there too.`);
 
@@ -97,22 +115,48 @@ async function askLinkConfirm(to, convo) {
     [{ id: BTN.LINK_YES, title: "Yes, that's me" }, { id: BTN.LINK_NO, title: 'No' }]);
 }
 
-// ── Codes ──────────────────────────────────────────────────────────────────
+// ── Steps shared by text and the Flow ──────────────────────────────────────
+// Each changes the conversation and returns { ok } or { ok: false, error }.
 
-async function sendCode(to, convo) {
+/** Full name as one string ("Ada Chioma Okafor"). */
+async function setName(convo, fullName) {
+  const name = parseFullName(fullName);
+  if (!name) return { ok: false, error: 'NAME' };
+  Object.assign(convo.signup, name);
+  convo.state = 'SIGNUP_EMAIL';
+  await convo.save();
+  return { ok: true, firstname: name.firstname };
+}
+
+/** Checks the email; an email already on Bramp links that account once its code is entered. */
+async function setEmail(to, convo, raw) {
+  const email = String(raw || '').trim().toLowerCase();
+  if (!validator.isEmail(email)) return { ok: false, error: 'EMAIL' };
+  const [emailBanned, phoneBanned] = await Promise.all([
+    KYCBlacklist.isBanned('email', email),
+    KYCBlacklist.isBanned('phone', `+${to}`),
+  ]);
+  if (emailBanned || phoneBanned) {
+    logger.warn('Stella: blacklisted sign-up attempt', { waId: sender.mask(to) });
+    return { ok: false, error: 'BANNED' };
+  }
+  const existing = await User.findOne({ email }).select('_id');
+  convo.signup.email = email;
+  convo.signup.linkUserId = existing ? existing._id : null; // the code proves it's theirs
+  return { ok: true };
+}
+
+/** Emails a new 6-digit code. error: LIMIT (too many this hour) | EMAIL_FAILED. */
+async function issueCode(to, convo) {
   const hourAgo = Date.now() - 60 * 60 * 1000;
   const recent = (convo.signup.codesSentAt || []).filter((d) => d.getTime() > hourAgo);
-  if (recent.length >= MAX_CODES_PER_HOUR) {
-    await sender.sendText(to, "I've sent the most codes allowed for now. Please try again in an hour.");
-    return false;
-  }
+  if (recent.length >= MAX_CODES_PER_HOUR) return { ok: false, error: 'LIMIT' };
   const code = crypto.randomInt(0, 1000000).toString().padStart(6, '0');
   try {
     await sendOtpEmail(convo.signup.email, convo.signup.firstname || 'there', code, CODE_TTL_MINUTES);
   } catch (err) {
     logger.error('Stella: code email failed', { waId: sender.mask(to), error: err.message });
-    await sender.sendText(to, "I couldn't send the email just now. Please try again in a few minutes.");
-    return false;
+    return { ok: false, error: 'EMAIL_FAILED' };
   }
   convo.signup.codeHash = codeHash(to, code);
   convo.signup.codeExpiresAt = new Date(Date.now() + CODE_TTL_MINUTES * 60 * 1000);
@@ -120,8 +164,7 @@ async function sendCode(to, convo) {
   convo.signup.codesSentAt = [...recent, new Date()];
   convo.state = 'SIGNUP_CODE';
   await convo.save();
-  await askCode(to, convo);
-  return true;
+  return { ok: true };
 }
 
 function codeMatches(to, convo, code) {
@@ -129,6 +172,34 @@ function codeMatches(to, convo, code) {
   const a = Buffer.from(convo.signup.codeHash, 'hex');
   const b = Buffer.from(codeHash(to, code), 'hex');
   return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+/** error: FORMAT | TOO_MANY | EXPIRED | WRONG (with `left`). */
+async function checkCode(to, convo, raw) {
+  const code = String(raw || '').replace(/\s/g, '');
+  if (!/^\d{6}$/.test(code)) return { ok: false, error: 'FORMAT' };
+  if (convo.signup.attempts >= MAX_ATTEMPTS) return { ok: false, error: 'TOO_MANY' };
+  if (!convo.signup.codeExpiresAt || convo.signup.codeExpiresAt < new Date()) return { ok: false, error: 'EXPIRED' };
+  if (!codeMatches(to, convo, code)) {
+    convo.signup.attempts += 1;
+    await convo.save();
+    return { ok: false, error: 'WRONG', left: MAX_ATTEMPTS - convo.signup.attempts };
+  }
+  return { ok: true };
+}
+
+// ── Codes (text) ───────────────────────────────────────────────────────────
+
+async function sendCode(to, convo) {
+  const r = await issueCode(to, convo);
+  if (!r.ok) {
+    await sender.sendText(to, r.error === 'LIMIT'
+      ? "I've sent the most codes allowed for now. Please try again in an hour."
+      : "I couldn't send the email just now. Please try again in a few minutes.");
+    return false;
+  }
+  await askCode(to, convo);
+  return true;
 }
 
 // ── Finishing ──────────────────────────────────────────────────────────────
@@ -185,7 +256,12 @@ async function createUser(waId, s) {
   return user;
 }
 
-async function finish(to, convo) {
+/**
+ * Creates or links the Bramp account once the code is right.
+ * error: TAKEN (email or number registered meanwhile; back to the email step)
+ *      | LINKED_ELSEWHERE (that account is on another WhatsApp number).
+ */
+async function complete(to, convo) {
   const s = convo.signup;
   let userId = s.linkUserId;
   let source = 'LINKED';
@@ -201,7 +277,7 @@ async function finish(to, convo) {
         convo.state = 'SIGNUP_EMAIL';
         convo.signup.codeHash = null;
         await convo.save();
-        return sender.sendText(to, 'That email or number was just registered on Bramp. Please send a different email address.');
+        return { ok: false, error: 'TAKEN' };
       }
       throw err;
     }
@@ -211,7 +287,7 @@ async function finish(to, convo) {
     convo.state = 'NEW';
     convo.signup = {};
     await convo.save();
-    return sender.sendText(to, 'That Bramp account is already linked to another WhatsApp number. Please contact Bramp support to move it.');
+    return { ok: false, error: 'LINKED_ELSEWHERE' };
   }
 
   const customer = await StellaCustomer.create({ waId: to, userId, source });
@@ -219,11 +295,25 @@ async function finish(to, convo) {
   convo.signup = {};
   await convo.save();
   logger.info('Stella: customer ready', { waId: sender.mask(to), source });
+  return { ok: true, customer, source };
+}
+
+const LINKED_ELSEWHERE = 'That Bramp account is already linked to another WhatsApp number. Please contact Bramp support to move it.';
+
+/** What Stella says once the account is ready, then straight on to the identity check. */
+async function welcome(to, customer, source) {
   await sender.sendText(to, source === 'LINKED'
     ? "You're linked ✅ Stella now uses your Bramp account."
     : "You're set up ✅ Your Bramp account is ready.");
-  // Straight on to the one-time identity check, unless the account already has it.
   return stellaKyc.promptIfNeeded(to, customer);
+}
+
+async function finish(to, convo) {
+  const r = await complete(to, convo);
+  if (r.ok) return welcome(to, r.customer, r.source);
+  return sender.sendText(to, r.error === 'TAKEN'
+    ? 'That email or number was just registered on Bramp. Please send a different email address.'
+    : LINKED_ELSEWHERE);
 }
 
 // ── Steps ──────────────────────────────────────────────────────────────────
@@ -258,30 +348,15 @@ async function onLinkConfirm(to, convo, { replyId }) {
 }
 
 async function onName(to, convo, { text }) {
-  const name = parseFullName(text);
-  if (!name) return sender.sendText(to, 'Please send your first and last name, for example: Ada Okafor');
-  Object.assign(convo.signup, name);
-  convo.state = 'SIGNUP_EMAIL';
-  await convo.save();
-  return askEmail(to, name.firstname);
+  const r = await setName(convo, text);
+  if (!r.ok) return sender.sendText(to, 'Please send your first and last name, for example: Ada Okafor');
+  return askEmail(to, r.firstname);
 }
 
 async function onEmail(to, convo, { text }) {
-  const email = String(text || '').trim().toLowerCase();
-  if (!validator.isEmail(email)) return sender.sendText(to, "That doesn't look like an email address. Please send it again, for example: ada@gmail.com");
-
-  const [emailBanned, phoneBanned] = await Promise.all([
-    KYCBlacklist.isBanned('email', email),
-    KYCBlacklist.isBanned('phone', `+${to}`),
-  ]);
-  if (emailBanned || phoneBanned) {
-    logger.warn('Stella: blacklisted sign-up attempt', { waId: sender.mask(to) });
-    return sender.sendText(to, "Sorry, I can't open an account for you.");
-  }
-
-  const existing = await User.findOne({ email }).select('_id');
-  convo.signup.email = email;
-  convo.signup.linkUserId = existing ? existing._id : null; // the code proves it's theirs
+  const r = await setEmail(to, convo, text);
+  if (r.error === 'EMAIL') return sender.sendText(to, "That doesn't look like an email address. Please send it again, for example: ada@gmail.com");
+  if (r.error === 'BANNED') return sender.sendText(to, "Sorry, I can't open an account for you.");
   return sendCode(to, convo);
 }
 
@@ -295,21 +370,16 @@ async function onCode(to, convo, { text, replyId }) {
     return sender.sendText(to, "Sure. What's the right email address?");
   }
 
-  const code = String(text || '').replace(/\s/g, '');
-  if (!/^\d{6}$/.test(code)) return askCode(to, convo);
-  if (convo.signup.attempts >= MAX_ATTEMPTS) {
+  const r = await checkCode(to, convo, text);
+  if (r.ok) return finish(to, convo);
+  if (r.error === 'FORMAT') return askCode(to, convo);
+  if (r.error === 'TOO_MANY') {
     return sender.sendButtons(to, 'Too many wrong codes. Tap below for a new one.', [{ id: BTN.RESEND, title: 'Resend code' }]);
   }
-  if (!convo.signup.codeExpiresAt || convo.signup.codeExpiresAt < new Date()) {
+  if (r.error === 'EXPIRED') {
     return sender.sendButtons(to, 'That code has expired. Tap below for a new one.', [{ id: BTN.RESEND, title: 'Resend code' }]);
   }
-  if (!codeMatches(to, convo, code)) {
-    convo.signup.attempts += 1;
-    await convo.save();
-    const left = MAX_ATTEMPTS - convo.signup.attempts;
-    return sender.sendText(to, left > 0 ? `That code isn't right. ${left} ${left === 1 ? 'try' : 'tries'} left.` : 'That code isn\'t right. Tap "Resend code" for a new one.');
-  }
-  return finish(to, convo);
+  return sender.sendText(to, r.left > 0 ? `That code isn't right. ${r.left} ${r.left === 1 ? 'try' : 'tries'} left.` : 'That code isn\'t right. Tap "Resend code" for a new one.');
 }
 
 const STEPS = { SIGNUP_NAME: onName, SIGNUP_EMAIL: onEmail, SIGNUP_CODE: onCode, LINK_CONFIRM: onLinkConfirm };
@@ -344,4 +414,8 @@ async function handleIncoming({ waId, text, replyId, displayName }) {
   return null;
 }
 
-module.exports = { handleIncoming, parseFullName, BTN };
+module.exports = {
+  handleIncoming, parseFullName, BTN, maskEmail,
+  // For the sign-up Flow (AI/stellaFlows.js).
+  setName, setEmail, issueCode, checkCode, complete, welcome, LINKED_ELSEWHERE,
+};

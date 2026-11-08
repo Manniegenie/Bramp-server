@@ -8,13 +8,16 @@
 // gating (it scores real front-camera selfies at 0%). The selfie is taken
 // with the camera on a bramp.shop page rather than sent as a chat photo.
 //
-// Stella sends a one-time link (bramp.shop/verify?t=…) as a WhatsApp button.
-// routes/stellaVerify.js checks the token and runs the handler, then
-// reportResult() tells the customer here.
+// Stella sends the identity Flow (NIN/BVN and a camera selfie inside the
+// chat, AI/stellaFlows.js) when STELLA_KYC_FLOW_ID is set, otherwise a
+// one-time link (bramp.shop/verify?t=…) as a WhatsApp button, which
+// routes/stellaVerify.js handles. Either way reportResult() tells the
+// customer here, and the same daily limit applies.
 const crypto = require('crypto');
 const User = require('../models/user');
 const StellaCustomer = require('../models/stellaCustomer');
 const sender = require('./stellaSender');
+const flowTokens = require('./stellaFlowTokens');
 const logger = require('../utils/logger');
 
 const LINK_TTL_MINUTES = 30;
@@ -50,13 +53,32 @@ async function promptIfNeeded(waId, customer) {
 
   const sent = (customer.verifyLink?.sentAt || []).filter((d) => d.getTime() > Date.now() - 24 * 60 * 60 * 1000);
   const last = sent[sent.length - 1];
+  const useFlow = flowTokens.enabled('KYC');
   if (last && Date.now() - last.getTime() < RESEND_AFTER_MS && customer.verifyLink?.expiresAt > new Date()) {
-    await sender.sendText(waId, 'Use the verification link I just sent. It opens your camera for the selfie.');
+    await sender.sendText(waId, useFlow
+      ? 'Tap "Verify identity" in my last message. It opens your camera for the selfie.'
+      : 'Use the verification link I just sent. It opens your camera for the selfie.');
     return 'recent';
   }
   if (sent.length >= MAX_LINKS_PER_DAY) {
-    await sender.sendText(waId, "You've asked for the most verification links allowed today. Please try again tomorrow.");
+    await sender.sendText(waId, "You've tried to verify the most times allowed today. Please try again tomorrow.");
     return 'limit';
+  }
+
+  if (useFlow) {
+    // No link token: the Flow's own token (one check per Flow) is the key.
+    customer.verifyLink = { tokenHash: null, expiresAt: new Date(Date.now() + flowTokens.TOKEN_TTL_MINUTES * 60 * 1000), attempts: 0, sentAt: [...sent, new Date()] };
+    await customer.save();
+    await sender.sendFlow(waId, {
+      body: "One last step: verify your identity once. You'll need your NIN or BVN and your phone's camera for a quick selfie. It counts for every desk on Stella.",
+      cta: 'Verify identity',
+      flowId: flowTokens.flowId('KYC'),
+      token: await flowTokens.issue(waId, 'KYC'),
+      screen: 'ID',
+      mode: flowTokens.mode(),
+    });
+    logger.info('Stella: identity Flow sent', { waId: sender.mask(waId) });
+    return 'sent';
   }
 
   const token = crypto.randomBytes(32).toString('base64url'); // 43 chars
@@ -91,6 +113,9 @@ async function reportResult(customer, outcome, reason) {
   if (outcome === 'verified') {
     await StellaCustomer.updateOne({ _id: customer._id }, { $set: { 'verifyLink.tokenHash': null, 'verifyLink.expiresAt': null } });
     await sender.sendText(customer.waId, "You're verified ✅ You can now trade with any desk on Stella.");
+  } else if (outcome === 'rejected' && !customer.verifyLink?.tokenHash) {
+    // From the Flow: one check per Flow, any message brings a new one.
+    await sender.sendText(customer.waId, `I couldn't verify you: ${reason || 'the details or selfie did not match'}. Send me any message to try again.`);
   } else if (outcome === 'rejected') {
     const left = MAX_ATTEMPTS_PER_LINK - (customer.verifyLink?.attempts || 0);
     await sender.sendText(customer.waId, left > 0

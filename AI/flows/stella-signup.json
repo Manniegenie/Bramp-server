@@ -1,0 +1,80 @@
+{
+  "version": "7.3",
+  "data_api_version": "3.0",
+  "routing_model": {
+    "NAME": ["EMAIL"],
+    "EMAIL": ["CODE"],
+    "CODE": []
+  },
+  "screens": [
+    {
+      "id": "NAME",
+      "title": "Set up your account",
+      "data": {},
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          { "type": "TextBody", "text": "Enter your name exactly as it appears on your BVN or NIN." },
+          { "type": "TextInput", "name": "first_name", "label": "First name", "input-type": "text", "required": true, "max-chars": 40 },
+          { "type": "TextInput", "name": "middle_name", "label": "Middle name", "input-type": "text", "required": false, "max-chars": 40, "helper-text": "Optional" },
+          { "type": "TextInput", "name": "last_name", "label": "Last name", "input-type": "text", "required": true, "max-chars": 40 },
+          {
+            "type": "Footer",
+            "label": "Continue",
+            "on-click-action": {
+              "name": "data_exchange",
+              "payload": { "first_name": "${form.first_name}", "middle_name": "${form.middle_name}", "last_name": "${form.last_name}" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "EMAIL",
+      "title": "Your email",
+      "data": {
+        "first_name": { "type": "string", "__example__": "Ada" }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          { "type": "TextBody", "text": "We'll send a 6-digit code to confirm your email. Your receipts go there too." },
+          { "type": "TextInput", "name": "email", "label": "Email", "input-type": "email", "required": true, "max-chars": 80 },
+          {
+            "type": "Footer",
+            "label": "Send code",
+            "on-click-action": { "name": "data_exchange", "payload": { "email": "${form.email}" } }
+          }
+        ]
+      }
+    },
+    {
+      "id": "CODE",
+      "title": "Confirm your email",
+      "terminal": true,
+      "success": true,
+      "sensitive": ["code"],
+      "data": {
+        "email_masked": { "type": "string", "__example__": "a***@gmail.com" }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          { "type": "TextBody", "text": "Enter the 6-digit code we sent to" },
+          { "type": "TextBody", "text": "${data.email_masked}", "font-weight": "bold" },
+          { "type": "TextInput", "name": "code", "label": "Code", "input-type": "passcode", "required": true, "min-chars": 6, "max-chars": 6 },
+          {
+            "type": "EmbeddedLink",
+            "text": "Send a new code",
+            "on-click-action": { "name": "data_exchange", "payload": { "action": "resend" } }
+          },
+          {
+            "type": "Footer",
+            "label": "Confirm",
+            "on-click-action": { "name": "data_exchange", "payload": { "code": "${form.code}" } }
+          }
+        ]
+      }
+    }
+  ]
+}
