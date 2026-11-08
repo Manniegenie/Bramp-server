@@ -119,11 +119,12 @@ const SIGNIN_ERRORS = {
 const lockedMessage = (until) => `Too many wrong PINs. Try again after ${new Date(until).toLocaleString('en-NG', { timeZone: 'Africa/Lagos', hour: 'numeric', minute: '2-digit', day: 'numeric', month: 'short' })}, or use an email code.`;
 
 async function signinCodeData(convo) {
-  const other = convo.signup.linkUserId ? await StellaCustomer.findOne({ userId: convo.signup.linkUserId }).select('waId') : null;
-  const moving = Boolean(other && other.waId !== convo.waId);
+  const other = convo.signup.linkUserId ? await StellaCustomer.findOne({ userId: convo.signup.linkUserId }).select('waId signedOut') : null;
+  const elsewhere = customers.otherNumber(other, convo.waId);
+  const moving = Boolean(elsewhere);
   return {
     email_masked: customers.maskEmail(convo.signup.email || ''),
-    move_note: moving ? customers.moveNote(other.waId) : 'Signing in links this WhatsApp number to your Bramp account.',
+    move_note: moving ? customers.moveNote(elsewhere) : 'Signing in links this WhatsApp number to your Bramp account.',
     has_move: moving,
   };
 }

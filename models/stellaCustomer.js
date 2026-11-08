@@ -16,6 +16,13 @@ const stellaCustomerSchema = new mongoose.Schema({
   // Signed in from a new number (AI/stellaCustomers.js): the account moves
   // here with its desk; the numbers it left are kept.
   movedFrom: { type: [{ _id: false, waId: String, movedAt: Date, disputedAt: { type: Date, default: null } }], default: [] },
+  // Signed out with "sign out" (AI/stellaCustomers.js): waId is swapped for a
+  // placeholder so the number is free for another account, and the number
+  // that signed out is kept here. Signing back in clears it.
+  signedOut: {
+    at: { type: Date, default: null },
+    waId: { type: String, default: null },
+  },
   // Paused for Bramp support: the old number tapped "This wasn't me" after a
   // move. Stella serves nothing on this account until an admin clears it.
   securityHold: {

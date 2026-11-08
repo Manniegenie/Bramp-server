@@ -55,6 +55,7 @@ const codeHash = (waId, code) => sha256(`${waId}:${code}`);
 const SIGNIN_LOOSE = /\b(sign[\s-]?in|log[\s-]?in|login|signin)\b/i;
 const SIGNIN_EXACT = /^\s*(sign[\s-]?in|log[\s-]?in|login|signin)\s*[.!]?\s*$/i;
 const SIGNUP_EXACT = /^\s*(sign[\s-]?up|signup|register|create (an )?account)\s*[.!]?\s*$/i;
+const SIGNOUT_EXACT = /^\s*(sign[\s-]?out|log[\s-]?out|logout|signout)\s*[.!]?\s*$/i;
 const wantsSignIn = (text, linked) => Boolean(text) && !text.includes('@') // login@… is an email, not a request
   && (linked ? SIGNIN_EXACT.test(text) : text.length <= 80 && SIGNIN_LOOSE.test(text));
 
@@ -310,13 +311,27 @@ async function complete(to, convo) {
 
   const elsewhere = await StellaCustomer.findOne({ userId });
   if (elsewhere) {
-    const oldWaId = elsewhere.waId;
-    elsewhere.movedFrom.push({ waId: oldWaId, movedAt: new Date() });
+    // A signed-out account's number is the one it signed out on; back on that
+    // same number it's a plain sign-in, anywhere else it's a move.
+    const oldWaId = elsewhere.signedOut?.at ? elsewhere.signedOut.waId : elsewhere.waId;
+    const moved = oldWaId !== to;
+    if (moved) elsewhere.movedFrom.push({ waId: oldWaId, movedAt: new Date() });
     elsewhere.waId = to;
+    elsewhere.signedOut = { at: null, waId: null };
     await elsewhere.save();
     convo.state = 'READY';
     convo.signup = {};
     await convo.save();
+    if (!moved) {
+      logger.info('Stella: customer signed back in', { waId: sender.mask(to) });
+      return { ok: true, customer: elsewhere, source: 'LINKED' };
+    }
+    // The number it signed out on may be someone else's account by now; never
+    // tell them about this one.
+    if (await StellaCustomer.exists({ waId: oldWaId })) {
+      logger.warn('Stella: signed-out account signed in on a new number; its old number has another account, not told', { to: sender.mask(to), userId: String(userId) });
+      return { ok: true, customer: elsewhere, source: 'LINKED' };
+    }
     logger.warn('Stella: account moved to a new number', { from: sender.mask(oldWaId), to: sender.mask(to), userId: String(userId) });
     return { ok: true, customer: elsewhere, source: 'MOVED', oldWaId };
   }
@@ -447,6 +462,9 @@ async function startSignIn(to, convo) {
   return askSigninEmail(to);
 }
 
+/** The number an account is signed in on, if it's signed in and not on `to`. */
+const otherNumber = (customer, to) => (customer && !customer.signedOut?.at && customer.waId !== to ? customer.waId : null);
+
 const moveNote = (waId) => `This account is on Stella with another WhatsApp number (${maskPhone(waId)}). Signing in here moves it to this number, and that number will be signed out.`;
 
 /**
@@ -466,8 +484,8 @@ async function setSigninEmail(to, convo, raw) {
   convo.signup.email = email;
   convo.signup.linkUserId = user._id;
   convo.signup.mode = 'SIGNIN';
-  const other = await StellaCustomer.findOne({ userId: user._id }).select('waId');
-  return { ok: true, elsewhere: other && other.waId !== to ? other.waId : null };
+  const other = await StellaCustomer.findOne({ userId: user._id }).select('waId signedOut');
+  return { ok: true, elsewhere: otherNumber(other, to) };
 }
 
 // Same rules and the same fields as the Bramp app's sign-in (routes/signin.js),
@@ -530,8 +548,35 @@ async function handleNotMe(waId) {
     userId: String(customer.userId), from: sender.mask(waId), now: sender.mask(customer.waId),
   });
   await sender.sendText(waId, "Thanks for telling us. I've paused the account straight away, so nothing can be done with it on the other number. Bramp support will contact you on your Bramp email to secure it.");
-  await sender.sendText(customer.waId, 'This account is paused for a security check. Bramp support will contact the account owner by email.');
+  if (!customer.signedOut?.at) await sender.sendText(customer.waId, 'This account is paused for a security check. Bramp support will contact the account owner by email.');
   return true;
+}
+
+// ── Sign out ───────────────────────────────────────────────────────────────
+
+/**
+ * "sign out": this number stops being the account's. The account keeps its
+ * desk and history, and its waId becomes a placeholder so the number is free
+ * to sign up or sign in to any account. An unused verify link dies with it.
+ */
+async function signOut(waId, customer) {
+  await StellaCustomer.updateOne({ _id: customer._id }, {
+    $set: {
+      waId: `signedout:${customer._id}`,
+      signedOut: { at: new Date(), waId },
+      'verifyLink.tokenHash': null,
+      'verifyLink.expiresAt': null,
+    },
+  });
+  await StellaConversation.updateOne({ waId }, {
+    $set: {
+      state: 'NEW', signup: {}, entryDeskSlug: null, awaitingDesk: null,
+      pendingSwitch: { deskId: null, askedAt: null }, tradeDesk: { deskId: null, until: null },
+      flow: { tokenHash: null, purpose: null, expiresAt: null },
+    },
+  });
+  logger.info('Stella: customer signed out', { waId: sender.mask(waId), userId: String(customer.userId) });
+  await sender.sendText(waId, "You're signed out of Stella on this number. Your Bramp account and your desk are kept.\n\nReply *sign in* to sign back in, or *sign up* to create a new account.");
 }
 
 const STEPS = { SIGNUP_NAME: onName, SIGNUP_EMAIL: onEmail, SIGNUP_CODE: onCode, LINK_CONFIRM: onLinkConfirm, SIGNIN_EMAIL: onSigninEmail };
@@ -557,12 +602,17 @@ async function handleIncoming({ waId, text, replyId, displayName }) {
     return null;
   }
   if (customer) {
+    if (SIGNOUT_EXACT.test(text || '')) return signOut(waId, customer).then(() => null);
     if (!wantsSignIn(text, true) && !SIGNUP_EXACT.test(text || '')) return customer;
     const user = await User.findById(customer.userId).select('email');
-    await sender.sendText(waId, `You're already signed in on this number with ${maskEmail(user?.email || '')}. To use Stella on a new number, message me from that number and reply *sign in*.`);
+    await sender.sendText(waId, `You're already signed in on this number with ${maskEmail(user?.email || '')}. To use another account here, reply *sign out* first. To use Stella on a new number, message me from that number and reply *sign in*.`);
     return null;
   }
 
+  if (SIGNOUT_EXACT.test(text || '')) {
+    await sender.sendText(waId, "You're not signed in on this number. Reply *sign in* to sign in, or *sign up* to create an account.");
+    return null;
+  }
   if (/^\s*(start over|restart)\s*$/i.test(text || '')) return start(waId, convo, displayName).then(() => null);
   // "sign in" at any point before they're linked; "sign up" starts sign-up over.
   if (convo.state !== 'SIGNUP_CODE' && wantsSignIn(text, false)) return startSignIn(waId, convo).then(() => null);
@@ -586,5 +636,6 @@ module.exports = {
   // For the sign-up Flow (AI/stellaFlows.js).
   setName, setEmail, issueCode, checkCode, complete, welcome,
   // For the sign-in Flow.
-  setSigninEmail, moveNote, checkPasswordPin, handleNotMe,
+  setSigninEmail, moveNote, otherNumber, checkPasswordPin, handleNotMe,
+  signOut,
 };

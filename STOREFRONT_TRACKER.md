@@ -259,3 +259,7 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
   1. read the rejection and resubmit;
   2. business verification;
   3. once `stella_account_moved_v2` is approved, send the first template message.
+- **2026-11-08:** Sign out added (`AI/stellaCustomers.js` `signOut`). Typing "sign out" or "log out" frees the number and keeps the account and its desk, with `StellaCustomer.signedOut`.
+  - Signing back in on the same number is a plain sign-in.
+  - Signing in on a new number is a move; the old number is warned only if no other account uses it now.
+  - Sign-out test: 16/16.
