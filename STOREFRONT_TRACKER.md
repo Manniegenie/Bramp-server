@@ -209,6 +209,12 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
   - Verify token `vibecode`: the server accepts it, tested.
   - Subscribe to the `messages` field only (v23.0).
   - WhatsApp account "Stella by Bramp", Messaging Account ID `1690542779339180`. Number +234 902 088 3541, **Phone Number ID `1445038865357643`** → `META_PHONE_NUMBER_ID`.
+  - Business ID `1261266412348844`. System user "Bramp AI" makes the token (app "Bramp Africa Limited" + the WhatsApp account).
+  - Flows key: private half on the server at `~/stella-flows-private.pem` and in `PRIVATE_KEY`; public half uploaded, status VALID.
+  - Flows (drafts):
+    - "Stella sign-up" `28903003975994624` → `STELLA_SIGNUP_FLOW_ID`. Endpoint active, health check passed.
+    - "Stella identity" `4670154319909818` → `STELLA_KYC_FLOW_ID`.
+    - `STELLA_FLOW_MODE=draft` until both are published. A published Flow can't be edited; clone it instead.
 - Local `.env` has no Obiex settings, so `services/networkService.js` (and the storefront and Metusela code) can't load on this PC without a placeholder `OBIEX` base URL.
 
 ## Decided
