@@ -60,6 +60,20 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
     - How it's set: `GET`/`PUT /storefront/stella-profile` (PUT replaces the whole profile), and the same through `/admin/storefront/merchants/:slug/stella-profile`.
     - Refused when saved: phone and account numbers, emails, links, and wallet addresses.
     - How Stella sees it: as quoted JSON in the turn's system note. Her rules win, and prices still come only from `get_rates`. The system prompt stays fixed, so it stays cached.
+- [~] **Flows: sign-up and KYC inside the chat** (user request, 2026-11-08). `39e4c2a`. Built and tested (31/31 through the real webhook with real encryption and the real Dojah handler; all suites 219/219). Off until the Flow IDs are set.
+  - Sign-up Flow (`AI/flows/stella-signup.json`, uses the endpoint): NAME → EMAIL → CODE.
+    - It runs the same steps as the text sign-up: `AI/stellaCustomers.js` now has `setName`, `setEmail`, `issueCode`, `checkCode` and `complete`.
+    - Typing still works alongside it, as a fallback for older WhatsApp.
+  - KYC Flow (`AI/flows/stella-kyc.json`, no endpoint): NIN/BVN → camera-only selfie.
+    - It completes as an `nfm_reply` message; the selfie is downloaded with Meta's media API (`stellaSender.downloadMedia`).
+    - Then the same Dojah check as bramp.shop runs (`AI/stellaIdentity.js`, now shared with `routes/stellaVerify.js`).
+    - One check per Flow, within the same daily limit as links.
+  - `AI/stellaFlowTokens.js`: Flow IDs from `STELLA_SIGNUP_FLOW_ID` / `STELLA_KYC_FLOW_ID` (`STELLA_FLOW_MODE=draft` to test unpublished). It also issues a per-Flow token (hash only on `StellaConversation.flow`, 1 hour).
+  - `AI/whatsapp.js`: the placeholder Flow handlers (`/signin/signin-pin` accepting any PIN) are gone; screens go to `AI/stellaFlows.js`.
+  - To switch on:
+    1. Make an RSA key: the private half goes in `PRIVATE_KEY`; the public half is uploaded to the number (`/whatsapp_business_encryption`).
+    2. Create both Flows in WhatsApp Manager. The sign-up Flow's endpoint is `https://priscaai.online/whatsapp/whatsapp`.
+    3. Set the two IDs, plus `STELLA_FLOW_MODE=draft` until they're published.
 - [~] **M8. Webhooks hand storefront events over.** Committed locally, **not deployed**. Tested on the three real webhook routes with real signatures on a throwaway local Mongo (Obiex, Glyde deactivation and the trader's webhook faked): 18/18 checks. All earlier suites still pass.
   - Glyde payments (`nairawebhook.js`): `storefrontBuy.handleGlydeEvent` straight after Metusela's and before the Bramp user deposit crediting. It only matches storefront orders (reference, one-time account uid or account number); anything else falls through unchanged.
   - Obiex withdrawals (`obiexwebhooktrx.js`, `chatbotwebhook.js`): `storefrontBuy.handleObiexWithdrawal` added after Metusela's two handlers. A Bramp user's own withdrawal is found first and never reaches it. Storefront payouts don't create a Bramp `Transaction`.
