@@ -1,4 +1,4 @@
-# Storefront build tracker (Stella + bramp.shop)
+﻿# Storefront build tracker (Stella + bramp.shop)
 
 The checklist for building Storefront. Tick items as they land and add a line to the log at the bottom, so the next session can pick up from here.
 Spec: *Bramp Storefront: Product and System Spec (v1)*, 6 Nov 2026.
@@ -6,13 +6,13 @@ Spec: *Bramp Storefront: Product and System Spec (v1)*, 6 Nov 2026.
 **Ground rules**
 - Stella (WhatsApp) and bramp.shop (web) are one product. **Stella is built first.**
 - Stella runs on the existing Bramp WhatsApp number and Meta app (`AI/whatsapp.js`), using Claude.
-- Customers do KYC once, through the existing Dojah handler (`routes/KYC.js` → `biometricVerification`). That KYC counts for Stella and bramp.shop, and for every desk.
+- Customers do KYC once, through the existing Dojah handler (`routes/KYC.js` â†’ `biometricVerification`). That KYC counts for Stella and bramp.shop, and for every desk.
 - Code follows Bramp-server's existing style: mongoose, `node-cron`, flat folders. Ignore the spec's Postgres, BullMQ and SQL samples.
 - In code a desk is a `StorefrontMerchant`, and its `@username` is the `slug`.
 - A desk's NGNB float and coin balances are the trader's own Bramp balances (`services/portfolio.js`). The only new money record is reservations.
 - `routes/nairawebhook.js`, `routes/obiexwebhooktrx.js` and `routes/chatbotwebhook.js` are live payment paths. Change them one at a time, and show the diff before deploying.
 
-Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
+Legend: `[x]` done Â· `[~]` written, not switched on Â· `[ ]` to do
 
 ---
 
@@ -26,22 +26,22 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
   - `/whatsapp` taken off `webhookLimiter` (50 per 15 minutes) and skipped by the general limiter (500 per 15 minutes). Meta sends from a few IPs, and every request has to pass the signature check instead.
   - With `STOREFRONT_PLATFORM_KEY` unset on the server, `/storefront` returns 401 and `/storefront-onboarding` returns 503, so mounting is safe before keys exist.
 - [x] **M4. Customer identity:** a WhatsApp number is linked to a Bramp `User`. Committed locally, **not deployed**. Tested on a throwaway local Mongo: 26/26 checks.
-  - New number: full name (as on BVN/NIN) → email → 6-digit code by email → a Bramp account is created (`source: CREATED`).
-  - Number already on a Bramp account: "Is that you?" → code to that account's email → linked (`LINKED`). An email that's already a Bramp account also links after its code.
+  - New number: full name (as on BVN/NIN) â†’ email â†’ 6-digit code by email â†’ a Bramp account is created (`source: CREATED`).
+  - Number already on a Bramp account: "Is that you?" â†’ code to that account's email â†’ linked (`LINKED`). An email that's already a Bramp account also links after its code.
   - The code always goes to the account's email, so a recycled number can't take over an account. No PIN at sign-up (PIN through a Flow in M9).
   - Left out of Bramp marketing: Bramp's campaigns only target users with an app push token (`expoPushToken`), which Stella customers don't have, so no `User` change was needed. Stella sign-ups don't send Bramp's welcome email or the Facebook registration event.
 - [~] **M5. One-time KYC:** Stella sends a one-time link to bramp.shop `/verify` (ID number and a camera selfie), which runs `biometricVerification`.
   - [x] Server, committed locally, **not deployed**. Tested with the real Dojah handler (only Dojah's API faked) on a throwaway local Mongo: 22/22 checks, plus 3 more in the server boot test (route mounted, CORS).
     - The link is sent right after sign-up or linking, and again whenever an unverified customer messages (at most every 2 minutes, 5 a day). It expires after 30 minutes and allows 3 attempts; only the token's hash is stored.
-    - **"Verified" for Stella** = KYC level 2 (NIN) **or** `bvnVerified` (BVN). In Bramp today a passed BVN check doesn't raise `kycLevel`. ⚠ Confirm with the user.
+    - **"Verified" for Stella** = KYC level 2 (NIN) **or** `bvnVerified` (BVN). In Bramp today a passed BVN check doesn't raise `kycLevel`. âš  Confirm with the user.
     - Dojah approval = record found + names overlap + selfie matches the government photo. Liveness is logged but **not** gating (existing Bramp behaviour).
-    - Outcomes: verified → link retired and "You're verified ✅". Rejected → reason and tries left. Provider down → PROVISIONAL, "review by our team, email to follow".
-  - [x] bramp.shop `/verify` page, committed locally in bramp-storefront (`52796d9`), **not deployed**. `next build` passes. NIN/BVN → front-camera selfie (no upload) → straight to Bramp-server from the browser. **Not yet tested on a real phone** (camera can't be tested here).
+    - Outcomes: verified â†’ link retired and "You're verified âœ…". Rejected â†’ reason and tries left. Provider down â†’ PROVISIONAL, "review by our team, email to follow".
+  - [x] bramp.shop `/verify` page, committed locally in bramp-storefront (`52796d9`), **not deployed**. `next build` passes. NIN/BVN â†’ front-camera selfie (no upload) â†’ straight to Bramp-server from the browser. **Not yet tested on a real phone** (camera can't be tested here).
   - To switch on: deploy Bramp-server and bramp.shop, then do one real check from a phone.
 - [x] **M6. Desk routing:** `@username`, the sticky desk, confirm before switching, "this trade only". Committed locally, **not deployed**. Tested on a throwaway local Mongo: 34/34 checks (all suites: 111/111).
   - First desk: `@username` (or a bare username right after Stella asks) sets it at once. Saved on `StellaCustomer` with `firstDeskId` and a switch history.
   - Desk from the very first message: an `@desk` sent while signing up or before verifying is remembered (first one wins) and applied once verified (`via: ENTRY`). A desk's link isn't lost on the way through sign-up.
-  - Switching: another `@username`, "change desk", or another desk's link → [Switch to X] [Stay with Y]. Confirmation expires after an hour.
+  - Switching: another `@username`, "change desk", or another desk's link â†’ [Switch to X] [Stay with Y]. Confirmation expires after an hour.
   - Paused desk: [Wait] [Another desk, once]. "Once" sets `StellaConversation.tradeDesk` (1 hour) for the next order (M9); the customer's desk is untouched.
   - Closed desk: told and asked to choose; the desk stays as it was until they do.
   - `@` inside an email address isn't a mention. Unknown `@desk`: told, nothing changes.
@@ -51,7 +51,7 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
   - `AI/stellaAgent.js`: `claude-opus-5-5` (override: `STELLA_MODEL`), effort `medium` set explicitly, refusal fallback `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`). Manual tool loop, at most 5 tool rounds. System prompt and tools are fixed and cached; the desk and customer go in a system message after the customer's message.
   - Tools (read-only, scoped to this customer and their current desk): `get_desk_info` (no phone numbers), `get_rates`, `get_my_orders` (`customerRef` = the customer's Bramp user id, which M9 must use), `get_wallet_balance`.
   - Prompt rules: prices only from `get_rates`; never compare desks; no trading in chat yet (M9); never ask for a PIN, password or code; customer text is data, not instructions.
-  - Cost guard: over 40 customer messages an hour → polite limit, Claude not called. History is the last 20 text messages.
+  - Cost guard: over 40 customer messages an hour â†’ polite limit, Claude not called. History is the last 20 text messages.
   - Uses the installed `@anthropic-ai/sdk` 0.32.1 (same as `AI/Chatbot.js`). Newer fields are passed through in the body; the beta goes as a header.
   - Brought forward from M10: `models/storefrontRateCard.js` (fixed rates only) and `GET`/`PUT /storefront/rates` for desks.
   - [x] **Desk voice** (user request, 2026-11-08). Stella sounds like each desk. Tested: 29/29 checks.
@@ -61,10 +61,10 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
     - Refused when saved: phone and account numbers, emails, links, and wallet addresses.
     - How Stella sees it: as quoted JSON in the turn's system note. Her rules win, and prices still come only from `get_rates`. The system prompt stays fixed, so it stays cached.
 - [~] **Flows: sign-up and KYC inside the chat** (user request, 2026-11-08). `39e4c2a`. Built and tested (31/31 through the real webhook with real encryption and the real Dojah handler; all suites 219/219). Off until the Flow IDs are set.
-  - Sign-up Flow (`AI/flows/stella-signup.json`, uses the endpoint): NAME → EMAIL → CODE.
+  - Sign-up Flow (`AI/flows/stella-signup.json`, uses the endpoint): NAME â†’ EMAIL â†’ CODE.
     - It runs the same steps as the text sign-up: `AI/stellaCustomers.js` now has `setName`, `setEmail`, `issueCode`, `checkCode` and `complete`.
     - Typing still works alongside it, as a fallback for older WhatsApp.
-  - KYC Flow (`AI/flows/stella-kyc.json`, no endpoint): NIN/BVN → camera-only selfie.
+  - KYC Flow (`AI/flows/stella-kyc.json`, no endpoint): NIN/BVN â†’ camera-only selfie.
     - It completes as an `nfm_reply` message; the selfie is downloaded with Meta's media API (`stellaSender.downloadMedia`).
     - Then the same Dojah check as bramp.shop runs (`AI/stellaIdentity.js`, now shared with `routes/stellaVerify.js`).
     - One check per Flow, within the same daily limit as links.
@@ -78,19 +78,19 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
   - Before a number is linked, "sign in" / "log in" (any short message saying so) asks for the email on the Bramp account. A code goes to that email, and entering it signs the number in. "sign up" starts sign-up over.
   - The sign-up message says "Already on Bramp? Reply *sign in*".
   - Account already on another WhatsApp number: Stella warns before sending the code, then the account moves here (same `StellaCustomer`: desk, KYC and history come along; the old number goes in `movedFrom`).
-    - The old number gets "moved to +234 ••• — not you? contact support". This also applies when sign-up or the Flow uses that account's email.
+    - The old number gets "moved to +234 â€¢â€¢â€¢ â€” not you? contact support". This also applies when sign-up or the Flow uses that account's email.
   - Already signed in: the bare "sign in" says which account; other messages mentioning login go to Stella as usual.
   - Protection: the email code, plus the message to the old number. Add the PIN in M9.
   - Sign-in Flow (`AI/flows/stella-signin.json`, `STELLA_SIGNIN_FLOW_ID`): email + password PIN, like the Bramp app (`routes/signin.js`: 5 tries, 6-hour lock, same fields). No PIN, or "use an email code", goes to the code screen. The text fallback keeps the email code; a PIN is never typed in the chat. `fb99b25`, Flow 51/51.
-  - Account-moved template plus "This wasn't me" → security hold (see Known issues).
+  - Account-moved template plus "This wasn't me" â†’ security hold (see Known issues).
 - [~] **M8. Webhooks hand storefront events over.** Committed locally, **not deployed**. Tested on the three real webhook routes with real signatures on a throwaway local Mongo (Obiex, Glyde deactivation and the trader's webhook faked): 18/18 checks. All earlier suites still pass.
   - Glyde payments (`nairawebhook.js`): `storefrontBuy.handleGlydeEvent` straight after Metusela's and before the Bramp user deposit crediting. It only matches storefront orders (reference, one-time account uid or account number); anything else falls through unchanged.
   - Obiex withdrawals (`obiexwebhooktrx.js`, `chatbotwebhook.js`): `storefrontBuy.handleObiexWithdrawal` added after Metusela's two handlers. A Bramp user's own withdrawal is found first and never reaches it. Storefront payouts don't create a Bramp `Transaction`.
-  - Checked: payment → payout → completed → margin credited once; Glyde and Obiex retries change nothing; a failed payout is marked and the trader told; unknown withdrawal ids answer as before (404 on `/webhook`, ignored on `/Chatbotwebhook`).
+  - Checked: payment â†’ payout â†’ completed â†’ margin credited once; Glyde and Obiex retries change nothing; a failed payout is marked and the trader told; unknown withdrawal ids answer as before (404 on `/webhook`, ignored on `/Chatbotwebhook`).
   - If Obiex reports a payout before its id is saved, the webhook answers 404 and Obiex retries (same as Metusela).
   - To switch on: deploy, then watch the first real storefront order through the logs.
 - [ ] **M9. Buy on Stella, end to end:**
-  - quote → PIN through a Flow → Glyde account → payment → crypto sent → webhook to the desk
+  - quote â†’ PIN through a Flow â†’ Glyde account â†’ payment â†’ crypto sent â†’ webhook to the desk
 - [ ] **M10. Rate cards and reservations.** Fixed-rate cards and `PUT /storefront/rates` done early in M7. Still to do: reference price plus margin, stale-rate and low-balance auto-pause, buy rate never below Bramp's cost plus fee, reservations, gift card rate cards.
 - [ ] **M11. Sell on Stella**, end to end.
 - [ ] **M12. Desk takeover** (relayed through Stella).
@@ -121,7 +121,7 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - [ ] `storefrontSellOrder.js`
 - [ ] `storefrontGiftcardOrder.js`
 - [ ] `storefrontSwitch.js`
-- [x] `stellaCustomer.js`: WhatsApp ID ↔ `User`, source (CREATED or LINKED)
+- [x] `stellaCustomer.js`: WhatsApp ID â†” `User`, source (CREATED or LINKED)
   - [x] M6: the sticky desk, first desk, switch history
 - [x] `stellaConversation.js`: sign-up state, 24-hour window (`lastInboundAt`), desk prompts (entry desk, pending switch, one-off trade desk)
   - [ ] takeover (M12), order in progress (M9)
@@ -153,7 +153,7 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - [x] `stellaAgent.js`: Claude agent with read-only tools (M7)
 - [x] `stellaProfile.js`: desk voice (greeting, phrases, tone, FAQs, about), checks and the note for Claude
   - [ ] bramp.shop dashboard form (M13)
-  - [ ] M9: `get_quote`, `create_order`, `request_payment` · M12: `handoff_to_desk`
+  - [ ] M9: `get_quote`, `create_order`, `request_payment` Â· M12: `handoff_to_desk`
 - [ ] `stellaTakeover.js`
 
 ### Bramp-server: routes/, adminRoutes/, auth/, server.js
@@ -161,7 +161,7 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
   - [ ] store profile read and update
   - [x] `GET`/`PUT /storefront/rates` (M7)
 - [ ] `routes/storefrontRates.js`, `storefrontSell.js`, `storefrontGiftcard.js`, `storefrontSwitch.js`
-- [x] `routes/stellaVerify.js`: one-time KYC link token → `biometricVerification` (mounted at `/stella-verify`, no login; `https://bramp.shop` added to CORS)
+- [x] `routes/stellaVerify.js`: one-time KYC link token â†’ `biometricVerification` (mounted at `/stella-verify`, no login; `https://bramp.shop` added to CORS)
 - [x] `routes/nairawebhook.js`: pass Glyde payments to storefront buys (M8)
 - [x] `routes/obiexwebhooktrx.js`, `routes/chatbotwebhook.js`: pass withdrawals to storefront (M8)
   - [ ] sell deposits (M11)
@@ -204,7 +204,7 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
   - "This wasn't me" (template button, or typed "not me") puts the account on `securityHold`. Stella then serves nothing on it until a super admin calls `POST /admin/storefront/stella-customers/:waId/clear-hold` with a note.
   - Still to add: an email to the account owner as well.
 - Brevo's monthly allowance (5,000 emails) ran out on 2026-11-08 and resets on 10 Nov. No Bramp email was delivered meanwhile, including Stella's codes. Stella's codes now use `sendEmailVerificationOTP` (`BREVO_TEMPLATE_EMAIL_VERIFICATION`, as the app's email verification does).
-- WhatsApp usernames are rolling out (Meta's "BSUID"): a customer with a username can message with a business-scoped user id instead of a phone number. `AI/whatsapp.js` drops any sender id that isn't 10–15 digits, so those customers get no reply. Needs handling before usernames go live in Nigeria.
+- WhatsApp usernames are rolling out (Meta's "BSUID"): a customer with a username can message with a business-scoped user id instead of a phone number. `AI/whatsapp.js` drops any sender id that isn't 10â€“15 digits, so those customers get no reply. Needs handling before usernames go live in Nigeria.
 - Pre-existing: `models/kyc.js` declares its `youverifyId` index with both `sparse` and `partialFilterExpression`, which MongoDB rejects. Mongoose logs it in the background, so the server runs, but that index is probably missing. Not touched.
 - Running `server.js` locally needs `OBIEX_API_KEY`, `OBIEX_API_SECRET` and `OBIEX_BASE_URL` (dummies are fine), plus `MONGODB_URI` pointing at the local test Mongo. Local `.env` has none of them.
 
@@ -221,15 +221,15 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - **Meta (2026-11-08):**
   - Server: `https://priscaai.online` (46.224.4.72, own Ubuntu server behind nginx, not Render; pushing doesn't deploy). Meta's callback was still `https://bramp-server.onrender.com/...`, which has no server behind it: change it to `https://priscaai.online/whatsapp/whatsapp`.
   - Verify token `vibecode`: the server accepts it, tested.
-  - Subscribe to the `messages` field only (v23.0).
-  - WhatsApp account "Stella by Bramp", Messaging Account ID `1690542779339180`. Number +234 902 088 3541, **Phone Number ID `1445038865357643`** → `META_PHONE_NUMBER_ID`.
+  - Subscribe to `messages` (v23.0) and `flows` (needed to publish Flows).
+  - WhatsApp account "Stella by Bramp", Messaging Account ID `1690542779339180`. Number +234 902 088 3541, **Phone Number ID `1445038865357643`** â†’ `META_PHONE_NUMBER_ID`.
   - Business ID `1261266412348844`. System user "Bramp AI" makes the token (app "Bramp Africa Limited" + the WhatsApp account).
   - Flows key: private half on the server at `~/stella-flows-private.pem` and in `PRIVATE_KEY`; public half uploaded, status VALID.
   - Flows (drafts):
-    - "Stella sign-up" `28903003975994624` → `STELLA_SIGNUP_FLOW_ID`. Endpoint active, health check passed.
-    - "Stella identity" `4670154319909818` → `STELLA_KYC_FLOW_ID`.
-    - "Stella sign-in" `3406382872896915` → `STELLA_SIGNIN_FLOW_ID`. Endpoint active, health check passed.
-    - Publish is blocked so far; likely business verification and/or the app still in Development mode. Testing in draft.
+    - "Stella sign-up" `28903003975994624` â†’ `STELLA_SIGNUP_FLOW_ID`. Endpoint active, health check passed.
+    - "Stella identity" `4670154319909818` â†’ `STELLA_KYC_FLOW_ID`.
+    - "Stella sign-in" `3406382872896915` â†’ `STELLA_SIGNIN_FLOW_ID`. Endpoint active, health check passed.
+    - Publishing needs the app's webhook subscribed to the `flows` field as well as `messages` (Meta's health_status said so; the Manager page showed an empty list). `AI/whatsapp.js` logs those alerts.
     - `STELLA_FLOW_MODE=draft` until both are published. A published Flow can't be edited; clone it instead.
 - Local `.env` has no Obiex settings, so `services/networkService.js` (and the storefront and Metusela code) can't load on this PC without a placeholder `OBIEX` base URL.
 

@@ -193,6 +193,12 @@ async function handleStatus(st) {
 async function processWebhook(b) {
   for (const entry of b.entry || []) {
     for (const change of entry.changes || []) {
+      // Meta's alerts about a Flow (endpoint errors, latency, status changes):
+      // the 'flows' field must be subscribed before a Flow can be published.
+      if (change.field === 'flows') {
+        logger.warn('Stella: Flows alert from Meta', { event: change.value?.event, flowId: change.value?.flow_id, message: change.value?.message, status: change.value?.new_status || null, alert: change.value?.alert_state || null });
+        continue;
+      }
       if (change.field !== 'messages') continue;
       const value = change.value || {};
       for (const msg of value.messages || []) {
