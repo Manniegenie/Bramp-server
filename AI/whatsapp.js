@@ -115,9 +115,13 @@ function sendBase64Plain(res, obj, status = 200) {
 
 // ===== Messages =====
 
+/** A tapped button: ours (interactive) or a template's quick reply (type "button"). */
+const replyOf = (msg) => msg.interactive?.button_reply || msg.interactive?.list_reply
+  || (msg.type === 'button' && msg.button ? { id: msg.button.payload, title: msg.button.text } : null);
+
 /** Records an inbound message; false if we've already handled it (Meta retry). */
 async function recordInbound(msg) {
-  const reply = msg.interactive?.button_reply || msg.interactive?.list_reply || null;
+  const reply = replyOf(msg);
   try {
     await StellaMessage.create({
       waMessageId: msg.id,
@@ -140,7 +144,7 @@ async function handleMessage(msg, contact) {
   if (!(await recordInbound(msg))) return;
 
   const displayName = contact?.profile?.name || 'there';
-  const reply = msg.interactive?.button_reply || msg.interactive?.list_reply || null;
+  const reply = replyOf(msg);
   logger.info('Stella: message in', { id: msg.id, from: sender.mask(waId), type: msg.type });
 
   await sender.markReadWithTyping(msg.id);

@@ -15,7 +15,14 @@ const stellaCustomerSchema = new mongoose.Schema({
   linkedAt: { type: Date, required: true, default: Date.now },
   // Signed in from a new number (AI/stellaCustomers.js): the account moves
   // here with its desk; the numbers it left are kept.
-  movedFrom: { type: [{ _id: false, waId: String, movedAt: Date }], default: [] },
+  movedFrom: { type: [{ _id: false, waId: String, movedAt: Date, disputedAt: { type: Date, default: null } }], default: [] },
+  // Paused for Bramp support: the old number tapped "This wasn't me" after a
+  // move. Stella serves nothing on this account until an admin clears it.
+  securityHold: {
+    active: { type: Boolean, default: false },
+    reason: { type: String, default: null },
+    at: { type: Date, default: null },
+  },
 
   // The customer's desk (AI/stellaRouter.js). Sticky: set once and kept
   // until the customer explicitly switches; never changed by silence, a new

@@ -81,6 +81,8 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
     - The old number gets "moved to +234 ••• — not you? contact support". This also applies when sign-up or the Flow uses that account's email.
   - Already signed in: the bare "sign in" says which account; other messages mentioning login go to Stella as usual.
   - Protection: the email code, plus the message to the old number. Add the PIN in M9.
+  - Sign-in Flow (`AI/flows/stella-signin.json`, `STELLA_SIGNIN_FLOW_ID`): email + password PIN, like the Bramp app (`routes/signin.js`: 5 tries, 6-hour lock, same fields). No PIN, or "use an email code", goes to the code screen. The text fallback keeps the email code; a PIN is never typed in the chat. `fb99b25`, Flow 51/51.
+  - Account-moved template plus "This wasn't me" → security hold (see Known issues).
 - [~] **M8. Webhooks hand storefront events over.** Committed locally, **not deployed**. Tested on the three real webhook routes with real signatures on a throwaway local Mongo (Obiex, Glyde deactivation and the trader's webhook faked): 18/18 checks. All earlier suites still pass.
   - Glyde payments (`nairawebhook.js`): `storefrontBuy.handleGlydeEvent` straight after Metusela's and before the Bramp user deposit crediting. It only matches storefront orders (reference, one-time account uid or account number); anything else falls through unchanged.
   - Obiex withdrawals (`obiexwebhooktrx.js`, `chatbotwebhook.js`): `storefrontBuy.handleObiexWithdrawal` added after Metusela's two handlers. A Bramp user's own withdrawal is found first and never reaches it. Storefront payouts don't create a Bramp `Transaction`.
@@ -197,7 +199,10 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - Before M2, `/whatsapp` ignored every message. `server.js` reads the raw body first, so `req.body` was empty. M2 parses `req.rawBody`.
 - Fixed in M3: `webhookLimiter` (50 per 15 minutes per IP) and the general limiter (500 per 15 minutes) both covered `/whatsapp`.
 - `@anthropic-ai/sdk` is 0.32.1 (late 2024). Stella works with it (fields passed through), but upgrading it is its own task: it also changes the live `/chatbot` (`AI/Chatbot.js`), which needs testing alongside.
-- The "your account moved" message to the old number is free-form, so WhatsApp only delivers it if that number wrote to Stella in the last 24 hours. It needs an approved utility template (e.g. `account_moved`), plus an email to the account, to always reach the owner.
+- "Your account moved" warning to the old number:
+  - Sent as the `stella_account_moved` utility template once it's approved and `STELLA_TEMPLATE_ACCOUNT_MOVED` is set. Until then it's free-form, which only reaches numbers active in the last 24 hours.
+  - "This wasn't me" (template button, or typed "not me") puts the account on `securityHold`. Stella then serves nothing on it until a super admin calls `POST /admin/storefront/stella-customers/:waId/clear-hold` with a note.
+  - Still to add: an email to the account owner as well.
 - Brevo's monthly allowance (5,000 emails) ran out on 2026-11-08 and resets on 10 Nov. No Bramp email was delivered meanwhile, including Stella's codes. Stella's codes now use `sendEmailVerificationOTP` (`BREVO_TEMPLATE_EMAIL_VERIFICATION`, as the app's email verification does).
 - WhatsApp usernames are rolling out (Meta's "BSUID"): a customer with a username can message with a business-scoped user id instead of a phone number. `AI/whatsapp.js` drops any sender id that isn't 10–15 digits, so those customers get no reply. Needs handling before usernames go live in Nigeria.
 - Pre-existing: `models/kyc.js` declares its `youverifyId` index with both `sparse` and `partialFilterExpression`, which MongoDB rejects. Mongoose logs it in the background, so the server runs, but that index is probably missing. Not touched.

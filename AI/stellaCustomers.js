@@ -43,6 +43,7 @@ const BTN = {
   LINK_NO: 'link_no',
   RESEND: 'code_resend',
   CHANGE_EMAIL: 'email_change',
+  NOT_ME: 'acct_moved_not_me', // the "This wasn't me" button on the account-moved template
 };
 
 const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
@@ -332,11 +333,20 @@ async function complete(to, convo) {
 async function welcome(to, customer, source, oldWaId = null) {
   if (source === 'MOVED') {
     await sender.sendText(to, "You're signed in ✅ Your Stella account is now on this number, with your desk and settings.");
-    // The owner should know at once if this wasn't them. Free-form messages
-    // only reach numbers that wrote to us in the last 24 hours; beyond that
-    // this needs an approved template (tracker).
-    const told = await sender.sendText(oldWaId,
-      `Your Stella account was just moved to another WhatsApp number (${maskPhone(to)}) after a sign-in with your Bramp email code. If this wasn't you, contact Bramp support right away.`);
+    // The owner should know at once if this wasn't them. A free-form message
+    // only reaches a number that wrote to us in the last 24 hours, so this
+    // goes as an approved template when one is set (STELLA_TEMPLATE_ACCOUNT_MOVED);
+    // its "This wasn't me" button puts the account on hold (handleNotMe).
+    const when = new Date().toLocaleString('en-NG', { timeZone: 'Africa/Lagos', day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+    const told = process.env.STELLA_TEMPLATE_ACCOUNT_MOVED
+      ? await sender.sendTemplate(oldWaId, {
+        name: process.env.STELLA_TEMPLATE_ACCOUNT_MOVED,
+        language: process.env.STELLA_TEMPLATE_LANGUAGE || 'en',
+        bodyParams: [to.slice(-4), when],
+        quickReplies: [BTN.NOT_ME],
+      }, `Account moved to a number ending ${to.slice(-4)} on ${when}.`)
+      : await sender.sendText(oldWaId,
+        `Your Stella account was just moved to another WhatsApp number (${maskPhone(to)}). If this wasn't you, reply *not me* and I'll pause the account right away.`);
     if (!told.ok) logger.warn('Stella: could not tell the old number about a move', { oldWaId: sender.mask(oldWaId), error: told.error });
   } else {
     await sender.sendText(to, source === 'LINKED'
@@ -501,6 +511,29 @@ async function onSigninEmail(to, convo, { text }) {
   return sendCode(to, convo);
 }
 
+// ── "This wasn't me" ───────────────────────────────────────────────────────
+
+/**
+ * The number an account just moved away from says it wasn't them: pause the
+ * account (on its new number) for Bramp support. Returns true if this number
+ * had an account moved away from it, so the message is handled.
+ */
+async function handleNotMe(waId) {
+  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const customer = await StellaCustomer.findOne({ movedFrom: { $elemMatch: { waId, movedAt: { $gt: since } } } });
+  if (!customer) return false;
+  const entry = [...customer.movedFrom].reverse().find((m) => m.waId === waId);
+  entry.disputedAt = new Date();
+  customer.securityHold = { active: true, reason: `Move disputed by previous number ${sender.mask(waId)}`, at: new Date() };
+  await customer.save();
+  logger.error('Stella: SECURITY: account move disputed, account on hold', {
+    userId: String(customer.userId), from: sender.mask(waId), now: sender.mask(customer.waId),
+  });
+  await sender.sendText(waId, "Thanks for telling us. I've paused the account straight away, so nothing can be done with it on the other number. Bramp support will contact you on your Bramp email to secure it.");
+  await sender.sendText(customer.waId, 'This account is paused for a security check. Bramp support will contact the account owner by email.');
+  return true;
+}
+
 const STEPS = { SIGNUP_NAME: onName, SIGNUP_EMAIL: onEmail, SIGNUP_CODE: onCode, LINK_CONFIRM: onLinkConfirm, SIGNIN_EMAIL: onSigninEmail };
 
 /**
@@ -515,7 +548,14 @@ async function handleIncoming({ waId, text, replyId, displayName }) {
     { upsert: true, new: true }
   );
 
+  // The old number's answer to "your account moved": the template's button or "not me".
+  if ((replyId === BTN.NOT_ME || /^\s*(not me|this wasn'?t me)\s*[.!]?\s*$/i.test(text || '')) && await handleNotMe(waId)) return null;
+
   const customer = await StellaCustomer.findOne({ waId });
+  if (customer?.securityHold?.active) {
+    await sender.sendText(waId, 'This account is paused for a security check. Bramp support will contact the account owner by email.');
+    return null;
+  }
   if (customer) {
     if (!wantsSignIn(text, true) && !SIGNUP_EXACT.test(text || '')) return customer;
     const user = await User.findById(customer.userId).select('email');
@@ -546,5 +586,5 @@ module.exports = {
   // For the sign-up Flow (AI/stellaFlows.js).
   setName, setEmail, issueCode, checkCode, complete, welcome,
   // For the sign-in Flow.
-  setSigninEmail, moveNote, checkPasswordPin,
+  setSigninEmail, moveNote, checkPasswordPin, handleNotMe,
 };

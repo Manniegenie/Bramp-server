@@ -10,6 +10,7 @@
 //   PATCH /merchants/:slug                — { status?, holdDays?, depositNgn?, perTradeMaxNgn?, dailyMaxNgn? }      (super)
 //   POST  /merchants/:slug/rotate-key     — issue the store its own API key (Pro server, bot); any old one stops
 //                                           working. Returns the key and webhook secret ONCE                   (super)
+//   POST  /stella-customers/:waId/clear-hold — { note } lift a security hold (a disputed number move)      (super)
 //   GET   /merchants/:slug/stella-profile — how Stella sounds for this desk
 //   PUT   /merchants/:slug/stella-profile — same body as the desk's own PUT /storefront/stella-profile
 //   GET   /orders?status=&slug=           — e.g. status=REJECTED for refunds to make, PAYOUT_FAILED to fix
@@ -19,6 +20,7 @@ const router = express.Router();
 const User = require('../models/user');
 const StorefrontMerchant = require('../models/storefrontMerchant');
 const StorefrontOrder = require('../models/storefrontOrder');
+const StellaCustomer = require('../models/stellaCustomer');
 const { newKey } = require('../auth/storefrontAuth');
 const ledger = require('../services/storefrontLedger');
 const { serializeOrder } = require('../services/storefrontBuy');
@@ -128,6 +130,19 @@ router.post('/merchants/:slug/rotate-key', superOnly, route(async (req, res) => 
   logger.warn('Storefront API key issued', { slug: m.slug, by: who(req) });
   // Shown once: only the key's hash is stored.
   res.json({ success: true, data: { slug: m.slug, apiKey, webhookSecret: m.webhookSecret } });
+}));
+
+router.post('/stella-customers/:waId/clear-hold', superOnly, route(async (req, res) => {
+  const note = String(req.body?.note || '').trim().slice(0, 300);
+  if (!note) return res.status(400).json({ success: false, error: 'note is required: what support checked.' });
+  const c = await StellaCustomer.findOneAndUpdate(
+    { waId: String(req.params.waId).replace(/\D/g, ''), 'securityHold.active': true },
+    { $set: { securityHold: { active: false, reason: null, at: null } } },
+    { new: true }
+  );
+  if (!c) return res.status(404).json({ success: false, error: 'No Stella customer on hold with that number.' });
+  logger.warn('Stella: security hold cleared', { waId: c.waId.slice(0, 6), userId: String(c.userId), by: who(req), note });
+  res.json({ success: true, data: { waId: c.waId, userId: c.userId } });
 }));
 
 router.get('/merchants/:slug/stella-profile', route(async (req, res) => {

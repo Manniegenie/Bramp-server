@@ -112,6 +112,20 @@ async function sendFlow(to, { body, cta, flowId, token, screen, data, mode = 'pu
 }
 
 /**
+ * An approved message template: the only kind WhatsApp delivers outside the
+ * 24-hour window. bodyParams fill {{1}}, {{2}}…; quickReplies are the
+ * payloads for the template's quick-reply buttons, in order.
+ */
+async function sendTemplate(to, { name, language = 'en', bodyParams = [], quickReplies = [] }, logText = null) {
+  const components = [];
+  if (bodyParams.length) components.push({ type: 'body', parameters: bodyParams.map((t) => ({ type: 'text', text: String(t) })) });
+  quickReplies.forEach((payload, i) => components.push({ type: 'button', sub_type: 'quick_reply', index: String(i), parameters: [{ type: 'payload', payload }] }));
+  const result = await post({ to: waDigits(to), type: 'template', template: { name, language: { code: language }, components } });
+  await logOutbound(to, 'template', logText || `[template ${name}]`, result);
+  return result;
+}
+
+/**
  * Downloads media a customer sent (e.g. a Flow's photo) by its media id:
  * Meta gives a short-lived URL, fetched with the same token. Resolves to
  * { ok, buffer, mimeType, error } and never throws.
@@ -133,4 +147,4 @@ async function downloadMedia(mediaId, { maxBytes = 10 * 1024 * 1024 } = {}) {
   }
 }
 
-module.exports = { markReadWithTyping, sendText, sendButtons, sendLink, sendFlow, downloadMedia, waDigits, mask };
+module.exports = { markReadWithTyping, sendText, sendButtons, sendLink, sendFlow, sendTemplate, downloadMedia, waDigits, mask };
