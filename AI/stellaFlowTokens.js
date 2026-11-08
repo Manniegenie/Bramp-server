@@ -14,13 +14,24 @@
 // Without them Stella falls back to sign-up by text and the bramp.shop link.
 const crypto = require('crypto');
 const StellaConversation = require('../models/stellaConversation');
+const logger = require('../utils/logger');
 
 const TOKEN_TTL_MINUTES = 60;
 const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 
 const FLOW_ENV = { SIGNUP: 'STELLA_SIGNUP_FLOW_ID', SIGNIN: 'STELLA_SIGNIN_FLOW_ID', KYC: 'STELLA_KYC_FLOW_ID' };
 const flowId = (purpose) => process.env[FLOW_ENV[purpose]] || null;
-const enabled = (purpose) => Boolean(flowId(purpose));
+
+// When Meta refuses to send a Flow (e.g. "Blocked by Integrity" while the app
+// is unreviewed), Stella falls back to text and stops trying Flows for an hour.
+const PAUSE_AFTER_FAILURE_MS = 60 * 60 * 1000;
+let pausedUntil = 0;
+function sendFailed(purpose, error) {
+  pausedUntil = Date.now() + PAUSE_AFTER_FAILURE_MS;
+  logger.warn('Stella: Flow could not be sent; using text for an hour', { purpose, error });
+}
+
+const enabled = (purpose) => Boolean(flowId(purpose)) && Date.now() >= pausedUntil;
 const mode = () => (process.env.STELLA_FLOW_MODE === 'draft' ? 'draft' : 'published');
 
 /** A fresh token for this customer's next Flow; replaces any earlier one. */
@@ -43,4 +54,4 @@ async function find(token, purpose) {
 /** Retires a token once its Flow has done its job. */
 const retire = (convoId) => StellaConversation.updateOne({ _id: convoId }, { $set: { flow: { tokenHash: null, purpose: null, expiresAt: null } } });
 
-module.exports = { flowId, enabled, mode, issue, find, retire, TOKEN_TTL_MINUTES };
+module.exports = { flowId, enabled, mode, sendFailed, issue, find, retire, TOKEN_TTL_MINUTES };

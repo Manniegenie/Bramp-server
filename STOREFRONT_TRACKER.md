@@ -263,3 +263,6 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
   - Signing back in on the same number is a plain sign-in.
   - Signing in on a new number is a move; the old number is warned only if no other account uses it now.
   - Sign-out test: 16/16.
+- **2026-11-08:** On the live server, Meta refuses to *send* Flow messages too, even drafts ("Blocked by Integrity"), so customers got no reply.
+  - Fix: when a Flow can't be sent, Stella uses the text version and pauses Flows for an hour (`stellaFlowTokens.sendFailed`). That covers sign-up by text, sign-in by email code, and KYC by the bramp.shop link.
+  - Fallback test: 4/4.

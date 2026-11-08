@@ -69,7 +69,7 @@ async function promptIfNeeded(waId, customer) {
     // No link token: the Flow's own token (one check per Flow) is the key.
     customer.verifyLink = { tokenHash: null, expiresAt: new Date(Date.now() + flowTokens.TOKEN_TTL_MINUTES * 60 * 1000), attempts: 0, sentAt: [...sent, new Date()] };
     await customer.save();
-    await sender.sendFlow(waId, {
+    const r = await sender.sendFlow(waId, {
       body: "One last step: verify your identity once. You'll need your NIN or BVN and your phone's camera for a quick selfie. It counts for every desk on Stella.",
       cta: 'Verify identity',
       flowId: flowTokens.flowId('KYC'),
@@ -77,8 +77,11 @@ async function promptIfNeeded(waId, customer) {
       screen: 'ID',
       mode: flowTokens.mode(),
     });
-    logger.info('Stella: identity Flow sent', { waId: sender.mask(waId) });
-    return 'sent';
+    if (r.ok) {
+      logger.info('Stella: identity Flow sent', { waId: sender.mask(waId) });
+      return 'sent';
+    }
+    flowTokens.sendFailed('KYC', r.error); // the bramp.shop link below instead
   }
 
   const token = crypto.randomBytes(32).toString('base64url'); // 43 chars

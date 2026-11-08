@@ -90,7 +90,7 @@ function parseFullName(text) {
 
 async function askName(to) {
   if (flowTokens.enabled('SIGNUP')) {
-    return sender.sendFlow(to, {
+    const r = await sender.sendFlow(to, {
       body: 'Tap below to set up your account, or just reply with your full name as it appears on your BVN or NIN.\n\nAlready on Bramp? Reply *sign in*.',
       cta: 'Set up my account',
       flowId: flowTokens.flowId('SIGNUP'),
@@ -98,6 +98,8 @@ async function askName(to) {
       screen: 'NAME',
       mode: flowTokens.mode(),
     });
+    if (r.ok) return r;
+    flowTokens.sendFailed('SIGNUP', r.error);
   }
   return sender.sendText(to, "What's your full name, as it appears on your BVN or NIN?\n\nAlready on Bramp? Reply *sign in*.");
 }
@@ -450,7 +452,7 @@ async function startSignIn(to, convo) {
   convo.signup = { mode: 'SIGNIN' };
   await convo.save();
   if (flowTokens.enabled('SIGNIN')) {
-    return sender.sendFlow(to, {
+    const r = await sender.sendFlow(to, {
       body: "Let's sign you in with your Bramp email and password PIN. Tap below. (Or reply with your Bramp email and I'll send you a code instead.)",
       cta: 'Sign in',
       flowId: flowTokens.flowId('SIGNIN'),
@@ -458,6 +460,8 @@ async function startSignIn(to, convo) {
       screen: 'SIGNIN',
       mode: flowTokens.mode(),
     });
+    if (r.ok) return r;
+    flowTokens.sendFailed('SIGNIN', r.error);
   }
   return askSigninEmail(to);
 }
