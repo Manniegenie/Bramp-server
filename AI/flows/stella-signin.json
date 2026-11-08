@@ -22,7 +22,7 @@
           { "type": "TextCaption", "text": "If your account is on another WhatsApp number, signing in here moves it to this one." },
           {
             "type": "EmbeddedLink",
-            "text": "No PIN? Use an email code instead",
+            "text": "Use an email code instead",
             "on-click-action": { "name": "data_exchange", "payload": { "email": "${form.email}", "action": "code" } }
           },
           {
