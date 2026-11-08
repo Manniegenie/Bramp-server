@@ -54,6 +54,12 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
   - Cost guard: over 40 customer messages an hour → polite limit, Claude not called. History is the last 20 text messages.
   - Uses the installed `@anthropic-ai/sdk` 0.32.1 (same as `AI/Chatbot.js`). Newer fields are passed through in the body; the beta goes as a header.
   - Brought forward from M10: `models/storefrontRateCard.js` (fixed rates only) and `GET`/`PUT /storefront/rates` for desks.
+  - [x] **Desk voice** (user request, 2026-11-08). Stella sounds like each desk. Tested: 29/29 checks.
+    - What a desk sets: greeting, up to 20 phrases, tone (`friendly | formal | pidgin | brief`), up to 15 FAQs, and an about.
+    - Where it lives: `AI/stellaProfile.js`, stored on `StorefrontMerchant.stellaProfile`.
+    - How it's set: `GET`/`PUT /storefront/stella-profile` (PUT replaces the whole profile), and the same through `/admin/storefront/merchants/:slug/stella-profile`.
+    - Refused when saved: phone and account numbers, emails, links, and wallet addresses.
+    - How Stella sees it: as quoted JSON in the turn's system note. Her rules win, and prices still come only from `get_rates`. The system prompt stays fixed, so it stays cached.
 - [~] **M8. Webhooks hand storefront events over.** Committed locally, **not deployed**. Tested on the three real webhook routes with real signatures on a throwaway local Mongo (Obiex, Glyde deactivation and the trader's webhook faked): 18/18 checks. All earlier suites still pass.
   - Glyde payments (`nairawebhook.js`): `storefrontBuy.handleGlydeEvent` straight after Metusela's and before the Bramp user deposit crediting. It only matches storefront orders (reference, one-time account uid or account number); anything else falls through unchanged.
   - Obiex withdrawals (`obiexwebhooktrx.js`, `chatbotwebhook.js`): `storefrontBuy.handleObiexWithdrawal` added after Metusela's two handlers. A Bramp user's own withdrawal is found first and never reaches it. Storefront payouts don't create a Bramp `Transaction`.
@@ -120,6 +126,8 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - [x] `stellaKyc.js`: verify link, "verified" rule, result messages (M5)
 - [x] `stellaRouter.js`: sticky desk routing (M6)
 - [x] `stellaAgent.js`: Claude agent with read-only tools (M7)
+- [x] `stellaProfile.js`: desk voice (greeting, phrases, tone, FAQs, about), checks and the note for Claude
+  - [ ] bramp.shop dashboard form (M13)
   - [ ] M9: `get_quote`, `create_order`, `request_payment` · M12: `handoff_to_desk`
 - [ ] `stellaTakeover.js`
 
@@ -166,6 +174,7 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - Before M2, `/whatsapp` ignored every message. `server.js` reads the raw body first, so `req.body` was empty. M2 parses `req.rawBody`.
 - Fixed in M3: `webhookLimiter` (50 per 15 minutes per IP) and the general limiter (500 per 15 minutes) both covered `/whatsapp`.
 - `@anthropic-ai/sdk` is 0.32.1 (late 2024). Stella works with it (fields passed through), but upgrading it is its own task: it also changes the live `/chatbot` (`AI/Chatbot.js`), which needs testing alongside.
+- WhatsApp usernames are rolling out (Meta's "BSUID"): a customer with a username can message with a business-scoped user id instead of a phone number. `AI/whatsapp.js` drops any sender id that isn't 10–15 digits, so those customers get no reply. Needs handling before usernames go live in Nigeria.
 - Pre-existing: `models/kyc.js` declares its `youverifyId` index with both `sparse` and `partialFilterExpression`, which MongoDB rejects. Mongoose logs it in the background, so the server runs, but that index is probably missing. Not touched.
 - Running `server.js` locally needs `OBIEX_API_KEY`, `OBIEX_API_SECRET` and `OBIEX_BASE_URL` (dummies are fine), plus `MONGODB_URI` pointing at the local test Mongo. Local `.env` has none of them.
 
@@ -179,6 +188,11 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - `BREVO_TEMPLATE_STOREFRONT_LINK`: the desk-link email template. Can wait until M13.
 - `ENABLE_STOREFRONT_JOBS=false` on any staging instance that shares the prod database.
 - Webhook URL to set in Meta: `https://<server>/whatsapp/whatsapp`. It's mounted at `/whatsapp`, and the router path is also `/whatsapp`.
+- **Meta (2026-11-08):**
+  - Server: `https://priscaai.online` (46.224.4.72, own Ubuntu server behind nginx, not Render; pushing doesn't deploy). Meta's callback was still `https://bramp-server.onrender.com/...`, which has no server behind it: change it to `https://priscaai.online/whatsapp/whatsapp`.
+  - Verify token `vibecode`: the server accepts it, tested.
+  - Subscribe to the `messages` field only (v23.0).
+  - WhatsApp account "Stella by Bramp", Messaging Account ID `1690542779339180`. Number +234 902 088 3541, **Phone Number ID `1445038865357643`** → `META_PHONE_NUMBER_ID`.
 - Local `.env` has no Obiex settings, so `services/networkService.js` (and the storefront and Metusela code) can't load on this PC without a placeholder `OBIEX` base URL.
 
 ## Decided
@@ -194,3 +208,4 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - **2026-11-06:** M6 committed locally (`AI/stellaRouter.js`, desk fields on `stellaCustomer`/`stellaConversation`, wired into `AI/whatsapp.js`). For now a verified customer with an active desk gets "You're trading with X. Quotes and trading open here soon." M7 (Claude agent) replaces that. Next: M7.
 - **2026-11-06:** M7 committed locally (`AI/stellaAgent.js`, `models/storefrontRateCard.js`, `GET`/`PUT /storefront/rates`, agent wired into `AI/whatsapp.js`). Stays `[~]` until one live conversation with the real Claude API. Next: M8 (hand Glyde and Obiex webhook events to storefront; live payment paths, one at a time, diff shown first).
 - **2026-11-07:** The user's Glyde deposit work committed as theirs (`35d806f`) before M8, so M8 builds on it. M8 committed locally: one handover line in each of the three webhooks. Stays `[~]` until deployed and the first real order is watched. Next: M9 (buy on Stella end to end).
+- **2026-11-08:** Meta set up for Stella (see "Before deploying"). Desk voice built (`AI/stellaProfile.js`). Next: deploy on the server, set the env, test Stella from a phone.

@@ -55,6 +55,16 @@ const storefrontMerchantSchema = new mongoose.Schema({
     ip: { type: String, default: null },
   },
   linkRequestId: { type: mongoose.Schema.Types.ObjectId, ref: 'StorefrontLinkRequest', default: null },
+
+  // How Stella sounds for this desk (AI/stellaProfile.js checks it).
+  stellaProfile: {
+    greeting: { type: String, default: null },
+    tone: { type: String, enum: ['friendly', 'formal', 'pidgin', 'brief', null], default: null },
+    phrases: { type: [String], default: [] },
+    faqs: { type: [{ _id: false, q: String, a: String }], default: [] },
+    about: { type: String, default: null },
+    updatedAt: { type: Date, default: null },
+  },
 }, { timestamps: true });
 
 module.exports = mongoose.models.StorefrontMerchant || mongoose.model('StorefrontMerchant', storefrontMerchantSchema);

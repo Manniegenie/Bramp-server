@@ -23,6 +23,9 @@
 //   GET   /storefront/rates                   — the desk's rate card (what Stella quotes from)
 //   PUT   /storefront/rates                   — { rates: [{ asset, side: BUY|SELL, rateNgn, minNgn?, maxNgn?, active? }] }
 //                                               fixed rates, upserted per asset + side
+//   GET   /storefront/stella-profile          — how Stella sounds for this desk, plus the limits
+//   PUT   /storefront/stella-profile          — { greeting?, tone?, phrases?: [..], faqs?: [{ q, a }], about? }
+//                                               replaces the whole profile (AI/stellaProfile.js)
 //
 // Status changes are pushed to the trader's webhookUrl, signed
 // (services/storefrontNotify.js): buy.held_review, buy.held_delay,
@@ -32,6 +35,7 @@ const router = express.Router();
 const buy = require('../services/storefrontBuy');
 const ledger = require('../services/storefrontLedger');
 const StorefrontRateCard = require('../models/storefrontRateCard');
+const stellaProfile = require('../AI/stellaProfile');
 const logger = require('../utils/logger');
 
 const route = (fn) => async (req, res) => {
@@ -165,6 +169,20 @@ router.put('/rates', route(async (req, res) => {
   logger.info('Storefront rates set', { merchant: req.merchant.slug, count: rows.length });
   const rates = await StorefrontRateCard.find({ merchantId: req.merchant._id }).sort({ asset: 1, side: 1 });
   res.json({ success: true, data: rates.map(rateOf) });
+}));
+
+router.get('/stella-profile', (req, res) => res.json({ success: true, data: stellaProfile.serialize(req.merchant.stellaProfile) }));
+
+router.put('/stella-profile', route(async (req, res) => {
+  let profile;
+  try { profile = stellaProfile.validate(req.body); } catch (err) {
+    if (err instanceof stellaProfile.ProfileError) return res.status(400).json({ success: false, message: err.message });
+    throw err;
+  }
+  req.merchant.stellaProfile = profile;
+  await req.merchant.save();
+  logger.info('Storefront Stella profile set', { merchant: req.merchant.slug, phrases: profile.phrases.length, faqs: profile.faqs.length });
+  res.json({ success: true, data: stellaProfile.serialize(req.merchant.stellaProfile) });
 }));
 
 module.exports = router;

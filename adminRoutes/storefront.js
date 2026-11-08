@@ -10,6 +10,8 @@
 //   PATCH /merchants/:slug                — { status?, holdDays?, depositNgn?, perTradeMaxNgn?, dailyMaxNgn? }      (super)
 //   POST  /merchants/:slug/rotate-key     — issue the store its own API key (Pro server, bot); any old one stops
 //                                           working. Returns the key and webhook secret ONCE                   (super)
+//   GET   /merchants/:slug/stella-profile — how Stella sounds for this desk
+//   PUT   /merchants/:slug/stella-profile — same body as the desk's own PUT /storefront/stella-profile
 //   GET   /orders?status=&slug=           — e.g. status=REJECTED for refunds to make, PAYOUT_FAILED to fix
 //   POST  /orders/:ref/recall             — { amountNgn, note } a payment was recalled: take it back from the trader (super)
 const express = require('express');
@@ -20,6 +22,7 @@ const StorefrontOrder = require('../models/storefrontOrder');
 const { newKey } = require('../auth/storefrontAuth');
 const ledger = require('../services/storefrontLedger');
 const { serializeOrder } = require('../services/storefrontBuy');
+const stellaProfile = require('../AI/stellaProfile');
 const logger = require('../utils/logger');
 
 // Traders are business accounts: enhanced KYC before they can take payments.
@@ -125,6 +128,24 @@ router.post('/merchants/:slug/rotate-key', superOnly, route(async (req, res) => 
   logger.warn('Storefront API key issued', { slug: m.slug, by: who(req) });
   // Shown once: only the key's hash is stored.
   res.json({ success: true, data: { slug: m.slug, apiKey, webhookSecret: m.webhookSecret } });
+}));
+
+router.get('/merchants/:slug/stella-profile', route(async (req, res) => {
+  const m = await StorefrontMerchant.findOne({ slug: req.params.slug }).select('slug stellaProfile');
+  if (!m) return res.status(404).json({ success: false, error: 'Storefront not found.' });
+  res.json({ success: true, data: stellaProfile.serialize(m.stellaProfile) });
+}));
+
+router.put('/merchants/:slug/stella-profile', route(async (req, res) => {
+  let profile;
+  try { profile = stellaProfile.validate(req.body); } catch (err) {
+    if (err instanceof stellaProfile.ProfileError) return res.status(400).json({ success: false, error: err.message });
+    throw err;
+  }
+  const m = await StorefrontMerchant.findOneAndUpdate({ slug: req.params.slug }, { stellaProfile: profile }, { new: true });
+  if (!m) return res.status(404).json({ success: false, error: 'Storefront not found.' });
+  logger.info('Storefront Stella profile set by admin', { slug: m.slug, by: who(req) });
+  res.json({ success: true, data: stellaProfile.serialize(m.stellaProfile) });
 }));
 
 router.get('/orders', route(async (req, res) => {
