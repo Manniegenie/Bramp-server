@@ -424,28 +424,80 @@ async function startSignIn(to, convo) {
   convo.state = 'SIGNIN_EMAIL';
   convo.signup = { mode: 'SIGNIN' };
   await convo.save();
+  if (flowTokens.enabled('SIGNIN')) {
+    return sender.sendFlow(to, {
+      body: "Let's sign you in with your Bramp email and password PIN. Tap below. (Or reply with your Bramp email and I'll send you a code instead.)",
+      cta: 'Sign in',
+      flowId: flowTokens.flowId('SIGNIN'),
+      token: await flowTokens.issue(to, 'SIGNIN'),
+      screen: 'SIGNIN',
+      mode: flowTokens.mode(),
+    });
+  }
   return askSigninEmail(to);
 }
 
-/** The email of an existing Bramp account; the code goes to it, and entering it signs this number in. */
-async function onSigninEmail(to, convo, { text }) {
-  const email = String(text || '').trim().toLowerCase();
-  if (!validator.isEmail(email)) return sender.sendText(to, "That doesn't look like an email address. Please send the email on your Bramp account, for example: ada@gmail.com");
+const moveNote = (waId) => `This account is on Stella with another WhatsApp number (${maskPhone(waId)}). Signing in here moves it to this number, and that number will be signed out.`;
+
+/**
+ * The email of an existing Bramp account to sign in with (text and Flow).
+ * error: EMAIL | BANNED | NOT_FOUND. elsewhere: the number it's on now, if any.
+ */
+async function setSigninEmail(to, convo, raw) {
+  const email = String(raw || '').trim().toLowerCase();
+  if (!validator.isEmail(email)) return { ok: false, error: 'EMAIL' };
   if (await KYCBlacklist.isBanned('email', email) || await KYCBlacklist.isBanned('phone', `+${to}`)) {
     logger.warn('Stella: blacklisted sign-in attempt', { waId: sender.mask(to) });
-    return sender.sendText(to, "Sorry, I can't sign you in.");
+    return { ok: false, error: 'BANNED' };
   }
-  const user = await User.findOne({ email }).select('_id firstname');
-  if (!user) {
-    return sender.sendText(to, "I couldn't find a Bramp account with that email. Check it and send it again, or reply *sign up* to create a new account.");
-  }
+  const user = await User.findOne({ email }).select('_id');
+  if (!user) return { ok: false, error: 'NOT_FOUND' };
+  convo.state = 'SIGNIN_EMAIL';
   convo.signup.email = email;
   convo.signup.linkUserId = user._id;
   convo.signup.mode = 'SIGNIN';
-  const elsewhere = await StellaCustomer.findOne({ userId: user._id }).select('waId');
-  if (elsewhere) {
-    await sender.sendText(to, `This account is on Stella with another WhatsApp number (${maskPhone(elsewhere.waId)}). Signing in here moves it to this number, and that number will be signed out.`);
+  const other = await StellaCustomer.findOne({ userId: user._id }).select('waId');
+  return { ok: true, elsewhere: other && other.waId !== to ? other.waId : null };
+}
+
+// Same rules and the same fields as the Bramp app's sign-in (routes/signin.js),
+// so a lock on one is a lock on both.
+const MAX_PIN_ATTEMPTS = 5;
+const PIN_LOCK_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Checks the account's password PIN (only ever entered in the sign-in Flow,
+ * never typed in the chat). error: FORMAT | NO_PIN | LOCKED (until) | WRONG (left).
+ */
+async function checkPasswordPin(userId, raw) {
+  const pin = String(raw || '').trim().padStart(6, '0');
+  if (!/^\d{6}$/.test(pin)) return { ok: false, error: 'FORMAT' };
+  const user = await User.findById(userId).select('passwordpin loginAttempts lockUntil');
+  if (!user) return { ok: false, error: 'WRONG', left: 0 };
+  if (user.lockUntil && user.lockUntil > Date.now()) return { ok: false, error: 'LOCKED', until: user.lockUntil };
+  if (!user.passwordpin) return { ok: false, error: 'NO_PIN' };
+  if (await user.comparePasswordPin(pin)) {
+    await User.updateOne({ _id: userId }, { $set: { loginAttempts: 0, lockUntil: null, lastFailedLogin: null } });
+    return { ok: true };
   }
+  const lockExpired = Boolean(user.lockUntil && user.lockUntil <= Date.now());
+  const attempts = lockExpired ? 1 : (user.loginAttempts || 0) + 1;
+  const set = { loginAttempts: attempts, lastFailedLogin: new Date(), ...(lockExpired ? { lockUntil: null } : {}) };
+  if (attempts >= MAX_PIN_ATTEMPTS) set.lockUntil = new Date(Date.now() + PIN_LOCK_MS);
+  await User.updateOne({ _id: userId }, { $set: set });
+  logger.warn('Stella: wrong password PIN at sign-in', { userId: String(userId), attempts });
+  return set.lockUntil ? { ok: false, error: 'LOCKED', until: set.lockUntil } : { ok: false, error: 'WRONG', left: MAX_PIN_ATTEMPTS - attempts };
+}
+
+/** The code goes to the account's email; entering it signs this number in. */
+async function onSigninEmail(to, convo, { text }) {
+  const r = await setSigninEmail(to, convo, text);
+  if (r.error === 'EMAIL') return sender.sendText(to, "That doesn't look like an email address. Please send the email on your Bramp account, for example: ada@gmail.com");
+  if (r.error === 'BANNED') return sender.sendText(to, "Sorry, I can't sign you in.");
+  if (r.error === 'NOT_FOUND') {
+    return sender.sendText(to, "I couldn't find a Bramp account with that email. Check it and send it again, or reply *sign up* to create a new account.");
+  }
+  if (r.elsewhere) await sender.sendText(to, moveNote(r.elsewhere));
   return sendCode(to, convo);
 }
 
@@ -493,4 +545,6 @@ module.exports = {
   handleIncoming, parseFullName, BTN, maskEmail,
   // For the sign-up Flow (AI/stellaFlows.js).
   setName, setEmail, issueCode, checkCode, complete, welcome,
+  // For the sign-in Flow.
+  setSigninEmail, moveNote, checkPasswordPin,
 };

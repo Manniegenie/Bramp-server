@@ -8,6 +8,11 @@
 // screen. NAME → EMAIL → CODE, running the same steps as the text sign-up
 // (AI/stellaCustomers.js), then the Flow closes and Stella carries on in chat.
 //
+// Sign-in (AI/flows/stella-signin.json) uses the endpoint too: email and
+// password PIN, as in the Bramp app (same lockout, same fields). An account
+// without a PIN, or anyone who asks, gets an email code instead (CODE).
+// An account on another number moves here.
+//
 // Identity (AI/flows/stella-kyc.json) needs no endpoint: ID → SELFIE, then the
 // Flow completes and WhatsApp sends us the answers as a message (nfm_reply)
 // with the selfie as media. handleCompletion() downloads it and runs the same
@@ -70,28 +75,101 @@ async function signupScreen(convo, payload) {
       if (!sent.ok) return screen('EMAIL', { first_name: firstName(), error_message: SIGNUP_ERRORS[sent.error] });
       return screen('CODE', { email_masked: masked() });
     }
-    case 'CODE': {
+    case 'CODE':
       if (convo.state !== 'SIGNUP_CODE') return screen('EMAIL', { first_name: firstName(), error_message: 'Please enter your email again.' });
-      if (data.action === 'resend') {
-        const sent = await customers.issueCode(to, convo);
-        return screen('CODE', { email_masked: masked(), error_message: sent.ok ? 'We sent you a new code.' : SIGNUP_ERRORS[sent.error] });
-      }
-      const r = await customers.checkCode(to, convo, data.code);
-      if (!r.ok) {
-        const msg = r.error === 'WRONG' ? (r.left > 0 ? `That code isn't right. ${r.left} ${r.left === 1 ? 'try' : 'tries'} left.` : SIGNUP_ERRORS.TOO_MANY) : SIGNUP_ERRORS[r.error];
-        return screen('CODE', { email_masked: masked(), error_message: msg });
-      }
-      const done = await customers.complete(to, convo);
-      if (!done.ok && done.error === 'TAKEN') return screen('CODE', { email_masked: masked(), error_message: SIGNUP_ERRORS.TAKEN });
-      await flowTokens.retire(convo._id);
-      // Answer Meta first (it waits on us); then carry on in the chat.
-      later(() => customers.welcome(to, done.customer, done.source, done.oldWaId));
-      return closeFlow(payload.flow_token, { signup: done.source.toLowerCase() });
-    }
+      return codeScreen(convo, payload, async () => ({ email_masked: masked() }));
     default:
       return screen('NAME', { error_message: 'Something went wrong. Please start again.' });
   }
 }
+
+/**
+ * The CODE screen, shared by sign-up and sign-in: resend, check, and on the
+ * right code create, link or move the account and close the Flow.
+ * codeData() gives the screen's own data for re-showing it.
+ */
+async function codeScreen(convo, payload, codeData) {
+  const to = convo.waId;
+  const data = payload.data || {};
+  if (data.action === 'resend') {
+    const sent = await customers.issueCode(to, convo);
+    return screen('CODE', { ...(await codeData()), error_message: sent.ok ? 'We sent you a new code.' : SIGNUP_ERRORS[sent.error] });
+  }
+  const r = await customers.checkCode(to, convo, data.code);
+  if (!r.ok) {
+    const msg = r.error === 'WRONG' ? (r.left > 0 ? `That code isn't right. ${r.left} ${r.left === 1 ? 'try' : 'tries'} left.` : SIGNUP_ERRORS.TOO_MANY) : SIGNUP_ERRORS[r.error];
+    return screen('CODE', { ...(await codeData()), error_message: msg });
+  }
+  const done = await customers.complete(to, convo);
+  if (!done.ok) return screen('CODE', { ...(await codeData()), error_message: SIGNUP_ERRORS.TAKEN });
+  await flowTokens.retire(convo._id);
+  // Answer Meta first (it waits on us); then carry on in the chat.
+  later(() => customers.welcome(to, done.customer, done.source, done.oldWaId));
+  return closeFlow(payload.flow_token, { result: done.source.toLowerCase() });
+}
+
+// ── Sign-in (endpoint) ─────────────────────────────────────────────────────
+
+const SIGNIN_ERRORS = {
+  EMAIL: "That doesn't look like an email address.",
+  BANNED: "Sorry, we can't sign you in.",
+  NOT_FOUND: "That email or PIN isn't right.",
+  FORMAT: 'Your password PIN is 6 digits.',
+};
+const lockedMessage = (until) => `Too many wrong PINs. Try again after ${new Date(until).toLocaleString('en-NG', { timeZone: 'Africa/Lagos', hour: 'numeric', minute: '2-digit', day: 'numeric', month: 'short' })}, or use an email code.`;
+
+async function signinCodeData(convo) {
+  const other = convo.signup.linkUserId ? await StellaCustomer.findOne({ userId: convo.signup.linkUserId }).select('waId') : null;
+  const moving = Boolean(other && other.waId !== convo.waId);
+  return {
+    email_masked: customers.maskEmail(convo.signup.email || ''),
+    move_note: moving ? customers.moveNote(other.waId) : 'Signing in links this WhatsApp number to your Bramp account.',
+    has_move: moving,
+  };
+}
+
+async function signinScreen(convo, payload) {
+  const to = convo.waId;
+  const data = payload.data || {};
+  const toCode = async (notice) => {
+    const sent = await customers.issueCode(to, convo);
+    if (!sent.ok) return screen('SIGNIN', { error_message: SIGNUP_ERRORS[sent.error] });
+    return screen('CODE', { ...(await signinCodeData(convo)), ...(notice ? { error_message: notice } : {}) });
+  };
+  switch (payload.screen) {
+    case 'SIGNIN': {
+      const r = await customers.setSigninEmail(to, convo, data.email);
+      if (!r.ok) return screen('SIGNIN', { error_message: SIGNIN_ERRORS[r.error] });
+      if (data.action === 'code') return toCode();
+
+      // Email + password PIN, as in the Bramp app.
+      const pin = await customers.checkPasswordPin(convo.signup.linkUserId, data.pin);
+      if (pin.error === 'NO_PIN') return toCode("Your account has no PIN yet, so we emailed you a code.");
+      if (pin.error === 'FORMAT') return screen('SIGNIN', { error_message: SIGNIN_ERRORS.FORMAT });
+      if (pin.error === 'LOCKED') return screen('SIGNIN', { error_message: lockedMessage(pin.until) });
+      if (pin.error === 'WRONG') {
+        return screen('SIGNIN', { error_message: `That email or PIN isn't right. ${pin.left} ${pin.left === 1 ? 'try' : 'tries'} left.` });
+      }
+      const done = await customers.complete(to, convo);
+      if (!done.ok) return screen('SIGNIN', { error_message: 'Something went wrong. Please try again.' });
+      await flowTokens.retire(convo._id);
+      later(() => customers.welcome(to, done.customer, done.source, done.oldWaId));
+      return closeFlow(payload.flow_token, { result: done.source.toLowerCase() });
+    }
+    case 'CODE':
+      if (convo.state !== 'SIGNUP_CODE' || convo.signup.mode !== 'SIGNIN') return screen('SIGNIN', { error_message: 'Please sign in again.' });
+      return codeScreen(convo, payload, () => signinCodeData(convo));
+    default:
+      return screen('SIGNIN', { error_message: 'Something went wrong. Please start again.' });
+  }
+}
+
+// ── Endpoint ───────────────────────────────────────────────────────────────
+
+const ENDPOINT_FLOWS = {
+  signup_: { purpose: 'SIGNUP', first: 'NAME', handle: signupScreen },
+  signin_: { purpose: 'SIGNIN', first: 'SIGNIN', handle: signinScreen },
+};
 
 /**
  * One decrypted request from a Flow's endpoint (AI/whatsapp.js encrypts the
@@ -100,20 +178,21 @@ async function signupScreen(convo, payload) {
  */
 async function handleExchange(payload) {
   const action = String(payload.action || '').toLowerCase();
-  const token = payload.flow_token;
+  const token = String(payload.flow_token || '');
+  const flow = Object.entries(ENDPOINT_FLOWS).find(([prefix]) => token.startsWith(prefix))?.[1];
   const expired = { error_message: 'This form has expired. Send Stella a message for a new one.' };
 
-  if (!String(token || '').startsWith('signup_')) return screen(payload.screen || 'NAME', expired);
-  const convo = await flowTokens.find(token, 'SIGNUP');
-  if (!convo) return screen(payload.screen || 'NAME', expired);
-  if (await StellaCustomer.exists({ waId: convo.waId })) return closeFlow(token, { signup: 'already' });
+  if (!flow) return screen(payload.screen || 'NAME', expired);
+  const convo = await flowTokens.find(token, flow.purpose);
+  if (!convo) return screen(payload.screen || flow.first, expired);
+  if (await StellaCustomer.exists({ waId: convo.waId })) return closeFlow(token, { result: 'already' });
 
-  if (action === 'init') return screen('NAME', {});
-  if (action === 'back') return screen(payload.screen || 'NAME', {});
-  if (action !== 'data_exchange') return screen(payload.screen || 'NAME', { error_message: 'Something went wrong. Please try again.' });
+  if (action === 'init') return screen(flow.first, {});
+  if (action === 'back') return screen(payload.screen || flow.first, {});
+  if (action !== 'data_exchange') return screen(payload.screen || flow.first, { error_message: 'Something went wrong. Please try again.' });
 
-  const r = await signupScreen(convo, payload);
-  logger.info('Stella: sign-up Flow', { waId: sender.mask(convo.waId), screen: payload.screen, next: r.screen, error: Boolean(r.data?.error_message) });
+  const r = await flow.handle(convo, payload);
+  logger.info('Stella: Flow screen', { flow: flow.purpose, waId: sender.mask(convo.waId), screen: payload.screen, next: r.screen, error: Boolean(r.data?.error_message) });
   return r;
 }
 

@@ -51,7 +51,7 @@ const stellaConversationSchema = new mongoose.Schema({
   // and a new Flow replaces the old one.
   flow: {
     tokenHash: { type: String, default: null },
-    purpose: { type: String, enum: ['SIGNUP', 'KYC', null], default: null },
+    purpose: { type: String, enum: ['SIGNUP', 'SIGNIN', 'KYC', null], default: null },
     expiresAt: { type: Date, default: null },
   },
 }, { timestamps: true });

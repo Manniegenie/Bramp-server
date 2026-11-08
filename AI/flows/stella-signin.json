@@ -1,0 +1,68 @@
+{
+  "version": "7.3",
+  "data_api_version": "3.0",
+  "routing_model": {
+    "SIGNIN": ["CODE"],
+    "CODE": []
+  },
+  "screens": [
+    {
+      "id": "SIGNIN",
+      "title": "Sign in to Bramp",
+      "terminal": true,
+      "success": true,
+      "sensitive": ["pin"],
+      "data": {},
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          { "type": "TextBody", "text": "Use the email and password PIN you sign in to Bramp with." },
+          { "type": "TextInput", "name": "email", "label": "Email", "input-type": "email", "required": true, "max-chars": 80 },
+          { "type": "TextInput", "name": "pin", "label": "Password PIN", "input-type": "passcode", "required": true, "min-chars": 5, "max-chars": 6 },
+          { "type": "TextCaption", "text": "If your account is on another WhatsApp number, signing in here moves it to this one." },
+          {
+            "type": "EmbeddedLink",
+            "text": "No PIN? Use an email code instead",
+            "on-click-action": { "name": "data_exchange", "payload": { "email": "${form.email}", "action": "code" } }
+          },
+          {
+            "type": "Footer",
+            "label": "Sign in",
+            "on-click-action": { "name": "data_exchange", "payload": { "email": "${form.email}", "pin": "${form.pin}" } }
+          }
+        ]
+      }
+    },
+    {
+      "id": "CODE",
+      "title": "Enter your code",
+      "terminal": true,
+      "success": true,
+      "sensitive": ["code"],
+      "data": {
+        "email_masked": { "type": "string", "__example__": "a***@gmail.com" },
+        "move_note": { "type": "string", "__example__": "This account is on another WhatsApp number. Signing in here moves it to this number." },
+        "has_move": { "type": "boolean", "__example__": false }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          { "type": "TextBody", "text": "Enter the 6-digit code we sent to" },
+          { "type": "TextBody", "text": "${data.email_masked}", "font-weight": "bold" },
+          { "type": "TextCaption", "text": "${data.move_note}", "visible": "${data.has_move}" },
+          { "type": "TextInput", "name": "code", "label": "Code", "input-type": "passcode", "required": true, "min-chars": 6, "max-chars": 6 },
+          {
+            "type": "EmbeddedLink",
+            "text": "Send a new code",
+            "on-click-action": { "name": "data_exchange", "payload": { "action": "resend" } }
+          },
+          {
+            "type": "Footer",
+            "label": "Sign in",
+            "on-click-action": { "name": "data_exchange", "payload": { "code": "${form.code}" } }
+          }
+        ]
+      }
+    }
+  ]
+}

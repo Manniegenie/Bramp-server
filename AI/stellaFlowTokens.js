@@ -5,9 +5,10 @@
 // one per Flow sent (a new one replaces the old), valid for an hour, and only
 // its hash is stored on StellaConversation.
 //
-// Flows are off until their IDs are set (both made in WhatsApp Manager from
+// Flows are off until their IDs are set (each made in WhatsApp Manager from
 // the JSON in AI/flows/):
 //   STELLA_SIGNUP_FLOW_ID — sign-up: name → email → code (uses the endpoint)
+//   STELLA_SIGNIN_FLOW_ID — sign-in: email → code (uses the endpoint)
 //   STELLA_KYC_FLOW_ID    — identity: NIN/BVN → camera selfie (no endpoint)
 //   STELLA_FLOW_MODE      — 'draft' to test unpublished Flows; default 'published'
 // Without them Stella falls back to sign-up by text and the bramp.shop link.
@@ -17,7 +18,8 @@ const StellaConversation = require('../models/stellaConversation');
 const TOKEN_TTL_MINUTES = 60;
 const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 
-const flowId = (purpose) => (purpose === 'SIGNUP' ? process.env.STELLA_SIGNUP_FLOW_ID : process.env.STELLA_KYC_FLOW_ID) || null;
+const FLOW_ENV = { SIGNUP: 'STELLA_SIGNUP_FLOW_ID', SIGNIN: 'STELLA_SIGNIN_FLOW_ID', KYC: 'STELLA_KYC_FLOW_ID' };
+const flowId = (purpose) => process.env[FLOW_ENV[purpose]] || null;
 const enabled = (purpose) => Boolean(flowId(purpose));
 const mode = () => (process.env.STELLA_FLOW_MODE === 'draft' ? 'draft' : 'published');
 
