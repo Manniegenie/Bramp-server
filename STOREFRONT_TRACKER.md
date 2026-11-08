@@ -200,7 +200,10 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - Fixed in M3: `webhookLimiter` (50 per 15 minutes per IP) and the general limiter (500 per 15 minutes) both covered `/whatsapp`.
 - `@anthropic-ai/sdk` is 0.32.1 (late 2024). Stella works with it (fields passed through), but upgrading it is its own task: it also changes the live `/chatbot` (`AI/Chatbot.js`), which needs testing alongside.
 - "Your account moved" warning to the old number:
-  - Sent as the `stella_account_moved` utility template once it's approved and `STELLA_TEMPLATE_ACCOUNT_MOVED` is set. Until then it's free-form, which only reaches numbers active in the last 24 hours.
+  - Sent as a utility template once it's approved and `STELLA_TEMPLATE_ACCOUNT_MOVED` is set. Until then it's free-form, which only reaches numbers active in the last 24 hours.
+  - The template is `stella_account_moved_v2`, English (US): `STELLA_TEMPLATE_ACCOUNT_MOVED=stella_account_moved_v2` and `STELLA_TEMPLATE_LANGUAGE=en_US`.
+    - Body `{{1}}` = last 4 digits of the new number, `{{2}}` = date and time. Footer "Bramp will never ask for your PIN." Quick reply "This wasn't me". 1-day validity.
+    - Submitted 2026-11-08, in review. Meta's assistant says publishing Flows also needs at least one approved template.
   - "This wasn't me" (template button, or typed "not me") puts the account on `securityHold`. Stella then serves nothing on it until a super admin calls `POST /admin/storefront/stella-customers/:waId/clear-hold` with a note.
   - Still to add: an email to the account owner as well.
 - Brevo's monthly allowance (5,000 emails) ran out on 2026-11-08 and resets on 10 Nov. No Bramp email was delivered meanwhile, including Stella's codes. Stella's codes now use `sendEmailVerificationOTP` (`BREVO_TEMPLATE_EMAIL_VERIFICATION`, as the app's email verification does).
