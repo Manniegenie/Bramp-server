@@ -85,8 +85,8 @@ async function signupScreen(convo, payload) {
       if (!done.ok && done.error === 'TAKEN') return screen('CODE', { email_masked: masked(), error_message: SIGNUP_ERRORS.TAKEN });
       await flowTokens.retire(convo._id);
       // Answer Meta first (it waits on us); then carry on in the chat.
-      later(() => (done.ok ? customers.welcome(to, done.customer, done.source) : sender.sendText(to, customers.LINKED_ELSEWHERE)));
-      return closeFlow(payload.flow_token, { signup: done.ok ? 'done' : 'linked_elsewhere' });
+      later(() => customers.welcome(to, done.customer, done.source, done.oldWaId));
+      return closeFlow(payload.flow_token, { signup: done.source.toLowerCase() });
     }
     default:
       return screen('NAME', { error_message: 'Something went wrong. Please start again.' });

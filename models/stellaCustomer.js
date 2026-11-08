@@ -13,6 +13,9 @@ const stellaCustomerSchema = new mongoose.Schema({
   // existing Bramp user connected WhatsApp to their account.
   source: { type: String, enum: ['CREATED', 'LINKED'], required: true },
   linkedAt: { type: Date, required: true, default: Date.now },
+  // Signed in from a new number (AI/stellaCustomers.js): the account moves
+  // here with its desk; the numbers it left are kept.
+  movedFrom: { type: [{ _id: false, waId: String, movedAt: Date }], default: [] },
 
   // The customer's desk (AI/stellaRouter.js). Sticky: set once and kept
   // until the customer explicitly switches; never changed by silence, a new

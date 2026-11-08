@@ -7,11 +7,12 @@ const mongoose = require('mongoose');
 //
 // Sign-up:  NEW → SIGNUP_NAME → SIGNUP_EMAIL → SIGNUP_CODE → READY
 // Link:     NEW → LINK_CONFIRM → SIGNUP_CODE → READY   (number already on a Bramp account)
+// Sign in:  "sign in" → SIGNIN_EMAIL → SIGNUP_CODE → READY   (any Bramp account, by its email)
 const stellaConversationSchema = new mongoose.Schema({
   waId: { type: String, required: true, unique: true },
   state: {
     type: String,
-    enum: ['NEW', 'SIGNUP_NAME', 'SIGNUP_EMAIL', 'SIGNUP_CODE', 'LINK_CONFIRM', 'READY'],
+    enum: ['NEW', 'SIGNUP_NAME', 'SIGNUP_EMAIL', 'SIGNUP_CODE', 'LINK_CONFIRM', 'SIGNIN_EMAIL', 'READY'],
     default: 'NEW',
   },
   // Customer-service window: free-form replies are allowed for 24 hours
@@ -38,6 +39,7 @@ const stellaConversationSchema = new mongoose.Schema({
     lastname: { type: String, default: null },
     email: { type: String, default: null },
     linkUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }, // existing account to link instead of creating one
+    mode: { type: String, enum: ['SIGNUP', 'SIGNIN', null], default: null }, // SIGNIN: they typed "sign in"
     codeHash: { type: String, default: null }, // sha256(waId:code)
     codeExpiresAt: { type: Date, default: null },
     attempts: { type: Number, default: 0 }, // wrong codes for the current code

@@ -74,6 +74,13 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
     1. Make an RSA key: the private half goes in `PRIVATE_KEY`; the public half is uploaded to the number (`/whatsapp_business_encryption`).
     2. Create both Flows in WhatsApp Manager. The sign-up Flow's endpoint is `https://priscaai.online/whatsapp/whatsapp`.
     3. Set the two IDs, plus `STELLA_FLOW_MODE=draft` until they're published.
+- [x] **Sign in and moving to a new number** (user request, 2026-11-08). Tested: 37/37 sign-up checks (11 new); all suites 231/231.
+  - Before a number is linked, "sign in" / "log in" (any short message saying so) asks for the email on the Bramp account. A code goes to that email, and entering it signs the number in. "sign up" starts sign-up over.
+  - The sign-up message says "Already on Bramp? Reply *sign in*".
+  - Account already on another WhatsApp number: Stella warns before sending the code, then the account moves here (same `StellaCustomer`: desk, KYC and history come along; the old number goes in `movedFrom`).
+    - The old number gets "moved to +234 ••• — not you? contact support". This also applies when sign-up or the Flow uses that account's email.
+  - Already signed in: the bare "sign in" says which account; other messages mentioning login go to Stella as usual.
+  - Protection: the email code, plus the message to the old number. Add the PIN in M9.
 - [~] **M8. Webhooks hand storefront events over.** Committed locally, **not deployed**. Tested on the three real webhook routes with real signatures on a throwaway local Mongo (Obiex, Glyde deactivation and the trader's webhook faked): 18/18 checks. All earlier suites still pass.
   - Glyde payments (`nairawebhook.js`): `storefrontBuy.handleGlydeEvent` straight after Metusela's and before the Bramp user deposit crediting. It only matches storefront orders (reference, one-time account uid or account number); anything else falls through unchanged.
   - Obiex withdrawals (`obiexwebhooktrx.js`, `chatbotwebhook.js`): `storefrontBuy.handleObiexWithdrawal` added after Metusela's two handlers. A Bramp user's own withdrawal is found first and never reaches it. Storefront payouts don't create a Bramp `Transaction`.
@@ -190,6 +197,8 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - Before M2, `/whatsapp` ignored every message. `server.js` reads the raw body first, so `req.body` was empty. M2 parses `req.rawBody`.
 - Fixed in M3: `webhookLimiter` (50 per 15 minutes per IP) and the general limiter (500 per 15 minutes) both covered `/whatsapp`.
 - `@anthropic-ai/sdk` is 0.32.1 (late 2024). Stella works with it (fields passed through), but upgrading it is its own task: it also changes the live `/chatbot` (`AI/Chatbot.js`), which needs testing alongside.
+- The "your account moved" message to the old number is free-form, so WhatsApp only delivers it if that number wrote to Stella in the last 24 hours. It needs an approved utility template (e.g. `account_moved`), plus an email to the account, to always reach the owner.
+- Brevo's monthly allowance (5,000 emails) ran out on 2026-11-08 and resets on 10 Nov. No Bramp email was delivered meanwhile, including Stella's codes. Stella's codes now use `sendEmailVerificationOTP` (`BREVO_TEMPLATE_EMAIL_VERIFICATION`, as the app's email verification does).
 - WhatsApp usernames are rolling out (Meta's "BSUID"): a customer with a username can message with a business-scoped user id instead of a phone number. `AI/whatsapp.js` drops any sender id that isn't 10–15 digits, so those customers get no reply. Needs handling before usernames go live in Nigeria.
 - Pre-existing: `models/kyc.js` declares its `youverifyId` index with both `sparse` and `partialFilterExpression`, which MongoDB rejects. Mongoose logs it in the background, so the server runs, but that index is probably missing. Not touched.
 - Running `server.js` locally needs `OBIEX_API_KEY`, `OBIEX_API_SECRET` and `OBIEX_BASE_URL` (dummies are fine), plus `MONGODB_URI` pointing at the local test Mongo. Local `.env` has none of them.

@@ -48,6 +48,17 @@ const BTN = {
 const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 const codeHash = (waId, code) => sha256(`${waId}:${code}`);
 
+// "sign in" / "log in" from a number that isn't linked yet: any message that
+// short and saying so. From a linked number only the bare keyword counts, so
+// "I can't log in to the app" still goes to Stella.
+const SIGNIN_LOOSE = /\b(sign[\s-]?in|log[\s-]?in|login|signin)\b/i;
+const SIGNIN_EXACT = /^\s*(sign[\s-]?in|log[\s-]?in|login|signin)\s*[.!]?\s*$/i;
+const SIGNUP_EXACT = /^\s*(sign[\s-]?up|signup|register|create (an )?account)\s*[.!]?\s*$/i;
+const wantsSignIn = (text, linked) => Boolean(text) && !text.includes('@') // login@… is an email, not a request
+  && (linked ? SIGNIN_EXACT.test(text) : text.length <= 80 && SIGNIN_LOOSE.test(text));
+
+const maskPhone = (waId) => `+${waId.slice(0, 3)} ${waId.slice(3, 6)} ••• ${waId.slice(-4)}`;
+
 function maskEmail(email) {
   const [local, domain] = String(email).split('@');
   return `${local.slice(0, 1)}${'*'.repeat(Math.max(local.length - 1, 2))}@${domain}`;
@@ -78,7 +89,7 @@ function parseFullName(text) {
 async function askName(to) {
   if (flowTokens.enabled('SIGNUP')) {
     return sender.sendFlow(to, {
-      body: 'Tap below to set up your account, or just reply with your full name as it appears on your BVN or NIN.',
+      body: 'Tap below to set up your account, or just reply with your full name as it appears on your BVN or NIN.\n\nAlready on Bramp? Reply *sign in*.',
       cta: 'Set up my account',
       flowId: flowTokens.flowId('SIGNUP'),
       token: await flowTokens.issue(to, 'SIGNUP'),
@@ -86,15 +97,17 @@ async function askName(to) {
       mode: flowTokens.mode(),
     });
   }
-  return sender.sendText(to, "What's your full name, as it appears on your BVN or NIN?");
+  return sender.sendText(to, "What's your full name, as it appears on your BVN or NIN?\n\nAlready on Bramp? Reply *sign in*.");
 }
+
+const askSigninEmail = (to) => sender.sendText(to, "Let's sign you in. What's the email address on your Bramp account?");
 const askEmail = (to, firstname) => sender.sendText(to,
   `Thanks, ${firstname}. What's your email address? I'll send a 6-digit code to confirm it, and your receipts go there too.`);
 
 function askCode(to, convo) {
   const buttons = [{ id: BTN.RESEND, title: 'Resend code' }];
-  // Only on the sign-up path (they typed the email); linking uses the account's own.
-  if (convo.signup.firstname) buttons.push({ id: BTN.CHANGE_EMAIL, title: 'Change email' });
+  // Only when they typed the email (sign-up or sign-in); linking by number uses the account's own.
+  if (convo.signup.firstname || convo.signup.mode === 'SIGNIN') buttons.push({ id: BTN.CHANGE_EMAIL, title: 'Change email' });
   return sender.sendButtons(to, `I've sent a 6-digit code to ${maskEmail(convo.signup.email)}. Reply with the code.`, buttons);
 }
 
@@ -105,6 +118,7 @@ async function repeatStep(to, convo) {
     case 'SIGNUP_EMAIL': return askEmail(to, convo.signup.firstname);
     case 'SIGNUP_CODE': return askCode(to, convo);
     case 'LINK_CONFIRM': return askLinkConfirm(to, convo);
+    case 'SIGNIN_EMAIL': return askSigninEmail(to);
     default: return null;
   }
 }
@@ -265,9 +279,11 @@ async function createUser(waId, s) {
 }
 
 /**
- * Creates or links the Bramp account once the code is right.
- * error: TAKEN (email or number registered meanwhile; back to the email step)
- *      | LINKED_ELSEWHERE (that account is on another WhatsApp number).
+ * Creates or links the Bramp account once the code is right. An account
+ * already on another WhatsApp number moves here (source MOVED, with
+ * oldWaId): the code to the account's email proves it's theirs, and
+ * welcome() tells the old number.
+ * error: TAKEN (email or number registered meanwhile; back to the email step).
  */
 async function complete(to, convo) {
   const s = convo.signup;
@@ -291,11 +307,17 @@ async function complete(to, convo) {
     }
   }
 
-  if (await StellaCustomer.exists({ userId })) {
-    convo.state = 'NEW';
+  const elsewhere = await StellaCustomer.findOne({ userId });
+  if (elsewhere) {
+    const oldWaId = elsewhere.waId;
+    elsewhere.movedFrom.push({ waId: oldWaId, movedAt: new Date() });
+    elsewhere.waId = to;
+    await elsewhere.save();
+    convo.state = 'READY';
     convo.signup = {};
     await convo.save();
-    return { ok: false, error: 'LINKED_ELSEWHERE' };
+    logger.warn('Stella: account moved to a new number', { from: sender.mask(oldWaId), to: sender.mask(to), userId: String(userId) });
+    return { ok: true, customer: elsewhere, source: 'MOVED', oldWaId };
   }
 
   const customer = await StellaCustomer.create({ waId: to, userId, source });
@@ -306,22 +328,28 @@ async function complete(to, convo) {
   return { ok: true, customer, source };
 }
 
-const LINKED_ELSEWHERE = 'That Bramp account is already linked to another WhatsApp number. Please contact Bramp support to move it.';
-
 /** What Stella says once the account is ready, then straight on to the identity check. */
-async function welcome(to, customer, source) {
-  await sender.sendText(to, source === 'LINKED'
-    ? "You're linked ✅ Stella now uses your Bramp account."
-    : "You're set up ✅ Your Bramp account is ready.");
+async function welcome(to, customer, source, oldWaId = null) {
+  if (source === 'MOVED') {
+    await sender.sendText(to, "You're signed in ✅ Your Stella account is now on this number, with your desk and settings.");
+    // The owner should know at once if this wasn't them. Free-form messages
+    // only reach numbers that wrote to us in the last 24 hours; beyond that
+    // this needs an approved template (tracker).
+    const told = await sender.sendText(oldWaId,
+      `Your Stella account was just moved to another WhatsApp number (${maskPhone(to)}) after a sign-in with your Bramp email code. If this wasn't you, contact Bramp support right away.`);
+    if (!told.ok) logger.warn('Stella: could not tell the old number about a move', { oldWaId: sender.mask(oldWaId), error: told.error });
+  } else {
+    await sender.sendText(to, source === 'LINKED'
+      ? "You're signed in ✅ Stella now uses your Bramp account."
+      : "You're set up ✅ Your Bramp account is ready.");
+  }
   return stellaKyc.promptIfNeeded(to, customer);
 }
 
 async function finish(to, convo) {
   const r = await complete(to, convo);
-  if (r.ok) return welcome(to, r.customer, r.source);
-  return sender.sendText(to, r.error === 'TAKEN'
-    ? 'That email or number was just registered on Bramp. Please send a different email address.'
-    : LINKED_ELSEWHERE);
+  if (r.ok) return welcome(to, r.customer, r.source, r.oldWaId);
+  return sender.sendText(to, 'That email or number was just registered on Bramp. Please send a different email address.');
 }
 
 // ── Steps ──────────────────────────────────────────────────────────────────
@@ -345,7 +373,7 @@ async function start(to, convo, displayName) {
 
 async function onLinkConfirm(to, convo, { replyId }) {
   if (replyId === BTN.LINK_NO) {
-    return sender.sendText(to, "No problem. This number is already registered on Bramp, so I can't open a new account with it. Please contact Bramp support.");
+    return sender.sendText(to, "No problem. This number is already registered on Bramp, so I can't open a new account with it. If you have a different Bramp account, reply *sign in*. Otherwise please contact Bramp support.");
   }
   if (replyId !== BTN.LINK_YES) return askLinkConfirm(to, convo);
   const user = await User.findById(convo.signup.linkUserId).select('email firstname');
@@ -370,8 +398,8 @@ async function onEmail(to, convo, { text }) {
 
 async function onCode(to, convo, { text, replyId }) {
   if (replyId === BTN.RESEND) return sendCode(to, convo);
-  if (replyId === BTN.CHANGE_EMAIL && convo.signup.firstname) {
-    convo.state = 'SIGNUP_EMAIL';
+  if (replyId === BTN.CHANGE_EMAIL && (convo.signup.firstname || convo.signup.mode === 'SIGNIN')) {
+    convo.state = convo.signup.mode === 'SIGNIN' ? 'SIGNIN_EMAIL' : 'SIGNUP_EMAIL';
     convo.signup.codeHash = null;
     convo.signup.linkUserId = null;
     await convo.save();
@@ -390,7 +418,38 @@ async function onCode(to, convo, { text, replyId }) {
   return sender.sendText(to, r.left > 0 ? `That code isn't right. ${r.left} ${r.left === 1 ? 'try' : 'tries'} left.` : 'That code isn\'t right. Tap "Resend code" for a new one.');
 }
 
-const STEPS = { SIGNUP_NAME: onName, SIGNUP_EMAIL: onEmail, SIGNUP_CODE: onCode, LINK_CONFIRM: onLinkConfirm };
+// ── Sign in ────────────────────────────────────────────────────────────────
+
+async function startSignIn(to, convo) {
+  convo.state = 'SIGNIN_EMAIL';
+  convo.signup = { mode: 'SIGNIN' };
+  await convo.save();
+  return askSigninEmail(to);
+}
+
+/** The email of an existing Bramp account; the code goes to it, and entering it signs this number in. */
+async function onSigninEmail(to, convo, { text }) {
+  const email = String(text || '').trim().toLowerCase();
+  if (!validator.isEmail(email)) return sender.sendText(to, "That doesn't look like an email address. Please send the email on your Bramp account, for example: ada@gmail.com");
+  if (await KYCBlacklist.isBanned('email', email) || await KYCBlacklist.isBanned('phone', `+${to}`)) {
+    logger.warn('Stella: blacklisted sign-in attempt', { waId: sender.mask(to) });
+    return sender.sendText(to, "Sorry, I can't sign you in.");
+  }
+  const user = await User.findOne({ email }).select('_id firstname');
+  if (!user) {
+    return sender.sendText(to, "I couldn't find a Bramp account with that email. Check it and send it again, or reply *sign up* to create a new account.");
+  }
+  convo.signup.email = email;
+  convo.signup.linkUserId = user._id;
+  convo.signup.mode = 'SIGNIN';
+  const elsewhere = await StellaCustomer.findOne({ userId: user._id }).select('waId');
+  if (elsewhere) {
+    await sender.sendText(to, `This account is on Stella with another WhatsApp number (${maskPhone(elsewhere.waId)}). Signing in here moves it to this number, and that number will be signed out.`);
+  }
+  return sendCode(to, convo);
+}
+
+const STEPS = { SIGNUP_NAME: onName, SIGNUP_EMAIL: onEmail, SIGNUP_CODE: onCode, LINK_CONFIRM: onLinkConfirm, SIGNIN_EMAIL: onSigninEmail };
 
 /**
  * One inbound message. Returns the StellaCustomer if this number is linked
@@ -405,9 +464,17 @@ async function handleIncoming({ waId, text, replyId, displayName }) {
   );
 
   const customer = await StellaCustomer.findOne({ waId });
-  if (customer) return customer;
+  if (customer) {
+    if (!wantsSignIn(text, true) && !SIGNUP_EXACT.test(text || '')) return customer;
+    const user = await User.findById(customer.userId).select('email');
+    await sender.sendText(waId, `You're already signed in on this number with ${maskEmail(user?.email || '')}. To use Stella on a new number, message me from that number and reply *sign in*.`);
+    return null;
+  }
 
   if (/^\s*(start over|restart)\s*$/i.test(text || '')) return start(waId, convo, displayName).then(() => null);
+  // "sign in" at any point before they're linked; "sign up" starts sign-up over.
+  if (convo.state !== 'SIGNUP_CODE' && wantsSignIn(text, false)) return startSignIn(waId, convo).then(() => null);
+  if (SIGNUP_EXACT.test(text || '')) return start(waId, convo, displayName).then(() => null);
 
   const step = STEPS[convo.state];
   if (!step) {
@@ -425,5 +492,5 @@ async function handleIncoming({ waId, text, replyId, displayName }) {
 module.exports = {
   handleIncoming, parseFullName, BTN, maskEmail,
   // For the sign-up Flow (AI/stellaFlows.js).
-  setName, setEmail, issueCode, checkCode, complete, welcome, LINKED_ELSEWHERE,
+  setName, setEmail, issueCode, checkCode, complete, welcome,
 };
