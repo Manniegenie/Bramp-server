@@ -266,3 +266,4 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - **2026-11-08:** On the live server, Meta refuses to *send* Flow messages too, even drafts ("Blocked by Integrity"), so customers got no reply.
   - Fix: when a Flow can't be sent, Stella uses the text version and pauses Flows for an hour (`stellaFlowTokens.sendFailed`). That covers sign-up by text, sign-in by email code, and KYC by the bramp.shop link.
   - Fallback test: 4/4.
+- **2026-11-09:** `stella_account_moved_v2` is Active. App Review for `whatsapp_business_messaging` is in progress; `whatsapp_business_management` has to wait for it. Next: send the template once ("First Message Sent"), then add `STELLA_TEMPLATE_ACCOUNT_MOVED` and `STELLA_TEMPLATE_LANGUAGE=en_US` to the server's `.env`.
