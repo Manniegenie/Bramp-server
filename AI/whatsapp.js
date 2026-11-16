@@ -11,6 +11,11 @@
 // parse req.rawBody ourselves. Messages are acknowledged with 200 at once and
 // handled afterwards, so a slow reply never makes Meta retry. Sending is done
 // by AI/stellaSender.js; models/stellaMessage.js is the duplicate check.
+//
+// POST /whatsapp/ycloud is the same for YCloud (https://<server>/whatsapp/ycloud):
+// signed with YCloud-Signature (YCLOUD_WEBHOOK_SECRET), one event per request.
+// Inbound messages and delivery updates are turned into Meta's shape and go
+// through the same handlers. Flows still talk to /whatsapp/whatsapp directly.
 
 const express = require('express');
 const router = express.Router();
@@ -30,6 +35,10 @@ const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'vibecode';
 // Flows security
 const APP_SECRET  = process.env.META_APP_SECRET || ''; // HMAC for every POST from Meta
 const PRIVATE_KEY = (process.env.PRIVATE_KEY || '').replace(/\\n/g, '\n'); // PEM with BEGIN/END lines
+
+// YCloud: the endpoint's signing secret (whsec_...), shown when the endpoint is created
+const YCLOUD_WEBHOOK_SECRET = process.env.YCLOUD_WEBHOOK_SECRET || '';
+const YCLOUD_TOLERANCE_SECONDS = 300;
 
 // ===== One message at a time per customer =====
 // A customer who sends two messages quickly mustn't have both race through
@@ -75,6 +84,18 @@ function validateMetaSignature(req) {
   const ours = hmac.digest('hex');
   try { return crypto.timingSafeEqual(Buffer.from(their, 'hex'), Buffer.from(ours, 'hex')); }
   catch { return false; }
+}
+
+// ===== YCloud signature: "t=<unix seconds>,s=<hex HMAC-SHA256 of `${t}.${rawBody}`>" =====
+function validateYCloudSignature(req) {
+  if (!YCLOUD_WEBHOOK_SECRET) return false; // not configured: refuse, never trust
+  const parts = String(req.get('YCloud-Signature') || '').split(',').map(p => p.trim().split('='));
+  const t = parts.find(([k]) => k === 't')?.[1] || '';
+  const sigs = parts.filter(([k, v]) => k === 's' && /^[0-9a-f]{64}$/i.test(v || '')).map(([, v]) => v);
+  if (!/^\d+$/.test(t) || !sigs.length) return false;
+  if (Math.abs(Date.now() / 1000 - Number(t)) > YCLOUD_TOLERANCE_SECONDS) return false;
+  const ours = crypto.createHmac('sha256', YCLOUD_WEBHOOK_SECRET).update(`${t}.${req.rawBody || ''}`).digest();
+  return sigs.some(s => crypto.timingSafeEqual(Buffer.from(s, 'hex'), ours));
 }
 
 // ===== Crypto helpers (Flows) =====
@@ -213,6 +234,55 @@ async function processWebhook(b) {
     }
   }
 }
+
+// ===== YCloud events → Meta's shape =====
+// YCloud keeps Meta's message objects (text, interactive, button, image…)
+// and adds its own envelope. We key messages by wamid, as with Meta, so the
+// duplicate check and the typing indicator work the same way.
+function fromYCloudInbound(m) {
+  const msg = { ...m, id: m.wamid || m.id, from: m.from };
+  delete msg.wamid; delete msg.customerProfile; delete msg.wabaId; delete msg.to; delete msg.sendTime;
+  const contact = { wa_id: sender.waDigits(m.from), profile: { name: m.customerProfile?.name } };
+  return { msg, contact };
+}
+
+function fromYCloudStatus(m) {
+  const error = m.errorMessage || m.whatsappApiError?.message || null;
+  return { id: m.wamid || m.id, status: m.status, errors: error ? [{ message: error }] : [] };
+}
+
+async function processYCloudEvent(ev) {
+  if (ev.type === 'whatsapp.inbound_message.received' && ev.whatsappInboundMessage) {
+    const { msg, contact } = fromYCloudInbound(ev.whatsappInboundMessage);
+    await inOrder(sender.waDigits(msg.from), () => handleMessage(msg, contact))
+      .catch(err => logger.error('Stella: message handling failed', { id: msg.id, error: err.message, stack: err.stack }));
+    return;
+  }
+  if (ev.type === 'whatsapp.message.updated' && ev.whatsappMessage) {
+    const st = fromYCloudStatus(ev.whatsappMessage);
+    try { await handleStatus(st); }
+    catch (err) { logger.warn('Stella: status update failed', { id: st.id, error: err.message }); }
+    return;
+  }
+  if (ev.type === 'whatsapp.flow.status_change' || ev.type === 'whatsapp.template.reviewed' || ev.type === 'whatsapp.phone_number.quality_updated') {
+    logger.warn('Stella: YCloud account event', { type: ev.type, event: ev });
+    return;
+  }
+  logger.info('Stella: YCloud event ignored', { type: ev.type, id: ev.id });
+}
+
+router.post('/ycloud', (req, res) => {
+  if (!validateYCloudSignature(req)) {
+    logger.warn('Stella: rejected request with a bad or missing YCloud signature', { ip: req.ip, secretConfigured: !!YCLOUD_WEBHOOK_SECRET });
+    return res.status(401).send('');
+  }
+  const ev = parseBody(req);
+  if (!ev || !ev.type) return res.status(400).send('');
+  // Acknowledge first: YCloud retries on a slow answer. Its retries reuse the
+  // event id; for messages the wamid duplicate check catches them.
+  res.status(200).json({ status: 'ok' });
+  processYCloudEvent(ev).catch(err => logger.error('Stella: YCloud webhook processing failed', { type: ev.type, error: err.message, stack: err.stack }));
+});
 
 // ===== Unified endpoint =====
 router.post('/whatsapp', async (req, res) => {

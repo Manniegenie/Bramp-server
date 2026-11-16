@@ -1,19 +1,53 @@
 // AI/stellaSender.js
-// The only place Stella calls Meta's send API. Everything Stella says goes
+// The only place Stella calls a WhatsApp send API. Everything Stella says goes
 // through here, so rate limits, templates outside the 24-hour window and
 // per-order message cost can be added in one place later. Each sent message
-// is logged in models/stellaMessage.js; Meta's delivery statuses update it
+// is logged in models/stellaMessage.js; delivery statuses update it
 // (AI/whatsapp.js). Resolves to { ok, id, error } and never throws.
+//
+// Two providers, same message bodies: YCloud when YCLOUD_API_KEY is set
+// (YCLOUD_FROM_NUMBER is the sending number, E.164), otherwise Meta's Cloud
+// API directly (META_ACCESS_TOKEN, META_PHONE_NUMBER_ID).
 const axios = require('axios');
 const StellaMessage = require('../models/stellaMessage');
 const logger = require('../utils/logger');
 
 const GRAPH_VERSION = 'v22.0';
+const YCLOUD_BASE = 'https://api.ycloud.com/v2';
 
 const waDigits = (v) => String(v || '').replace(/[^\d]/g, '');
 const mask = (waId) => `${waDigits(waId).slice(0, 6)}****`;
+const useYCloud = () => !!process.env.YCLOUD_API_KEY;
+
+// sendDirectly waits for Meta's answer, so a failure comes back here instead
+// of only in a later webhook. The id we keep is the wamid, the same id
+// delivery-status webhooks and inbound replies (context) refer to.
+async function postYCloud(payload) {
+  const from = process.env.YCLOUD_FROM_NUMBER;
+  if (!from) return { ok: false, id: null, error: 'NOT_CONFIGURED' };
+  try {
+    const resp = await axios.post(
+      `${YCLOUD_BASE}/whatsapp/messages/sendDirectly`,
+      { ...payload, from, to: `+${waDigits(payload.to)}` },
+      { timeout: 15000, headers: { 'X-API-Key': process.env.YCLOUD_API_KEY, 'Content-Type': 'application/json' } }
+    );
+    const m = resp.data || {};
+    if (m.status === 'failed') {
+      const error = m.errorMessage || m.whatsappApiError?.message || 'failed';
+      logger.error('Stella: YCloud send failed', { type: payload.type, to: mask(payload.to), code: m.errorCode, error });
+      return { ok: false, id: null, error };
+    }
+    return { ok: true, id: m.wamid || m.id || null, error: null };
+  } catch (err) {
+    const data = err.response?.data;
+    const error = data?.error?.whatsappApiError?.message || data?.error?.message || data?.message || err.message;
+    logger.error('Stella: YCloud send failed', { type: payload.type, to: payload.to ? mask(payload.to) : undefined, status: err.response?.status, error });
+    return { ok: false, id: null, error };
+  }
+}
 
 async function post(payload) {
+  if (useYCloud()) return postYCloud(payload);
   const token = process.env.META_ACCESS_TOKEN;
   const phoneNumberId = process.env.META_PHONE_NUMBER_ID;
   if (!token || !phoneNumberId) return { ok: false, id: null, error: 'NOT_CONFIGURED' };
@@ -41,8 +75,20 @@ async function logOutbound(to, type, text, result, orderReference = null) {
 }
 
 /** Marks the customer's message read and shows typing dots (up to 25s or until we reply). */
-function markReadWithTyping(messageId) {
-  return post({ status: 'read', message_id: messageId, typing_indicator: { type: 'text' } });
+async function markReadWithTyping(messageId) {
+  if (!useYCloud()) return post({ status: 'read', message_id: messageId, typing_indicator: { type: 'text' } });
+  try {
+    await axios.post(
+      `${YCLOUD_BASE}/whatsapp/inboundMessages/${encodeURIComponent(messageId)}/typing`,
+      null,
+      { timeout: 10000, headers: { 'X-API-Key': process.env.YCLOUD_API_KEY } }
+    );
+    return { ok: true, id: null, error: null };
+  } catch (err) {
+    const error = err.response?.data?.error?.message || err.message;
+    logger.warn('Stella: YCloud typing indicator failed', { status: err.response?.status, error });
+    return { ok: false, id: null, error };
+  }
 }
 
 async function sendText(to, text, { orderReference } = {}) {
