@@ -11,6 +11,9 @@ const storefrontMerchantSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
   slug: { type: String, required: true, unique: true, lowercase: true, trim: true }, // name in name.bramp.shop
   status: { type: String, enum: ['active', 'paused', 'closed'], default: 'active', index: true },
+  // Who closed it: a trader can reopen a desk they closed, not one Bramp closed.
+  closedBy: { type: String, enum: ['TRADER', 'ADMIN', null], default: null },
+  closedAt: { type: Date, default: null },
 
   // Hosted stores have no key: bramp.shop acts for them with its own
   // platform key (auth/storefrontAuth.js). A key is issued only when a trader

@@ -31,6 +31,7 @@ function serializeDesk(desk) {
     username: desk.slug,
     businessName: desk.brandName,
     status: desk.status,
+    canReopen: desk.status === 'closed' && desk.closedBy === 'TRADER',
     rateMode: desk.rateMode,
     markdownNgnPerUsd: desk.markdownNgnPerUsd,
     selfRate: { status: desk.selfRate?.status || 'NONE' },
@@ -40,21 +41,27 @@ function serializeDesk(desk) {
   };
 }
 
-/** What a customer gets per coin at this markdown, next to Bramp's rate. */
+/**
+ * The app's rate board: per coin, Bramp's rate next to what this desk's
+ * customer gets (Self rate desks too, for comparison), and the spread.
+ */
 async function preview(desk) {
   if (!desk.rateMode || desk.status !== 'active') return null;
-  const out = {};
-  for (const coin of Object.keys(sell.PAIRS)) {
-    try {
-      const r = await sell.rateFor(desk, coin);
-      out[coin] = desk.rateMode === 'BRAMP'
-        ? { customerNgnPerCoin: r.ngnPerCoin, brampNgnPerUsd: r.brampNgnPerUsd, markdownNgnPerUsd: r.markdownNgnPerUsd }
-        : { customerNgnPerCoin: r.ngnPerCoin };
-    } catch (err) {
-      out[coin] = { error: err.message }; // e.g. Self rate paused: NGN balance too low
+  const coins = Object.keys(sell.PAIRS);
+  const rows = await Promise.all(coins.map(async (coin) => {
+    const [mine, bramp] = await Promise.allSettled([sell.rateFor(desk, coin), sell.brampRate(coin)]);
+    const row = {};
+    if (bramp.status === 'fulfilled') Object.assign(row, { brampNgnPerCoin: bramp.value.brampNgnPerCoin, brampNgnPerUsd: bramp.value.brampNgnPerUsd });
+    if (mine.status === 'fulfilled') {
+      row.customerNgnPerCoin = mine.value.ngnPerCoin;
+      if (desk.rateMode === 'BRAMP') row.markdownNgnPerUsd = mine.value.markdownNgnPerUsd;
+      if (row.brampNgnPerCoin) row.spreadNgnPerCoin = Math.round((row.brampNgnPerCoin - row.customerNgnPerCoin) * 100) / 100;
+    } else {
+      row.error = mine.reason?.message || 'Rate not available'; // e.g. Self rate paused: NGN balance too low
     }
-  }
-  return out;
+    return [coin, row];
+  }));
+  return Object.fromEntries(rows);
 }
 
 /**
@@ -108,8 +115,23 @@ router.get('/me', async (req, res) => {
  */
 router.put('/me', express.json(), async (req, res) => {
   try {
-    const { businessName, rateMode, markdownNgnPerUsd, acceptAgreement, paused } = req.body || {};
+    const { businessName, rateMode, markdownNgnPerUsd, acceptAgreement, paused, close, reopen } = req.body || {};
     let desk = await deskFor(req);
+
+    // Close: offline, Stella stops quoting; records stay and it can be reopened.
+    if (close === true || reopen === true) {
+      if (!desk) return fail(res, 404, 'You don’t have a storefront.');
+      if (close === true) {
+        if (desk.status !== 'closed') Object.assign(desk, { status: 'closed', closedBy: 'TRADER', closedAt: new Date() });
+      } else {
+        if (desk.status !== 'closed') return fail(res, 409, 'Your storefront is already open.');
+        if (desk.closedBy !== 'TRADER') return fail(res, 409, 'Bramp closed this storefront. Contact support to reopen it.');
+        Object.assign(desk, { status: 'active', closedBy: null, closedAt: null });
+      }
+      await desk.save();
+      const [rates, stats] = await Promise.all([preview(desk), deskStats(desk)]);
+      return res.json({ success: true, data: { desk: serializeDesk(desk), rates, stats } });
+    }
 
     if (businessName !== undefined) {
       const name = String(businessName || '').trim();

@@ -101,6 +101,16 @@ async function touchCustomer(merchant, waId, displayName) {
  * their NGNB balance can cover a payout (forSettlement skips that check: an
  * arrived deposit waits for a top-up instead).
  */
+/** Bramp's own sell rate for a coin, the one the app uses (routes/sell.js). */
+async function brampRate(coin) {
+  const { getSellQuote } = require('../routes/sell');
+  const q = await getSellQuote({ token: coin, amount: 0 });
+  const brampNgnPerUsd = Number(q.breakdown?.ngnPerUsdEffective);
+  const usdPerCoin = Number(q.breakdown?.usdPerToken);
+  if (!(brampNgnPerUsd > 0) || !(usdPerCoin > 0)) throw new StorefrontSellError('Rates are not available right now.', 503);
+  return { brampNgnPerUsd, usdPerCoin, brampNgnPerCoin: floor2(usdPerCoin * brampNgnPerUsd) };
+}
+
 async function rateFor(merchant, coin, { forSettlement = false } = {}) {
   if (merchant.status !== 'active') throw new StorefrontSellError('This desk is not taking trades right now.', 409);
 
@@ -117,12 +127,7 @@ async function rateFor(merchant, coin, { forSettlement = false } = {}) {
   }
   if (merchant.rateMode !== 'BRAMP') throw new StorefrontSellError('This desk has not set its rate yet.', 409);
 
-  // Bramp's own sell rate, the one the app uses (routes/sell.js).
-  const { getSellQuote } = require('../routes/sell');
-  const q = await getSellQuote({ token: coin, amount: 0 });
-  const brampNgnPerUsd = Number(q.breakdown?.ngnPerUsdEffective);
-  const usdPerCoin = Number(q.breakdown?.usdPerToken);
-  if (!(brampNgnPerUsd > 0) || !(usdPerCoin > 0)) throw new StorefrontSellError('Rates are not available right now.', 503);
+  const { brampNgnPerUsd, usdPerCoin } = await brampRate(coin);
 
   const markdownNgnPerUsd = Math.max(0, Number(merchant.markdownNgnPerUsd) || 0);
   const ngnPerUsd = brampNgnPerUsd - markdownNgnPerUsd;
@@ -627,7 +632,7 @@ async function customerSales(customer, { reference } = {}) {
 
 module.exports = {
   PAIRS, COINS: Object.keys(PAIRS), NETWORK_NAMES, networkName, sellable, normalizeCoin, normalizeNetwork,
-  touchCustomer, rateFor, addressFor, startSale, checkAccount, useAccount,
+  touchCustomer, brampRate, rateFor, addressFor, startSale, checkAccount, useAccount,
   handleObiexDeposit, settle, flagStuck, retryAwaitingFunds, customerSales, serializeSale,
   StorefrontSellError,
 };
