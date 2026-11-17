@@ -60,7 +60,7 @@ function deskRow(m, owner, stats = {}) {
     dailyMaxNgn: m.dailyMaxNgn,
     selfRate: {
       status: m.selfRate?.status || 'NONE',
-      rates: { USDT: m.selfRate?.rates?.USDT ?? null, USDC: m.selfRate?.rates?.USDC ?? null },
+      rates: Object.fromEntries(Object.keys(require('../services/storefrontSell').PAIRS).map((c) => [c, m.selfRate?.rates?.[c] ?? null])),
       payoutLimitNgn: m.selfRate?.payoutLimitNgn || 0,
       fee: selfRate.feeSchedule(m),
     },

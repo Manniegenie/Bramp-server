@@ -200,7 +200,8 @@ router.get('/customers/export.csv', async (req, res) => {
   try {
     const desk = await deskFor(req);
     if (!desk) return fail(res, 404, 'No storefront yet.');
-    const header = ['whatsapp', 'name', 'first_seen', 'last_seen', 'last_trade', 'trades', 'completed', 'volume_ngn', 'usdt_sold', 'usdc_sold', 'tags', 'note'];
+    const coins = Object.keys(sell.PAIRS);
+    const header = ['whatsapp', 'name', 'first_seen', 'last_seen', 'last_trade', 'trades', 'completed', 'volume_ngn', ...coins.map((k) => `${k.toLowerCase()}_sold`), 'tags', 'note'];
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${desk.slug}-customers.csv"`);
     res.write(`${header.join(',')}\n`);
@@ -209,7 +210,7 @@ router.get('/customers/export.csv', async (req, res) => {
       const coin = (k) => c.stats?.byCoin?.get?.(k)?.amount || 0;
       res.write(`${[
         `+${c.waId}`, c.displayName, c.firstSeenAt?.toISOString(), c.lastSeenAt?.toISOString(), c.lastTradeAt?.toISOString(),
-        c.stats?.trades || 0, c.stats?.completed || 0, c.stats?.volumeNgn || 0, coin('USDT'), coin('USDC'), (c.tags || []).join(' '), c.note,
+        c.stats?.trades || 0, c.stats?.completed || 0, c.stats?.volumeNgn || 0, ...coins.map(coin), (c.tags || []).join(' '), c.note,
       ].map(csvCell).join(',')}\n`);
     }
     return res.end();
@@ -319,7 +320,7 @@ router.post('/self-rate/application', express.json(), async (req, res) => {
   }
 });
 
-/** body: { USDT?: number|null, USDC?: number|null } naira per coin. */
+/** body: { USDT?, USDC?, BTC?, ETH?, SOL?, BNB?: number|null } naira per coin. */
 router.put('/self-rate/rates', express.json(), async (req, res) => {
   try {
     const desk = await deskFor(req);

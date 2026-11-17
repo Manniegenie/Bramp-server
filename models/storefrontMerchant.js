@@ -79,6 +79,10 @@ const storefrontMerchantSchema = new mongoose.Schema({
     rates: { // naira per coin, set by the trader
       USDT: { type: Number, default: null, min: 0 },
       USDC: { type: Number, default: null, min: 0 },
+      BTC: { type: Number, default: null, min: 0 },
+      ETH: { type: Number, default: null, min: 0 },
+      SOL: { type: Number, default: null, min: 0 },
+      BNB: { type: Number, default: null, min: 0 },
     },
     payoutLimitNgn: { type: Number, default: 0, min: 0 }, // per calendar month, set at approval
     // Fee per payout: pct of the payout, between minNgn and maxNgn. null = the

@@ -15,7 +15,7 @@ const logger = require('../utils/logger');
 
 const COMPANY_TYPES = ['BUSINESS_NAME', 'COMPANY', 'INCORPORATED_TRUSTEES', 'LIMITED_PARTNERSHIP', 'LIMITED_LIABILITY_PARTNERSHIP'];
 const OWNER_ROLES = /DIRECTOR|PROPRIETOR|PARTNER|TRUSTEE/i;
-const COINS = ['USDT', 'USDC'];
+const COINS = Object.keys(require('./storefrontSell').PAIRS);
 
 class SelfRateError extends Error {
   constructor(message, statusCode = 400) {
@@ -180,7 +180,7 @@ function view(merchant) {
   const app = sr.application || {};
   return {
     status: sr.status || 'NONE',
-    rates: { USDT: sr.rates?.USDT ?? null, USDC: sr.rates?.USDC ?? null },
+    rates: Object.fromEntries(COINS.map((c) => [c, sr.rates?.[c] ?? null])),
     payoutLimitNgn: sr.payoutLimitNgn || 0,
     fee: feeSchedule(merchant),
     application: app.submittedAt ? {

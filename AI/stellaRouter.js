@@ -47,6 +47,8 @@ const btnTitle = (prefix, d) => `${prefix} ${deskName(d)}`.slice(0, 20);
 const askChoose = (to) => sender.sendText(to,
   'Which desk do you trade with? Send their Stella username, for example *@tolu*. Your desk can share their Stella link with you.');
 
+const SELL_PROMPT = 'Which coin would you like to sell? *USDT*, *USDC*, *BTC*, *ETH*, *SOL* or *BNB*.';
+
 async function setDesk(customer, desk, via) {
   const from = customer.deskId || null;
   const now = new Date();
@@ -85,12 +87,12 @@ async function onMention(to, customer, convo, current, slug, via) {
   if (!current || current.status === 'closed') {
     await setDesk(customer, target, current ? 'SWITCH' : via);
     await clearPrompts(convo);
-    return sender.sendText(to, `You're now trading with ${deskLabel(target)}. They stay your desk until you choose another one.${target.status === 'paused' ? `\n\n${deskName(target)} is paused right now, so trading opens when they're back.` : '\n\nWhich coin would you like to sell? *USDT* or *USDC*.'}`);
+    return sender.sendText(to, `You're now trading with ${deskLabel(target)}. They stay your desk until you choose another one.${target.status === 'paused' ? `\n\n${deskName(target)} is paused right now, so trading opens when they're back.` : `\n\n${SELL_PROMPT}`}`);
   }
 
   if (String(current._id) === String(target._id)) {
     await clearPrompts(convo);
-    return sender.sendText(to, `You're already trading with ${deskLabel(target)}. Which coin would you like to sell? *USDT* or *USDC*.`);
+    return sender.sendText(to, `You're already trading with ${deskLabel(target)}. ${SELL_PROMPT}`);
   }
 
   // A different desk: always confirm before switching.

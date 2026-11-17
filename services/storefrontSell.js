@@ -22,15 +22,25 @@ const { notifyTrader } = require('./storefrontTraderNotify');
 const logger = require('../utils/logger');
 
 // Coins and networks a customer can sell, by Obiex network code.
+// The same coin/network pairs Bramp users have wallets for (utils/generatewallets.js).
 const PAIRS = {
   USDT: ['TRX', 'BSC', 'ETH'],
   USDC: ['BSC', 'ETH'],
+  BTC: ['BTC'],
+  ETH: ['ETH'],
+  SOL: ['SOL'],
+  BNB: ['BSC'],
 };
-const NETWORK_NAMES = { TRX: 'Tron (TRC20)', BSC: 'BNB Smart Chain (BEP20)', ETH: 'Ethereum (ERC20)' };
+const NATIVE = { BTC: 'BTC', ETH: 'ETH', SOL: 'SOL', BNB: 'BSC' }; // a coin on its own chain
+const NETWORK_NAMES = { TRX: 'Tron (TRC20)', BSC: 'BNB Smart Chain (BEP20)', ETH: 'Ethereum (ERC20)', BTC: 'Bitcoin', SOL: 'Solana' };
+const NATIVE_NAMES = { BTC: 'Bitcoin', ETH: 'Ethereum', SOL: 'Solana', BSC: 'BNB Smart Chain' };
+const networkName = (coin, network) => (NATIVE[coin] === network ? NATIVE_NAMES[network] : NETWORK_NAMES[network]) || network;
 const NETWORK_ALIASES = {
   TRX: 'TRX', TRON: 'TRX', TRC20: 'TRX',
   BSC: 'BSC', BEP20: 'BSC', BNB: 'BSC', 'BNB SMART CHAIN': 'BSC', BINANCE: 'BSC',
   ETH: 'ETH', ERC20: 'ETH', ETHEREUM: 'ETH',
+  BTC: 'BTC', BITCOIN: 'BTC',
+  SOL: 'SOL', SOLANA: 'SOL',
 };
 
 const cfg = () => ({
@@ -56,16 +66,18 @@ function normalizeCoin(coin) {
 }
 
 function normalizeNetwork(coin, network) {
+  // A coin with one network needs no choice (BTC is always Bitcoin).
+  if (!String(network || '').trim() && PAIRS[coin].length === 1) return PAIRS[coin][0];
   const n = NETWORK_ALIASES[String(network || '').trim().toUpperCase()];
   if (!n || !PAIRS[coin].includes(n)) {
-    throw new StorefrontSellError(`${coin} can be sent on: ${PAIRS[coin].map((x) => NETWORK_NAMES[x]).join(', ')}.`);
+    throw new StorefrontSellError(`${coin} can be sent on: ${PAIRS[coin].map((x) => networkName(coin, x)).join(', ')}.`);
   }
   return n;
 }
 
 /** Coins and networks on sale, for Stella. */
 function sellable() {
-  return Object.entries(PAIRS).map(([coin, nets]) => ({ coin, networks: nets.map((code) => ({ code, name: NETWORK_NAMES[code] })) }));
+  return Object.entries(PAIRS).map(([coin, nets]) => ({ coin, networks: nets.map((code) => ({ code, name: networkName(coin, code) })) }));
 }
 
 // ── Customer records ───────────────────────────────────────────────────────
@@ -211,7 +223,7 @@ async function startSale(merchant, customer, { coin: coinRaw, network: networkRa
   return {
     reference: order.reference,
     coin,
-    network: NETWORK_NAMES[network],
+    network: networkName(coin, network),
     address: addr.address,
     memo: addr.memo || null,
     ngnPerCoin: rate.ngnPerCoin,
@@ -373,7 +385,7 @@ async function review(order, reason, merchant) {
 }
 
 const fmtNgn = (n) => `₦${Number(n).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const COIN_BALANCE = { USDT: 'usdtBalance', USDC: 'usdcBalance' };
+const COIN_BALANCE = { USDT: 'usdtBalance', USDC: 'usdcBalance', BTC: 'btcBalance', ETH: 'ethBalance', SOL: 'solBalance', BNB: 'bnbBalance' };
 
 async function overLimits(order, merchant, customerNgn) {
   if (merchant.perTradeMaxNgn > 0 && customerNgn > merchant.perTradeMaxNgn) {
@@ -591,7 +603,7 @@ function serializeSale(o) {
   return {
     reference: o.reference,
     coin: o.coin,
-    network: NETWORK_NAMES[o.network] || o.network,
+    network: networkName(o.coin, o.network),
     status: o.status,
     amount: o.deposit?.amount ?? null,
     ngnPerCoin: o.settlement?.ngnPerCoin ?? o.quote?.ngnPerCoin ?? null,
@@ -610,7 +622,7 @@ async function customerSales(customer, { reference } = {}) {
 }
 
 module.exports = {
-  PAIRS, NETWORK_NAMES, sellable, normalizeCoin, normalizeNetwork,
+  PAIRS, COINS: Object.keys(PAIRS), NETWORK_NAMES, networkName, sellable, normalizeCoin, normalizeNetwork,
   touchCustomer, rateFor, addressFor, startSale, checkAccount, useAccount,
   handleObiexDeposit, settle, flagStuck, retryAwaitingFunds, customerSales, serializeSale,
   StorefrontSellError,
