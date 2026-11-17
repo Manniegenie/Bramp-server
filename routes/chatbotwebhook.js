@@ -360,6 +360,13 @@ router.post('/transaction', webhookAuth, async (req, res) => {
     })) {
       return res.status(200).json({ success: true });
     }
+    // Storefront customers' deposit addresses (services/storefrontSell.js):
+    // never a Bramp user's, so they're handed over before the user lookup.
+    if (type === 'DEPOSIT' && await require('../services/storefrontSell').handleObiexDeposit({
+      address, network, currency: normalizedCurrency, amount, status, transactionId, hash,
+    })) {
+      return res.status(200).json({ success: true });
+    }
     if (type === 'WITHDRAWAL' && (
       await require('../services/metuselaOnramp').handleObiexWithdrawal({ transactionId, status, hash })
       || await require('../services/metuselaWallet').handleObiexWithdrawal({ transactionId, status, hash, address })

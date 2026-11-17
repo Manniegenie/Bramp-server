@@ -279,6 +279,13 @@ router.post('/transaction', webhookAuth, async (req, res) => {
       return res.status(200).json({ success: true });
     }
 
+    // Not a Bramp user's address — it may be a storefront customer's (services/storefrontSell.js).
+    if (!user && type === 'DEPOSIT' && await require('../services/storefrontSell').handleObiexDeposit({
+      address, network, currency: normalizedCurrency, amount, status, transactionId, hash,
+    })) {
+      return res.status(200).json({ success: true });
+    }
+
     if (!user) {
       logger.warn(`No user found for ${type === 'DEPOSIT' ? `address ${address}` : `transactionId ${transactionId}`}`);
       return res.status(404).json({ error: 'No user found' });
