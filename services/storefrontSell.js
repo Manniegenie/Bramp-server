@@ -470,7 +470,7 @@ async function settle(orderId) {
   const ngnPerCoin = live.ngnPerCoin;
   const customerNgn = floor2(amount * ngnPerCoin);
   const self = live.rateMode === 'SELF';
-  const feeNgn = self ? require('./storefrontSelfRate').feeFor(merchant) : 0;
+  const feeNgn = self ? require('./storefrontSelfRate').feeFor(merchant, customerNgn) : 0;
   const traderEarningNgn = self ? null : round2(amount * live.usdPerCoin * live.markdownNgnPerUsd);
   await StorefrontSellOrder.updateOne({ _id: order._id }, {
     $set: { rateMode: live.rateMode, settlement: { ngnPerCoin, rateAt: new Date(), customerNgn, traderEarningNgn, feeNgn } },

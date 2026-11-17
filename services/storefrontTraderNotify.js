@@ -19,9 +19,10 @@ function message(event, order, merchant, extra = {}) {
       return { title: 'Customer deposit received', body: `${who} sent ${coins} to your storefront.` };
     case 'paid': {
       const earned = order.settlement?.traderEarningNgn > 0 ? ` You earned ${naira(order.settlement.traderEarningNgn)}.` : '';
+      const fee = order.settlement?.feeNgn > 0 ? ` Bramp fee ${naira(order.settlement.feeNgn)}.` : '';
       return {
         title: 'Customer paid',
-        body: `${who} was paid ${naira(order.settlement?.customerNgn)} for ${coins} (${order.payoutAccount?.bankName} ${maskAcct(order.payoutAccount?.accountNumber)}).${earned}`,
+        body: `${who} was paid ${naira(order.settlement?.customerNgn)} for ${coins} (${order.payoutAccount?.bankName} ${maskAcct(order.payoutAccount?.accountNumber)}).${earned}${fee}`,
       };
     }
     case 'awaiting_funds':

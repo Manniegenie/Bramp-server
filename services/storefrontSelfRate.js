@@ -25,14 +25,32 @@ class SelfRateError extends Error {
 }
 
 const cfg = () => ({
-  feeNgn: Number(process.env.STOREFRONT_SELF_FEE_NGN || 0),
+  // Fee per payout: feePct of the payout, at least feeMinNgn, at most feeMaxNgn.
+  feePct: Number(process.env.STOREFRONT_SELF_FEE_PCT ?? 0.2),
+  feeMinNgn: Number(process.env.STOREFRONT_SELF_FEE_MIN_NGN ?? 100),
+  feeMaxNgn: Number(process.env.STOREFRONT_SELF_FEE_MAX_NGN ?? 50000),
   // Quoting stops when the trader's NGNB is below this (a payout couldn't be covered).
   minCoverNgn: Number(process.env.STOREFRONT_SELF_MIN_COVER_NGN || 5000),
   // A rate further than this from Bramp's is refused as a likely typo.
   maxRateDeviation: Number(process.env.STOREFRONT_SELF_MAX_RATE_DEVIATION || 0.5),
 });
 
-const feeFor = (merchant) => (merchant.selfRate?.feeNgn ?? null) !== null ? merchant.selfRate.feeNgn : cfg().feeNgn;
+/** The desk's fee schedule: its own override where set, else the default. */
+function feeSchedule(merchant) {
+  const d = cfg();
+  const f = merchant.selfRate?.fee || {};
+  const pick = (v, dflt) => (v === null || v === undefined ? dflt : Number(v));
+  return { pct: pick(f.pct, d.feePct), minNgn: pick(f.minNgn, d.feeMinNgn), maxNgn: pick(f.maxNgn, d.feeMaxNgn) };
+}
+
+/** Fee on one payout: pct of it, at least minNgn, at most maxNgn (kobo precision). */
+function feeFor(merchant, payoutNgn) {
+  const { pct, minNgn, maxNgn } = feeSchedule(merchant);
+  let fee = (Number(payoutNgn) || 0) * pct / 100;
+  fee = Math.max(fee, minNgn);
+  if (maxNgn > 0) fee = Math.min(fee, maxNgn);
+  return Math.round(fee * 100) / 100;
+}
 
 // ── Checks ─────────────────────────────────────────────────────────────────
 
@@ -164,7 +182,7 @@ function view(merchant) {
     status: sr.status || 'NONE',
     rates: { USDT: sr.rates?.USDT ?? null, USDC: sr.rates?.USDC ?? null },
     payoutLimitNgn: sr.payoutLimitNgn || 0,
-    feeNgn: feeFor(merchant),
+    fee: feeSchedule(merchant),
     application: app.submittedAt ? {
       cacNumber: app.cacNumber, companyType: app.companyType,
       businessAccount: app.businessAccount ? { bankName: app.businessAccount.bankName, accountNumber: app.businessAccount.accountNumber, accountName: app.businessAccount.accountName } : null,
@@ -185,14 +203,21 @@ async function recheck(merchant) {
 }
 
 /** Approve: Self rate available, with a monthly payout limit (and optionally a fee for this desk). */
-async function approve(merchant, { payoutLimitNgn, feeNgn } = {}, by) {
+async function approve(merchant, { payoutLimitNgn, feePct, feeMinNgn, feeMaxNgn } = {}, by) {
   if (merchant.selfRate?.status !== 'PENDING') throw new SelfRateError('Only a pending application can be approved.', 409);
   const limit = Number(payoutLimitNgn);
   if (!(limit > 0)) throw new SelfRateError('Set a monthly payout limit in naira.');
-  if (feeNgn !== undefined && feeNgn !== null && !(Number(feeNgn) >= 0)) throw new SelfRateError('feeNgn must be 0 or more.');
+  const fee = { pct: feePct, minNgn: feeMinNgn, maxNgn: feeMaxNgn };
+  for (const [k, v] of Object.entries(fee)) {
+    if (v !== undefined && v !== null && !(Number(v) >= 0)) throw new SelfRateError(`fee ${k} must be 0 or more.`);
+  }
+  if (fee.pct !== undefined && fee.pct !== null && Number(fee.pct) > 5) throw new SelfRateError('feePct is a percentage (0.2 means 0.2%), at most 5.');
+  if (Number(fee.minNgn ?? 0) > 0 && Number(fee.maxNgn ?? 0) > 0 && Number(fee.minNgn) > Number(fee.maxNgn)) throw new SelfRateError('feeMinNgn can\'t be above feeMaxNgn.');
   merchant.selfRate.status = 'APPROVED';
   merchant.selfRate.payoutLimitNgn = limit;
-  if (feeNgn !== undefined) merchant.selfRate.feeNgn = feeNgn === null ? null : Number(feeNgn);
+  for (const [k, v] of Object.entries(fee)) {
+    if (v !== undefined) merchant.selfRate.fee[k] = v === null ? null : Number(v);
+  }
   merchant.selfRate.decision = { by, at: new Date(), reason: null };
   await merchant.save();
   return merchant;
@@ -211,6 +236,6 @@ async function reject(merchant, { reason } = {}, by) {
 }
 
 module.exports = {
-  COMPANY_TYPES, apply, setRates, view, recheck, approve, reject, runChecks, businessNamesMatch, feeFor, cfg, SelfRateError,
+  COMPANY_TYPES, apply, setRates, view, recheck, approve, reject, runChecks, businessNamesMatch, feeFor, feeSchedule, cfg, SelfRateError,
   _lookupCac: lookupCac,
 };

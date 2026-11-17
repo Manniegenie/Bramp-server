@@ -18,7 +18,8 @@
 //   GET   /self-rate/applications?status= — Self rate applications (default PENDING) with their automatic checks
 //   GET   /merchants/:slug/self-rate      — one desk's full Self rate application and checks
 //   POST  /merchants/:slug/self-rate/recheck — run the automatic checks again (e.g. after a Dojah outage)
-//   POST  /merchants/:slug/self-rate/approve — { payoutLimitNgn, feeNgn? } monthly payout limit; fee overrides the default (super)
+//   POST  /merchants/:slug/self-rate/approve — { payoutLimitNgn, feePct?, feeMinNgn?, feeMaxNgn? } monthly payout limit;
+//                                           fee overrides the default 0.2%, min ₦100, max ₦50,000 (super)
 //   POST  /merchants/:slug/self-rate/reject  — { reason } shown to the trader; turns Self rate off (super)
 //   GET   /sell-orders?status=&slug=      — offramp sales, e.g. status=NEEDS_REVIEW or AWAITING_FUNDS
 const express = require('express');
@@ -207,7 +208,7 @@ const applicationOf = (m, user) => ({
   status: m.selfRate?.status || 'NONE',
   application: m.selfRate?.application || null,
   payoutLimitNgn: m.selfRate?.payoutLimitNgn || 0,
-  feeNgn: selfRate.feeFor(m),
+  fee: selfRate.feeSchedule(m),
   decision: m.selfRate?.decision || null,
 });
 const selfRateFail = (res, err) => {

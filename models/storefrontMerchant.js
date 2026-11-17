@@ -81,7 +81,13 @@ const storefrontMerchantSchema = new mongoose.Schema({
       USDC: { type: Number, default: null, min: 0 },
     },
     payoutLimitNgn: { type: Number, default: 0, min: 0 }, // per calendar month, set at approval
-    feeNgn: { type: Number, default: null, min: 0 }, // flat fee per payout; null = STOREFRONT_SELF_FEE_NGN
+    // Fee per payout: pct of the payout, between minNgn and maxNgn. null = the
+    // default (STOREFRONT_SELF_FEE_PCT / _MIN_NGN / _MAX_NGN: 0.2%, ₦100, ₦50,000).
+    fee: {
+      pct: { type: Number, default: null, min: 0 },
+      minNgn: { type: Number, default: null, min: 0 },
+      maxNgn: { type: Number, default: null, min: 0 },
+    },
     application: {
       cacNumber: { type: String, default: null },
       companyType: { type: String, default: null },
