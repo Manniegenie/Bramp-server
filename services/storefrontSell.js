@@ -83,10 +83,26 @@ async function touchCustomer(merchant, waId, displayName) {
 
 // ── Rates ──────────────────────────────────────────────────────────────────
 
-/** The rate this desk pays now for one coin. */
-async function rateFor(merchant, coin) {
+/**
+ * The rate this desk pays now for one coin. Bramp rate: Bramp's sell rate
+ * minus the markdown. Self rate: the trader's own rate, quoted only while
+ * their NGNB balance can cover a payout (forSettlement skips that check: an
+ * arrived deposit waits for a top-up instead).
+ */
+async function rateFor(merchant, coin, { forSettlement = false } = {}) {
   if (merchant.status !== 'active') throw new StorefrontSellError('This desk is not taking trades right now.', 409);
-  if (merchant.rateMode === 'SELF') throw new StorefrontSellError('This desk is not taking trades right now.', 409); // Phase 2
+
+  if (merchant.rateMode === 'SELF') {
+    const selfRate = require('./storefrontSelfRate');
+    if (merchant.selfRate?.status !== 'APPROVED') throw new StorefrontSellError('This desk is not taking trades right now.', 409);
+    const ngnPerCoin = Number(merchant.selfRate?.rates?.[coin]);
+    if (!(ngnPerCoin > 0)) throw new StorefrontSellError(`This desk has not set a ${coin} rate yet.`, 409);
+    if (!forSettlement) {
+      const trader = await User.findById(merchant.userId).select('ngnbBalance');
+      if ((trader?.ngnbBalance || 0) < selfRate.cfg().minCoverNgn) throw new StorefrontSellError('This desk is not taking trades right now.', 409);
+    }
+    return { rateMode: 'SELF', ngnPerCoin: floor2(ngnPerCoin), usdPerCoin: null, markdownNgnPerUsd: 0, brampNgnPerUsd: null, ngnPerUsd: null };
+  }
   if (merchant.rateMode !== 'BRAMP') throw new StorefrontSellError('This desk has not set its rate yet.', 409);
 
   // Bramp's own sell rate, the one the app uses (routes/sell.js).
@@ -356,46 +372,118 @@ async function review(order, reason, merchant) {
   tellCustomer(order.waId, `Your sale *${order.reference}* needs a quick check by our team. Your money is safe, and we'll message you once it's done.`);
 }
 
-/** Work out the naira at the rate that applies, then sell the coin and pay the customer. */
+const fmtNgn = (n) => `₦${Number(n).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const COIN_BALANCE = { USDT: 'usdtBalance', USDC: 'usdcBalance' };
+
+async function overLimits(order, merchant, customerNgn) {
+  if (merchant.perTradeMaxNgn > 0 && customerNgn > merchant.perTradeMaxNgn) {
+    return `Over the desk's per-trade limit (${customerNgn} > ${merchant.perTradeMaxNgn})`;
+  }
+  const paidSince = async (since, extra = {}) => {
+    const [{ total = 0 } = {}] = await StorefrontSellOrder.aggregate([
+      { $match: { merchantId: merchant._id, status: 'PAID', paidAt: { $gte: since }, ...extra } },
+      { $group: { _id: null, total: { $sum: '$settlement.customerNgn' } } },
+    ]);
+    return total;
+  };
+  if (merchant.dailyMaxNgn > 0) {
+    const day = new Date(); day.setHours(0, 0, 0, 0);
+    const total = await paidSince(day);
+    if (total + customerNgn > merchant.dailyMaxNgn) return `Over the desk's daily limit (${total + customerNgn} > ${merchant.dailyMaxNgn})`;
+  }
+  if (merchant.rateMode === 'SELF' && merchant.selfRate?.payoutLimitNgn > 0) {
+    const month = new Date(); month.setDate(1); month.setHours(0, 0, 0, 0);
+    const total = await paidSince(month, { rateMode: 'SELF' });
+    if (total + customerNgn > merchant.selfRate.payoutLimitNgn) return `Over the Self rate monthly payout limit (${total + customerNgn} > ${merchant.selfRate.payoutLimitNgn})`;
+  }
+  return null;
+}
+
+/** Pay the customer from NGNX. Returns the provider result. */
+async function payCustomer(order, merchant, customerNgn) {
+  try {
+    return await debitNaira({
+      destination: order.payoutAccount,
+      amount: customerNgn,
+      currency: 'NGNX',
+      narration: `Bramp ${merchant.brandName || merchant.slug}`.slice(0, 40),
+    }, { idempotencyKey: `sf-sell-${order.reference}`, userId: String(merchant.userId) });
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+}
+
+/** Move to PAYING unless the order was flagged for review meanwhile. */
+async function toPaying(order, extra = {}) {
+  const r = await StorefrontSellOrder.updateOne(
+    { _id: order._id, status: 'SELLING' },
+    { $set: { status: 'PAYING', 'payout.idempotencyKey': `sf-sell-${order.reference}`, 'payout.requestedAt': new Date(), ...extra } }
+  );
+  return r.modifiedCount === 1;
+}
+
+async function markPaid(order, merchant, payout, { customerNgn, ngnPerCoin, traderEarningNgn }) {
+  const paidAt = new Date();
+  // The money has gone, so PAID is the truth even if the stuck check flagged it meanwhile.
+  await StorefrontSellOrder.updateOne({ _id: order._id, status: { $in: ['PAYING', 'NEEDS_REVIEW'] } }, {
+    $set: { status: 'PAID', paidAt, reviewReason: null, 'payout.providerId': payout.data?.id || payout.data?.data?.id || null },
+  });
+  await StorefrontCustomer.updateOne({ _id: order.customerId }, {
+    $inc: {
+      'stats.completed': 1,
+      'stats.volumeNgn': customerNgn,
+      [`stats.byCoin.${order.coin}.trades`]: 1,
+      [`stats.byCoin.${order.coin}.amount`]: order.deposit.amount,
+      [`stats.byCoin.${order.coin}.volumeNgn`]: customerNgn,
+    },
+    $set: { lastTradeAt: paidAt },
+  });
+  const paid = await StorefrontSellOrder.findById(order._id);
+  logger.info('Storefront sell: paid', { reference: order.reference, rateMode: order.rateMode, customerNgn, traderEarningNgn, ngnPerCoin });
+  notifyTrader(merchant, 'paid', paid).catch(() => {});
+  tellCustomer(order.waId, `Received *${order.deposit.amount} ${order.coin}* ✅ *${fmtNgn(customerNgn)}* (${fmtNgn(ngnPerCoin)} per ${order.coin}) is on its way to ${order.payoutAccount.bankName} ${maskAcct(order.payoutAccount.accountNumber)}. Ref ${order.reference}.`);
+  return paidAt;
+}
+
+/** Work out the naira at the live rate, then pay the customer (Bramp rate: after selling the coin; Self rate: from the trader's NGNB). */
 async function settle(orderId) {
   // Claim: only one settle per order, and only once it has a deposit and an account.
   const order = await StorefrontSellOrder.findOneAndUpdate(
-    { _id: orderId, status: { $in: ['AWAITING_DEPOSIT', 'AWAITING_ACCOUNT'] }, 'deposit.transactionId': { $type: 'string' }, 'payoutAccount.accountNumber': { $type: 'string' } },
+    { _id: orderId, status: { $in: ['AWAITING_DEPOSIT', 'AWAITING_ACCOUNT', 'AWAITING_FUNDS'] }, 'deposit.transactionId': { $type: 'string' }, 'payoutAccount.accountNumber': { $type: 'string' } },
     { $set: { status: 'SELLING' } },
-    { new: true }
+    { new: false } // the status before the claim (was it already waiting for funds?)
   );
   if (!order) return;
+  const wasAwaitingFunds = order.status === 'AWAITING_FUNDS';
+  order.status = 'SELLING';
   const merchant = await StorefrontMerchant.findById(order.merchantId);
   if (!merchant) return review(order, 'Desk not found', null);
 
-  // Always the live rate, at settlement (never a quote from earlier).
+  // Always the live rate, at settlement (never a quote from earlier), in the desk's current mode.
   let live;
   try {
-    live = await rateFor(merchant, order.coin);
+    live = await rateFor(merchant, order.coin, { forSettlement: true });
   } catch (err) {
     return review(order, `No rate at settlement: ${err.message}`, merchant);
   }
-  const { ngnPerCoin, usdPerCoin, markdownNgnPerUsd: markdown } = live;
-  const rateAt = new Date();
   const amount = order.deposit.amount;
+  const ngnPerCoin = live.ngnPerCoin;
   const customerNgn = floor2(amount * ngnPerCoin);
-  const traderEarningNgn = round2(amount * usdPerCoin * markdown);
-  await StorefrontSellOrder.updateOne({ _id: order._id }, { $set: { settlement: { ngnPerCoin, rateAt, customerNgn, traderEarningNgn, feeNgn: 0 } } });
+  const self = live.rateMode === 'SELF';
+  const feeNgn = self ? require('./storefrontSelfRate').feeFor(merchant) : 0;
+  const traderEarningNgn = self ? null : round2(amount * live.usdPerCoin * live.markdownNgnPerUsd);
+  await StorefrontSellOrder.updateOne({ _id: order._id }, {
+    $set: { rateMode: live.rateMode, settlement: { ngnPerCoin, rateAt: new Date(), customerNgn, traderEarningNgn, feeNgn } },
+  });
+  order.rateMode = live.rateMode;
 
   // Desk limits are a risk check: over them, a person decides.
-  if (merchant.perTradeMaxNgn > 0 && customerNgn > merchant.perTradeMaxNgn) {
-    return review(order, `Over the desk's per-trade limit (${customerNgn} > ${merchant.perTradeMaxNgn})`, merchant);
-  }
-  if (merchant.dailyMaxNgn > 0) {
-    const since = new Date(); since.setHours(0, 0, 0, 0);
-    const [{ total = 0 } = {}] = await StorefrontSellOrder.aggregate([
-      { $match: { merchantId: merchant._id, status: 'PAID', paidAt: { $gte: since } } },
-      { $group: { _id: null, total: { $sum: '$settlement.customerNgn' } } },
-    ]);
-    if (total + customerNgn > merchant.dailyMaxNgn) return review(order, `Over the desk's daily limit (${total + customerNgn} > ${merchant.dailyMaxNgn})`, merchant);
-  }
+  const limit = await overLimits(order, merchant, customerNgn);
+  if (limit) return review(order, limit, merchant);
 
-  // 1. Sell the coin for NGNX on Obiex.
+  if (self) return settleSelfRate(order, merchant, { customerNgn, ngnPerCoin, feeNgn, wasAwaitingFunds });
+
+  // Bramp rate 1. Sell the coin for NGNX on Obiex.
   let sale;
   try {
     sale = await swapCryptoToNGNX({ sourceCode: order.coin, amount });
@@ -406,60 +494,85 @@ async function settle(orderId) {
     await StorefrontSellOrder.updateOne({ _id: order._id }, { $set: { sale: { ok: false, error: String(sale?.error || sale?.message || 'swap failed').slice(0, 300), at: new Date() } } });
     return review(order, 'Sale on Obiex failed', merchant);
   }
-  const idempotencyKey = `sf-sell-${order.reference}`;
-  const toPaying = await StorefrontSellOrder.updateOne(
-    { _id: order._id, status: 'SELLING' }, // not if it was flagged for review meanwhile
-    { $set: { status: 'PAYING', sale: { ok: true, at: new Date() }, 'payout.idempotencyKey': idempotencyKey, 'payout.requestedAt': new Date() } }
-  );
-  if (!toPaying.modifiedCount) {
+  if (!(await toPaying(order, { sale: { ok: true, at: new Date() } }))) {
     await StorefrontSellOrder.updateOne({ _id: order._id }, { $set: { sale: { ok: true, at: new Date() } } });
     logger.error('Storefront sell: sold but flagged before payout - pay manually', { reference: order.reference });
     return;
   }
 
   // 2. Pay the customer from NGNX.
-  let payout;
-  try {
-    payout = await debitNaira({
-      destination: order.payoutAccount,
-      amount: customerNgn,
-      currency: 'NGNX',
-      narration: `Bramp ${merchant.brandName || merchant.slug}`.slice(0, 40),
-    }, { idempotencyKey, userId: String(merchant.userId) });
-  } catch (err) {
-    payout = { success: false, message: err.message };
-  }
+  const payout = await payCustomer(order, merchant, customerNgn);
   if (!payout?.success) {
     await StorefrontSellOrder.updateOne({ _id: order._id }, { $set: { 'payout.error': String(payout?.message || 'payout failed').slice(0, 300) } });
     return review(order, 'Payout to the customer failed', merchant);
   }
 
   // 3. Paid: the desk's earning, the customer's totals, everyone told.
-  const paidAt = new Date();
-  // The money has gone, so PAID is the truth even if the stuck check flagged it meanwhile.
-  await StorefrontSellOrder.updateOne({ _id: order._id, status: { $in: ['PAYING', 'NEEDS_REVIEW'] } }, {
-    $set: { status: 'PAID', paidAt, reviewReason: null, 'payout.providerId': payout.data?.id || payout.data?.data?.id || null },
-  });
+  const paidAt = await markPaid(order, merchant, payout, { customerNgn, ngnPerCoin, traderEarningNgn });
   if (traderEarningNgn > 0) {
     await User.updateOne({ _id: merchant.userId }, { $inc: { ngnbBalance: traderEarningNgn }, $set: { lastBalanceUpdate: paidAt } });
   }
-  await StorefrontCustomer.updateOne({ _id: order.customerId }, {
-    $inc: {
-      'stats.completed': 1,
-      'stats.volumeNgn': customerNgn,
-      [`stats.byCoin.${order.coin}.trades`]: 1,
-      [`stats.byCoin.${order.coin}.amount`]: amount,
-      [`stats.byCoin.${order.coin}.volumeNgn`]: customerNgn,
-    },
-    $set: { lastTradeAt: paidAt },
-  });
+}
 
-  const paid = await StorefrontSellOrder.findById(order._id);
-  logger.info('Storefront sell: paid', { reference: order.reference, customerNgn, traderEarningNgn, ngnPerCoin });
-  notifyTrader(merchant, 'paid', paid).catch(() => {});
-  const naira = `₦${customerNgn.toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  const rateText = `₦${ngnPerCoin.toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} per ${order.coin}`;
-  tellCustomer(order.waId, `Received *${amount} ${order.coin}* ✅ *${naira}* (${rateText}) is on its way to ${order.payoutAccount.bankName} ${maskAcct(order.payoutAccount.accountNumber)}. Ref ${order.reference}.`);
+/**
+ * Self rate: debit the payout plus the flat fee from the trader's NGNB (only
+ * if it covers it), pay the customer from NGNX, then credit the coin to the
+ * trader. Short of funds: the sale waits (AWAITING_FUNDS) and the trader is
+ * asked to top up; the minute job retries it.
+ */
+async function settleSelfRate(order, merchant, { customerNgn, ngnPerCoin, feeNgn, wasAwaitingFunds }) {
+  const selfRate = require('./storefrontSelfRate');
+  const debitNgn = round2(customerNgn + feeNgn);
+  const debited = await User.updateOne(
+    { _id: merchant.userId, ngnbBalance: { $gte: debitNgn } },
+    { $inc: { ngnbBalance: -debitNgn }, $set: { lastBalanceUpdate: new Date() } }
+  );
+  if (!debited.modifiedCount) {
+    await StorefrontSellOrder.updateOne({ _id: order._id, status: 'SELLING' }, { $set: { status: 'AWAITING_FUNDS' } });
+    if (!wasAwaitingFunds) {
+      const waiting = await StorefrontSellOrder.findById(order._id);
+      notifyTrader(merchant, 'awaiting_funds', waiting, { neededNgn: debitNgn }).catch(() => {});
+      tellCustomer(order.waId, `I've received your *${order.deposit.amount} ${order.coin}* ✅ Your payment of *${fmtNgn(customerNgn)}* is being prepared and will be sent shortly. Ref ${order.reference}.`);
+    }
+    return;
+  }
+  const debitedAt = new Date();
+  if (!(await toPaying(order, { 'selfRateFunds.debitNgn': debitNgn, 'selfRateFunds.debitedAt': debitedAt }))) {
+    await User.updateOne({ _id: merchant.userId }, { $inc: { ngnbBalance: debitNgn } }); // flagged meanwhile: give it back
+    return;
+  }
+
+  const payout = await payCustomer(order, merchant, customerNgn);
+  if (!payout?.success) {
+    await User.updateOne({ _id: merchant.userId }, { $inc: { ngnbBalance: debitNgn }, $set: { lastBalanceUpdate: new Date() } });
+    await StorefrontSellOrder.updateOne({ _id: order._id }, { $set: { 'payout.error': String(payout?.message || 'payout failed').slice(0, 300), 'selfRateFunds.refundedAt': new Date() } });
+    return review(order, 'Payout to the customer failed (trader refunded)', merchant);
+  }
+
+  await markPaid(order, merchant, payout, { customerNgn, ngnPerCoin, traderEarningNgn: null });
+  // The coin stays with the trader, in their Bramp wallet.
+  const field = COIN_BALANCE[order.coin];
+  if (field) {
+    await User.updateOne({ _id: merchant.userId }, { $inc: { [field]: order.deposit.amount }, $set: { lastBalanceUpdate: new Date() } });
+    await StorefrontSellOrder.updateOne({ _id: order._id }, { $set: { 'selfRateFunds.coinCreditedAt': new Date() } });
+  }
+
+  // Quoting stops below the cover level: tell the trader (at most every 6 hours).
+  const trader = await User.findById(merchant.userId).select('ngnbBalance');
+  const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);
+  if ((trader?.ngnbBalance || 0) < selfRate.cfg().minCoverNgn) {
+    const claimed = await StorefrontMerchant.updateOne(
+      { _id: merchant._id, $or: [{ 'selfRate.lowBalanceNotifiedAt': null }, { 'selfRate.lowBalanceNotifiedAt': { $lt: sixHoursAgo } }] },
+      { $set: { 'selfRate.lowBalanceNotifiedAt': new Date() } }
+    );
+    if (claimed.modifiedCount) notifyTrader(merchant, 'low_balance', await StorefrontSellOrder.findById(order._id), { balanceNgn: trader?.ngnbBalance || 0 }).catch(() => {});
+  }
+}
+
+/** Every minute: Self rate sales waiting for the trader's top-up are tried again. */
+async function retryAwaitingFunds() {
+  const waiting = await StorefrontSellOrder.find({ status: 'AWAITING_FUNDS' }).sort({ createdAt: 1 }).limit(50).select('_id');
+  for (const o of waiting) await settle(o._id);
 }
 
 /** Every minute: a sale stuck mid-way (e.g. the server restarted) goes to people, never retried blind. */
@@ -499,6 +612,6 @@ async function customerSales(customer, { reference } = {}) {
 module.exports = {
   PAIRS, NETWORK_NAMES, sellable, normalizeCoin, normalizeNetwork,
   touchCustomer, rateFor, addressFor, startSale, checkAccount, useAccount,
-  handleObiexDeposit, settle, flagStuck, customerSales, serializeSale,
+  handleObiexDeposit, settle, flagStuck, retryAwaitingFunds, customerSales, serializeSale,
   StorefrontSellError,
 };

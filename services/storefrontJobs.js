@@ -2,12 +2,13 @@
 // Every minute: send storefront payouts whose first-payer delay has passed
 // (services/storefrontBuy.js) and release held proceeds past their hold to
 // traders' NGNB balances (services/storefrontLedger.js), and hand offramp
-// sales stuck mid-way to Bramp ops (services/storefrontSell.js). Started from
+// sales stuck mid-way to Bramp ops and retry Self rate sales waiting for a
+// trader's top-up (services/storefrontSell.js). Started from
 // server.js once the server is listening.
 const cron = require('node-cron');
 const { releaseDelayed } = require('./storefrontBuy');
 const { releaseMatured } = require('./storefrontLedger');
-const { flagStuck } = require('./storefrontSell');
+const { flagStuck, retryAwaitingFunds } = require('./storefrontSell');
 const logger = require('../utils/logger');
 
 let running = false;
@@ -19,6 +20,7 @@ async function tick() {
     await releaseDelayed();
     await releaseMatured();
     await flagStuck();
+    await retryAwaitingFunds();
   } catch (err) {
     logger.error('Storefront job failed', { error: err.message, stack: err.stack });
   } finally {

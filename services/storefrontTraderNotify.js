@@ -11,9 +11,9 @@ const naira = (n) => `₦${Number(n || 0).toLocaleString('en-NG', { minimumFract
 const maskPhone = (waId) => `+${String(waId).slice(0, 3)} ••• ${String(waId).slice(-4)}`;
 const maskAcct = (n) => `••${String(n || '').slice(-4)}`;
 
-function message(event, order, merchant) {
-  const coins = `${order.deposit?.amount ?? ''} ${order.coin}`.trim();
-  const who = maskPhone(order.waId);
+function message(event, order, merchant, extra = {}) {
+  const coins = order ? `${order.deposit?.amount ?? ''} ${order.coin}`.trim() : '';
+  const who = order ? maskPhone(order.waId) : '';
   switch (event) {
     case 'deposit_confirmed':
       return { title: 'Customer deposit received', body: `${who} sent ${coins} to your storefront.` };
@@ -24,16 +24,24 @@ function message(event, order, merchant) {
         body: `${who} was paid ${naira(order.settlement?.customerNgn)} for ${coins} (${order.payoutAccount?.bankName} ${maskAcct(order.payoutAccount?.accountNumber)}).${earned}`,
       };
     }
+    case 'awaiting_funds':
+      return { title: 'Top up to pay your customer', body: `${who} sent ${coins}. Your NGN balance can't cover the payout of ${naira(extra.neededNgn)} (with the fee). Top up and we'll pay them automatically. Ref ${order.reference}.` };
+    case 'low_balance':
+      return { title: 'Storefront paused: low balance', body: `Your NGN balance is ${naira(extra.balanceNgn)}, so Stella has stopped quoting your Self rate. Top up to start trading again.` };
+    case 'self_rate_approved':
+      return { title: 'Self rate approved', body: `Your storefront can now use Self rate, with a monthly payout limit of ${naira(extra.payoutLimitNgn)}. Set your rates and fund your NGN balance to start.` };
+    case 'self_rate_rejected':
+      return { title: 'Self rate not approved', body: `Your Self rate application wasn't approved: ${extra.reason}. You can keep trading with Bramp rate.` };
     case 'needs_review':
       return { title: 'Storefront trade under review', body: `A payout to ${who} for ${coins} needs a check by Bramp. We'll update you. Ref ${order.reference}.` };
     default:
-      return { title: `${merchant.brandName || 'Storefront'} update`, body: `Trade ${order.reference}: ${event}.` };
+      return { title: `${merchant.brandName || 'Storefront'} update`, body: order ? `Trade ${order.reference}: ${event}.` : event };
   }
 }
 
-async function notifyTrader(merchant, event, order) {
-  const { title, body } = message(event, order, merchant);
-  const data = { type: 'STOREFRONT_TRADE', event, reference: order.reference };
+async function notifyTrader(merchant, event, order = null, extra = {}) {
+  const { title, body } = message(event, order, merchant, extra);
+  const data = { type: 'STOREFRONT_TRADE', event, reference: order?.reference || null };
 
   try {
     await sendCustomNotification(merchant.userId, title, body, data);
@@ -50,7 +58,7 @@ async function notifyTrader(merchant, event, order) {
       to: user.email,
       name: user.firstname || user.username || 'there',
       templateId,
-      params: { title, message: body, reference: order.reference, storefront: merchant.brandName || `@${merchant.slug}` },
+      params: { title, message: body, reference: order?.reference || '', storefront: merchant.brandName || `@${merchant.slug}` },
     });
   } catch (err) {
     logger.warn('Storefront: trader email failed', { merchant: merchant.slug, event, error: err.message });

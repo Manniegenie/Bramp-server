@@ -120,7 +120,7 @@ async function runTool(name, input, ctx) {
         return {
           name: desk.brandName || null,
           username: `@${desk.slug}`,
-          takingTrades: desk.status === 'active' && desk.rateMode === 'BRAMP',
+          takingTrades: desk.status === 'active' && (desk.rateMode === 'BRAMP' || (desk.rateMode === 'SELF' && desk.selfRate?.status === 'APPROVED')),
         };
       case 'get_sell_options':
         return { coins: sell.sellable() };

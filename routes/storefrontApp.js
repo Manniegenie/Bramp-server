@@ -9,6 +9,7 @@ const StorefrontMerchant = require('../models/storefrontMerchant');
 const StorefrontCustomer = require('../models/storefrontCustomer');
 const StorefrontSellOrder = require('../models/storefrontSellOrder');
 const sell = require('../services/storefrontSell');
+const selfRate = require('../services/storefrontSelfRate');
 const logger = require('../utils/logger');
 
 const router = express.Router();
@@ -41,14 +42,16 @@ function serializeDesk(desk) {
 
 /** What a customer gets per coin at this markdown, next to Bramp's rate. */
 async function preview(desk) {
-  if (desk.rateMode !== 'BRAMP' || desk.status !== 'active') return null;
+  if (!desk.rateMode || desk.status !== 'active') return null;
   const out = {};
   for (const coin of Object.keys(sell.PAIRS)) {
     try {
       const r = await sell.rateFor(desk, coin);
-      out[coin] = { customerNgnPerCoin: r.ngnPerCoin, brampNgnPerUsd: r.brampNgnPerUsd, markdownNgnPerUsd: r.markdownNgnPerUsd };
+      out[coin] = desk.rateMode === 'BRAMP'
+        ? { customerNgnPerCoin: r.ngnPerCoin, brampNgnPerUsd: r.brampNgnPerUsd, markdownNgnPerUsd: r.markdownNgnPerUsd }
+        : { customerNgnPerCoin: r.ngnPerCoin };
     } catch (err) {
-      out[coin] = { error: err.message };
+      out[coin] = { error: err.message }; // e.g. Self rate paused: NGN balance too low
     }
   }
   return out;
@@ -271,6 +274,44 @@ router.get('/sales', async (req, res) => {
   } catch (err) {
     logger.error('Storefront app: list sales failed', { userId: req.user?.id, error: err.message });
     return fail(res, 500, 'Internal server error');
+  }
+});
+
+// ── Self rate (services/storefrontSelfRate.js) ────────────────────────────
+
+const selfRateFail = (res, err) => {
+  if (err instanceof selfRate.SelfRateError) return fail(res, err.statusCode, err.message);
+  logger.error('Storefront app: self rate failed', { error: err.message });
+  return fail(res, 500, 'Internal server error');
+};
+
+/** Status, rates, payout limit, fee, the application's check results and any decision. */
+router.get('/self-rate', async (req, res) => {
+  const desk = await deskFor(req).catch(() => null);
+  if (!desk) return fail(res, 404, 'Open a storefront first.');
+  const trader = await User.findById(req.user.id).select('ngnbBalance');
+  return res.json({ success: true, data: { ...selfRate.view(desk), ngnBalance: trader?.ngnbBalance || 0, companyTypes: selfRate.COMPANY_TYPES } });
+});
+
+/** body: { cacNumber, companyType, bankCode, accountNumber, expectedMonthlyVolumeNgn, sourceOfFunds } */
+router.post('/self-rate/application', express.json(), async (req, res) => {
+  try {
+    const desk = await deskFor(req);
+    if (!desk) return fail(res, 404, 'Open a storefront first.');
+    return res.json({ success: true, data: await selfRate.apply(desk, req.body || {}) });
+  } catch (err) {
+    return selfRateFail(res, err);
+  }
+});
+
+/** body: { USDT?: number|null, USDC?: number|null } naira per coin. */
+router.put('/self-rate/rates', express.json(), async (req, res) => {
+  try {
+    const desk = await deskFor(req);
+    if (!desk) return fail(res, 404, 'Open a storefront first.');
+    return res.json({ success: true, data: await selfRate.setRates(desk, req.body || {}) });
+  } catch (err) {
+    return selfRateFail(res, err);
   }
 });
 

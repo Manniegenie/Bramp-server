@@ -72,9 +72,43 @@ const storefrontMerchantSchema = new mongoose.Schema({
   // APPROVED (Phase 2).
   rateMode: { type: String, enum: ['BRAMP', 'SELF', null], default: null },
   markdownNgnPerUsd: { type: Number, default: 0, min: 0 }, // naira per $1 below Bramp's rate
+  // Self rate (services/storefrontSelfRate.js): the trader's own rate, paid
+  // from their NGNB balance. Switched on only after Bramp approves the business.
   selfRate: {
-    status: { type: String, enum: ['NONE', 'PENDING', 'APPROVED', 'REJECTED'], default: 'NONE' },
-    ngnPerUsd: { type: Number, default: null, min: 0 },
+    status: { type: String, enum: ['NONE', 'PENDING', 'APPROVED', 'REJECTED'], default: 'NONE', index: true },
+    rates: { // naira per coin, set by the trader
+      USDT: { type: Number, default: null, min: 0 },
+      USDC: { type: Number, default: null, min: 0 },
+    },
+    payoutLimitNgn: { type: Number, default: 0, min: 0 }, // per calendar month, set at approval
+    feeNgn: { type: Number, default: null, min: 0 }, // flat fee per payout; null = STOREFRONT_SELF_FEE_NGN
+    application: {
+      cacNumber: { type: String, default: null },
+      companyType: { type: String, default: null },
+      businessAccount: {
+        bankCode: { type: String, default: null },
+        bankName: { type: String, default: null },
+        accountNumber: { type: String, default: null },
+        accountName: { type: String, default: null },
+      },
+      expectedMonthlyVolumeNgn: { type: Number, default: null },
+      sourceOfFunds: { type: String, default: null, maxlength: 500 },
+      submittedAt: { type: Date, default: null },
+      // Automatic checks, for the admin's review.
+      checks: {
+        kyc: { ok: Boolean, level: Number },
+        cac: { ok: Boolean, companyName: String, companyStatus: String, companyType: String, error: String },
+        director: { ok: Boolean, matchedName: String, role: String, traderName: String },
+        bankName: { ok: Boolean, accountName: String },
+        ranAt: Date,
+      },
+    },
+    decision: {
+      by: { type: String, default: null },
+      at: { type: Date, default: null },
+      reason: { type: String, default: null },
+    },
+    lowBalanceNotifiedAt: { type: Date, default: null },
   },
 }, { timestamps: true });
 

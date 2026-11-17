@@ -7,6 +7,7 @@ const mongoose = require('mongoose');
 const STATUSES = [
   'AWAITING_DEPOSIT', // address and rate shown, no deposit yet
   'AWAITING_ACCOUNT', // deposit confirmed, customer hasn't chosen where to be paid
+  'AWAITING_FUNDS', // Self rate: the trader's NGNB can't cover the payout yet - retried when they top up
   'SELLING', // Bramp rate: selling the coin for NGNX on Obiex
   'PAYING', // naira payout sent to Obiex
   'PAID', // customer paid, earnings credited
@@ -57,6 +58,14 @@ const storefrontSellOrderSchema = new mongoose.Schema({
     customerNgn: { type: Number, default: null },
     traderEarningNgn: { type: Number, default: null },
     feeNgn: { type: Number, default: 0 },
+  },
+
+  // Self rate: the trader's NGNB debited (payout + fee), the coin credited to them.
+  selfRateFunds: {
+    debitNgn: { type: Number, default: null },
+    debitedAt: { type: Date, default: null },
+    refundedAt: { type: Date, default: null },
+    coinCreditedAt: { type: Date, default: null },
   },
 
   sale: { // Bramp rate: the coin sold for NGNX
