@@ -647,6 +647,8 @@ app.use("/storefront", require("./auth/storefrontAuth"), require("./routes/store
 app.use("/storefront-onboarding", require("./auth/storefrontPlatformAuth"), require("./routes/storefrontOnboarding"));
 // The Bramp app approving or declining a link request.
 app.use("/storefront-link", authenticateToken, require("./routes/storefrontLink"));
+// The trader's Storefront page in the Bramp app: desk setup, link, customers, sales (routes/storefrontApp.js).
+app.use("/storefront-app", authenticateToken, require("./routes/storefrontApp"));
 app.use("/admin/storefront", authenticateAdminToken, requireAdmin, require("./adminRoutes/storefront"));
 // Stella's one-time identity check, from bramp.shop/verify. No login: the
 // link's token is the key (routes/stellaVerify.js).

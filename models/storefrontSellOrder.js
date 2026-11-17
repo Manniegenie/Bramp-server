@@ -1,0 +1,89 @@
+// models/storefrontSellOrder.js
+// One offramp trade: a storefront customer sells crypto to a desk and is paid
+// naira. Opened when Stella shows the address and rate; settled when the
+// deposit confirms (services/storefrontSell.js).
+const mongoose = require('mongoose');
+
+const STATUSES = [
+  'AWAITING_DEPOSIT', // address and rate shown, no deposit yet
+  'AWAITING_ACCOUNT', // deposit confirmed, customer hasn't chosen where to be paid
+  'SELLING', // Bramp rate: selling the coin for NGNX on Obiex
+  'PAYING', // naira payout sent to Obiex
+  'PAID', // customer paid, earnings credited
+  'NEEDS_REVIEW', // sale or payout failed: Bramp ops
+];
+
+const storefrontSellOrderSchema = new mongoose.Schema({
+  reference: { type: String, required: true, unique: true },
+  merchantId: { type: mongoose.Schema.Types.ObjectId, ref: 'StorefrontMerchant', required: true, index: true },
+  customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'StorefrontCustomer', required: true, index: true },
+  waId: { type: String, required: true },
+  channel: { type: String, enum: ['whatsapp', 'web'], default: 'whatsapp' },
+  openedByDeposit: { type: Boolean, default: false }, // a repeat deposit with no sale open: priced at deposit time
+
+  coin: { type: String, required: true },
+  network: { type: String, required: true },
+  address: { type: String, required: true },
+
+  rateMode: { type: String, enum: ['BRAMP', 'SELF'], required: true },
+  // Rate shown to the customer when the order opened, held until lockedUntil.
+  quote: {
+    ngnPerUsd: { type: Number, default: null }, // Bramp rate mode: Bramp's rate minus the markdown
+    brampNgnPerUsd: { type: Number, default: null },
+    markdownNgnPerUsd: { type: Number, default: null },
+    usdPerCoin: { type: Number, default: null },
+    ngnPerCoin: { type: Number, required: true },
+    quotedAt: { type: Date, required: true },
+    lockedUntil: { type: Date, required: true },
+  },
+
+  payoutAccount: {
+    accountNumber: String,
+    bankCode: String,
+    bankName: String,
+    accountName: String,
+  },
+
+  deposit: {
+    transactionId: { type: String, default: null }, // Obiex's; unique when set
+    hash: { type: String, default: null },
+    amount: { type: Number, default: null },
+    confirmedAt: { type: Date, default: null },
+  },
+
+  // Settled figures, at the rate that applied at confirmation.
+  settlement: {
+    ngnPerCoin: { type: Number, default: null },
+    rateSource: { type: String, enum: ['LOCKED', 'CURRENT', null], default: null },
+    customerNgn: { type: Number, default: null },
+    traderEarningNgn: { type: Number, default: null },
+    feeNgn: { type: Number, default: 0 },
+  },
+
+  sale: { // Bramp rate: the coin sold for NGNX
+    ok: { type: Boolean, default: null },
+    error: { type: String, default: null },
+    at: { type: Date, default: null },
+  },
+  payout: {
+    idempotencyKey: { type: String, default: null },
+    providerId: { type: String, default: null },
+    error: { type: String, default: null },
+    requestedAt: { type: Date, default: null },
+  },
+
+  status: { type: String, enum: STATUSES, default: 'AWAITING_DEPOSIT', index: true },
+  reviewReason: { type: String, default: null },
+  paidAt: { type: Date, default: null },
+  customerNotifiedAt: { type: Date, default: null },
+}, {
+  timestamps: true,
+});
+
+storefrontSellOrderSchema.index({ 'deposit.transactionId': 1 }, { unique: true, partialFilterExpression: { 'deposit.transactionId': { $type: 'string' } } });
+storefrontSellOrderSchema.index({ customerId: 1, coin: 1, network: 1, status: 1, createdAt: -1 });
+storefrontSellOrderSchema.index({ merchantId: 1, createdAt: -1 });
+
+storefrontSellOrderSchema.statics.STATUSES = STATUSES;
+
+module.exports = mongoose.models.StorefrontSellOrder || mongoose.model('StorefrontSellOrder', storefrontSellOrderSchema);

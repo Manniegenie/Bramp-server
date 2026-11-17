@@ -55,6 +55,7 @@ async function setDesk(customer, desk, via) {
   customer.deskSetAt = now;
   if (!customer.firstDeskId) customer.firstDeskId = desk._id;
   customer.deskHistory.push({ fromDeskId: from, toDeskId: desk._id, via, changedAt: now });
+  if (customer.deskHistory.length > 20) customer.deskHistory.splice(0, customer.deskHistory.length - 20); // keep the record small
   await customer.save();
   logger.info('Stella: desk set', { waId: sender.mask(customer.waId), desk: desk.slug, via, from: from ? String(from) : null });
 }
@@ -84,12 +85,12 @@ async function onMention(to, customer, convo, current, slug, via) {
   if (!current || current.status === 'closed') {
     await setDesk(customer, target, current ? 'SWITCH' : via);
     await clearPrompts(convo);
-    return sender.sendText(to, `You're now trading with ${deskLabel(target)}. They stay your desk until you choose another one.${target.status === 'paused' ? `\n\n${deskName(target)} is paused right now, so trading opens when they're back.` : ''}`);
+    return sender.sendText(to, `You're now trading with ${deskLabel(target)}. They stay your desk until you choose another one.${target.status === 'paused' ? `\n\n${deskName(target)} is paused right now, so trading opens when they're back.` : '\n\nWhich coin would you like to sell? *USDT* or *USDC*.'}`);
   }
 
   if (String(current._id) === String(target._id)) {
     await clearPrompts(convo);
-    return sender.sendText(to, `You're already trading with ${deskLabel(target)}.`);
+    return sender.sendText(to, `You're already trading with ${deskLabel(target)}. Which coin would you like to sell? *USDT* or *USDC*.`);
   }
 
   // A different desk: always confirm before switching.

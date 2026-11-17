@@ -65,6 +65,17 @@ const storefrontMerchantSchema = new mongoose.Schema({
     about: { type: String, default: null },
     updatedAt: { type: Date, default: null },
   },
+
+  // Offramp (spec, 17 Nov 2026). BRAMP: customers get Bramp's rate minus the
+  // markdown and the trader earns the markdown. SELF: the trader's own rate,
+  // paid from their pre-funded NGN balance - only once selfRate.status is
+  // APPROVED (Phase 2).
+  rateMode: { type: String, enum: ['BRAMP', 'SELF', null], default: null },
+  markdownNgnPerUsd: { type: Number, default: 0, min: 0 }, // naira per $1 below Bramp's rate
+  selfRate: {
+    status: { type: String, enum: ['NONE', 'PENDING', 'APPROVED', 'REJECTED'], default: 'NONE' },
+    ngnPerUsd: { type: Number, default: null, min: 0 },
+  },
 }, { timestamps: true });
 
 module.exports = mongoose.models.StorefrontMerchant || mongoose.model('StorefrontMerchant', storefrontMerchantSchema);

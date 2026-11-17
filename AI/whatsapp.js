@@ -23,9 +23,10 @@ const router = express.Router();
 const crypto = require('crypto');
 const StellaMessage = require('../models/stellaMessage');
 const sender = require('./stellaSender');
-const customers = require('./stellaCustomers');
-const stellaKyc = require('./stellaKyc');
+const StellaConversation = require('../models/stellaConversation');
+const StellaContact = require('../models/stellaContact');
 const deskRouter = require('./stellaRouter');
+const storefrontSell = require('../services/storefrontSell');
 const agent = require('./stellaAgent');
 const flows = require('./stellaFlows');
 const logger = require('../utils/logger');
@@ -165,37 +166,31 @@ async function handleMessage(msg, contact) {
   if (!msg.id || waId.length < 10 || waId.length > 15) return;
   if (!(await recordInbound(msg))) return;
 
-  const displayName = contact?.profile?.name || 'there';
   const reply = replyOf(msg);
   logger.info('Stella: message in', { id: msg.id, from: sender.mask(waId), type: msg.type });
 
   await sender.markReadWithTyping(msg.id);
-  // A completed Flow (the identity form's answers) comes in as a message.
-  if (flows.isFlowCompletion(msg)) {
-    await flows.handleCompletion(waId, msg);
-    return;
-  }
-  const customer = await customers.handleIncoming({
-    waId,
-    text: msg.text?.body ?? null,
-    replyId: reply?.id ?? null,
-    displayName,
-  });
-  const text = msg.text?.body ?? null;
-  if (!customer) { // still signing up: AI/stellaCustomers.js replied
-    await deskRouter.rememberEntryDesk(waId, text);
-    return;
-  }
+  // Flows aren't used for storefront customers (spec, 17 Nov 2026).
+  if (flows.isFlowCompletion(msg)) return;
 
-  // Nothing else until the one-time identity check is done (AI/stellaKyc.js).
-  if ((await stellaKyc.promptIfNeeded(waId, customer)) !== 'verified') {
-    await deskRouter.rememberEntryDesk(waId, text);
-    return;
-  }
+  // A storefront customer needs no Bramp account, sign-up or KYC: their
+  // WhatsApp number is who they are (sign-up and KYC in stellaCustomers.js
+  // and stellaKyc.js are no longer called).
+  const text = msg.text?.body ?? null;
+  const name = contact?.profile?.name ? String(contact.profile.name).slice(0, 100) : null;
+  await StellaConversation.updateOne({ waId }, { $set: { lastInboundAt: new Date() }, $setOnInsert: { waId } }, { upsert: true });
+  const person = await StellaContact.findOneAndUpdate(
+    { waId },
+    { ...(name ? { $set: { displayName: name } } : {}), $setOnInsert: { waId } },
+    { upsert: true, new: true }
+  );
 
   // Which desk (AI/stellaRouter.js); null when routing has replied itself.
-  const desk = await deskRouter.route({ waId, customer, text, replyId: reply?.id ?? null });
+  const desk = await deskRouter.route({ waId, customer: person, text, replyId: reply?.id ?? null });
   if (!desk) return;
+
+  // The desk's own record of this customer (filters, saved accounts, addresses).
+  const customer = await storefrontSell.touchCustomer(desk, waId, name);
 
   // Free text goes to the Claude agent, scoped to this desk (AI/stellaAgent.js).
   // Taps on buttons that aren't routing's have nothing to answer yet.

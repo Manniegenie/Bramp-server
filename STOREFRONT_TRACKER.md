@@ -1,6 +1,33 @@
 # Storefront build tracker (Stella + bramp.shop)
 
 The checklist for building Storefront. Tick items as they land and add a line to the log at the bottom, so the next session can pick up from here.
+
+**Current spec: *Bramp Storefront: Product Spec*, 17 November 2026** (product documentation: *Bramp Storefront — Product Documentation* v1.0, 17 Nov 2026). It replaces the 6 Nov spec below:
+- Stella's only service is **offramp**: a desk's customer sends crypto and is paid naira in their bank account.
+- The desk's customers have **no Bramp account, sign-up, code or KYC**; the trader is responsible for knowing them. A customer is their WhatsApp number.
+- Rate modes: **Bramp rate** (Bramp's sell rate minus the desk's markdown, naira per $1; Bramp sells on Obiex) and **Self rate** (the desk's own rate, paid from its pre-funded NGN balance; needs Bramp approval).
+- Trader setup is in the **Bramp app** (Storefront page): business name, rate mode, agreement; link and QR code to Stella.
+
+## Offramp milestones (17 Nov spec)
+
+- [~] **O1. Bramp rate, end to end.** Committed on `main`, **not deployed**. Tested on a throwaway local Mongo with Obiex, payouts, push, email, WhatsApp and Claude faked: 81/81.
+  - Deposit matching: one address per desk per customer, per coin and network, created only when the customer asks (`StorefrontDepositAddress`, never deleted). Obiex purpose `sf-<customer>-<coin>-<network>`.
+  - `StorefrontCustomer`: one record per desk and WhatsApp number (stats, up to 3 saved bank accounts, addresses, 10 tags, 500-char note; ~1.3 KB). `StellaContact`: the number's sticky desk (no Bramp account).
+  - `services/storefrontSell.js`: rate (Bramp rate minus markdown, held 30 min), `start_sale`, bank check (Obiex name lookup) and saved accounts, deposit handling (CONFIRMED only, once per Obiex transaction id), sale for NGNX, payout from NGNX, markdown to the trader's NGNB, desk limits and failures to `NEEDS_REVIEW`, stuck sales flagged by the minute job (never retried blind).
+  - Stella (`AI/whatsapp.js`, `AI/stellaAgent.js`): no sign-up/KYC gate; tools `get_desk_info`, `get_sell_options`, `get_rate`, `start_sale`, `check_bank_account`, `use_payout_account`, `get_my_sales`.
+  - Traders: push + email (`services/storefrontTraderNotify.js`), not Stella. Email needs `BREVO_TEMPLATE_STOREFRONT_TRADER` (params `title`, `message`, `reference`, `storefront`).
+  - Trader API for the app: `/storefront-app` (`routes/storefrontApp.js`): desk setup, link, customers with filters and CSV, sales.
+  - Webhooks: one storefront deposit handover in `routes/obiexwebhooktrx.js` and `routes/chatbotwebhook.js` (live payment paths).
+  - To switch on: deploy; a trader sets up through `/storefront-app`; one real small sale end to end, watched in the logs.
+- [ ] **O2. Self rate:** trader NGN balance, stop quoting, flat fee, CAC lookup (Dojah), director match, admin approval and payout limit in bramp-admin.
+- [ ] **O3. Bramp app Storefront page** (Chatbramp-app): setup, link and QR, customers and sales, Self rate application.
+- Switched off by the new spec (code kept): customer sign-up and sign-in (M4, `stellaCustomers.js`), customer KYC (M5, `stellaKyc.js`, bramp.shop `/verify`), Flows, the buy flow M9.
+- Known: `utils/obiexAuth.js` breaks when given `params` (installed `query-string` is ESM); `services/storefrontBanks.js` builds its own query string.
+
+---
+
+## Earlier plan (6 Nov spec, kept for reference)
+
 Spec: *Bramp Storefront: Product and System Spec (v1)*, 6 Nov 2026.
 
 **Ground rules**
@@ -274,3 +301,4 @@ Legend: `[x]` done · `[~]` written, not switched on · `[ ]` to do
 - **2026-11-16:** Moving Stella to YCloud (BSP) instead of Meta direct. Uncommitted: `AI/stellaSender.js` sends via YCloud `sendDirectly` when `YCLOUD_API_KEY` is set (typing via `inboundMessages/{id}/typing`), else Meta as before; `AI/whatsapp.js` adds `POST /whatsapp/ycloud` (checks `YCloud-Signature` with `YCLOUD_WEBHOOK_SECRET`, maps inbound messages and delivery updates onto the existing handlers). Webhook URL `https://priscaai.online/whatsapp/ycloud`. New env: `YCLOUD_API_KEY`, `YCLOUD_FROM_NUMBER` (E.164), `YCLOUD_WEBHOOK_SECRET`. Not yet through YCloud: Flow selfie download (`downloadMedia` still uses `META_ACCESS_TOKEN`). The YCloud API key was pasted in chat: rotate it.
 - **2026-11-16 (live):** Deployed `4d99183`. Stella now runs on the YCloud number **+234 703 402 7590** (new WABA; `YCLOUD_FROM_NUMBER`, `STELLA_WA_NUMBER` set). Messages come in through `/whatsapp/ycloud`. Flow IDs commented out in `.env` (old WABA's Flows), so sign-up is by text and KYC by the bramp.shop link until the Flows are rebuilt under the new WABA. The old number +234 902 088 3541 is still on Meta direct. `.env` backup: `.env.bak-<timestamp>` on the server.
 - **2026-11-10:** v3 approved, but sending it also returns 132001 ("does not exist in en", `AHw5zjS6lwTHzEqLilzMhtF`). So it's account-wide: the send API can't see any template or Flow on this WABA. Template env lines not added; Stella keeps the plain-text warning. Waiting on Meta.
+- **2026-11-17:** New spec (offramp only, no customer accounts or KYC). O1 (Bramp rate end to end) committed on `main`, not deployed: 81/81 local tests. Product documentation written (Word, for Google Drive). Next: deploy and one real sale; then O2 (Self rate) and O3 (app page).
