@@ -12,6 +12,7 @@ const STATUSES = [
   'PAYING', // naira payout sent to Obiex
   'PAID', // customer paid, earnings credited
   'NEEDS_REVIEW', // sale or payout failed: Bramp ops
+  'RESOLVED', // ops closed a review by hand (see resolution)
 ];
 
 const storefrontSellOrderSchema = new mongoose.Schema({
@@ -82,6 +83,12 @@ const storefrontSellOrderSchema = new mongoose.Schema({
 
   status: { type: String, enum: STATUSES, default: 'AWAITING_DEPOSIT', index: true },
   reviewReason: { type: String, default: null },
+  resolution: {
+    outcome: { type: String, enum: ['PAID_MANUALLY', 'REFUNDED_CUSTOMER', 'NO_ACTION', null], default: null },
+    note: { type: String, default: null, maxlength: 500 },
+    by: { type: String, default: null },
+    at: { type: Date, default: null },
+  },
   paidAt: { type: Date, default: null },
   customerNotifiedAt: { type: Date, default: null },
 }, {

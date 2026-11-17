@@ -15,13 +15,7 @@
 //   PUT   /merchants/:slug/stella-profile — same body as the desk's own PUT /storefront/stella-profile
 //   GET   /orders?status=&slug=           — e.g. status=REJECTED for refunds to make, PAYOUT_FAILED to fix
 //   POST  /orders/:ref/recall             — { amountNgn, note } a payment was recalled: take it back from the trader (super)
-//   GET   /self-rate/applications?status= — Self rate applications (default PENDING) with their automatic checks
-//   GET   /merchants/:slug/self-rate      — one desk's full Self rate application and checks
-//   POST  /merchants/:slug/self-rate/recheck — run the automatic checks again (e.g. after a Dojah outage)
-//   POST  /merchants/:slug/self-rate/approve — { payoutLimitNgn, feePct?, feeMinNgn?, feeMaxNgn? } monthly payout limit;
-//                                           fee overrides the default 0.2%, min ₦100, max ₦50,000 (super)
-//   POST  /merchants/:slug/self-rate/reject  — { reason } shown to the trader; turns Self rate off (super)
-//   GET   /sell-orders?status=&slug=      — offramp sales, e.g. status=NEEDS_REVIEW or AWAITING_FUNDS
+// Storefront offramp (desks, Self rate approval, sales): adminRoutes/storefrontOfframp.js
 const express = require('express');
 const router = express.Router();
 const User = require('../models/user');
@@ -194,92 +188,5 @@ router.post('/orders/:ref/recall', superOnly, route(async (req, res) => {
 }));
 
 
-// ── Self rate approval (services/storefrontSelfRate.js) ────────────────────
-
-const selfRate = require('../services/storefrontSelfRate');
-const { notifyTrader } = require('../services/storefrontTraderNotify');
-const StorefrontSellOrder = require('../models/storefrontSellOrder');
-const { serializeSale } = require('../services/storefrontSell');
-
-const applicationOf = (m, user) => ({
-  slug: m.slug,
-  businessName: m.brandName,
-  trader: user ? { email: user.email, name: [user.firstname, user.lastname].filter(Boolean).join(' '), kycLevel: user.kycLevel } : undefined,
-  status: m.selfRate?.status || 'NONE',
-  application: m.selfRate?.application || null,
-  payoutLimitNgn: m.selfRate?.payoutLimitNgn || 0,
-  fee: selfRate.feeSchedule(m),
-  decision: m.selfRate?.decision || null,
-});
-const selfRateFail = (res, err) => {
-  if (err instanceof selfRate.SelfRateError) return res.status(err.statusCode).json({ success: false, error: err.message });
-  throw err;
-};
-
-router.get('/self-rate/applications', route(async (req, res) => {
-  const status = ['PENDING', 'APPROVED', 'REJECTED'].includes(req.query.status) ? req.query.status : 'PENDING';
-  const rows = await StorefrontMerchant.find({ 'selfRate.status': status }).sort({ 'selfRate.application.submittedAt': 1 }).limit(200)
-    .populate('userId', 'email firstname lastname kycLevel');
-  res.json({ success: true, data: rows.map((m) => applicationOf(m, m.userId)) });
-}));
-
-router.get('/merchants/:slug/self-rate', route(async (req, res) => {
-  const m = await StorefrontMerchant.findOne({ slug: req.params.slug }).populate('userId', 'email firstname lastname kycLevel');
-  if (!m) return res.status(404).json({ success: false, error: 'Storefront not found.' });
-  res.json({ success: true, data: applicationOf(m, m.userId) });
-}));
-
-router.post('/merchants/:slug/self-rate/recheck', route(async (req, res) => {
-  const m = await StorefrontMerchant.findOne({ slug: req.params.slug });
-  if (!m) return res.status(404).json({ success: false, error: 'Storefront not found.' });
-  try {
-    const checks = await selfRate.recheck(m);
-    res.json({ success: true, data: checks });
-  } catch (err) { selfRateFail(res, err); }
-}));
-
-router.post('/merchants/:slug/self-rate/approve', superOnly, route(async (req, res) => {
-  const m = await StorefrontMerchant.findOne({ slug: req.params.slug });
-  if (!m) return res.status(404).json({ success: false, error: 'Storefront not found.' });
-  try {
-    await selfRate.approve(m, req.body || {}, who(req));
-  } catch (err) { return selfRateFail(res, err); }
-  logger.info('Storefront self rate approved', { slug: m.slug, payoutLimitNgn: m.selfRate.payoutLimitNgn, by: who(req) });
-  notifyTrader(m, 'self_rate_approved', null, { payoutLimitNgn: m.selfRate.payoutLimitNgn }).catch(() => {});
-  res.json({ success: true, data: applicationOf(m) });
-}));
-
-router.post('/merchants/:slug/self-rate/reject', superOnly, route(async (req, res) => {
-  const m = await StorefrontMerchant.findOne({ slug: req.params.slug });
-  if (!m) return res.status(404).json({ success: false, error: 'Storefront not found.' });
-  try {
-    await selfRate.reject(m, req.body || {}, who(req));
-  } catch (err) { return selfRateFail(res, err); }
-  logger.info('Storefront self rate rejected', { slug: m.slug, reason: m.selfRate.decision.reason, by: who(req) });
-  notifyTrader(m, 'self_rate_rejected', null, { reason: m.selfRate.decision.reason }).catch(() => {});
-  res.json({ success: true, data: applicationOf(m) });
-}));
-
-// ── Offramp sales (services/storefrontSell.js) ─────────────────────────────
-
-router.get('/sell-orders', route(async (req, res) => {
-  const q = {};
-  if (req.query.status && StorefrontSellOrder.STATUSES.includes(req.query.status)) q.status = req.query.status;
-  if (req.query.slug) {
-    const m = await StorefrontMerchant.findOne({ slug: String(req.query.slug) }).select('_id');
-    if (!m) return res.json({ success: true, data: [] });
-    q.merchantId = m._id;
-  }
-  const rows = await StorefrontSellOrder.find(q).sort({ createdAt: -1 }).limit(200).populate('merchantId', 'slug');
-  res.json({
-    success: true,
-    data: rows.map((o) => ({
-      ...serializeSale(o), desk: o.merchantId?.slug || null, whatsapp: o.waId, rateMode: o.rateMode,
-      depositTransactionId: o.deposit?.transactionId || null, reviewReason: o.reviewReason || null,
-      sale: o.sale, payout: { error: o.payout?.error || null, providerId: o.payout?.providerId || null },
-      selfRateFunds: o.selfRateFunds, settlement: o.settlement,
-    })),
-  });
-}));
 
 module.exports = router;

@@ -99,6 +99,7 @@ router.get('/', async (req, res) => {
       security: isSuperAdmin || false, // Only super admin
       auditAndMonitoring: isSuperAdmin || false, // Admin does NOT have access
       adminSettings: isSuperAdmin || false, // Admin does NOT have access
+      storefront: isSuperAdmin || isAdmin || false, // Storefront pages; changes are super admin only (server-enforced)
       settings: true, // Everyone can access settings
       // Include all permission flags
       canDeleteUsers: isSuperAdmin || false,
