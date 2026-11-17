@@ -57,17 +57,34 @@ async function preview(desk) {
   return out;
 }
 
-/** Today's paid sales, the trader's earnings today, and the customer count, for the app's dashboard. */
+/**
+ * The app's dashboard figures (bramp-admin's terms): Trade Volume (NGN) and
+ * Total Trades all time and today, the trader's earnings, and the customer count.
+ */
 async function deskStats(desk) {
   const day = new Date(); day.setHours(0, 0, 0, 0);
-  const [[today = {}], customers] = await Promise.all([
+  const sum = { trades: { $sum: 1 }, volumeNgn: { $sum: '$settlement.customerNgn' }, earnedNgn: { $sum: { $ifNull: ['$settlement.traderEarningNgn', 0] } } };
+  const [[facets = {}], customers] = await Promise.all([
     StorefrontSellOrder.aggregate([
-      { $match: { merchantId: desk._id, status: 'PAID', paidAt: { $gte: day } } },
-      { $group: { _id: null, sales: { $sum: 1 }, volumeNgn: { $sum: '$settlement.customerNgn' }, earnedNgn: { $sum: { $ifNull: ['$settlement.traderEarningNgn', 0] } } } },
+      { $match: { merchantId: desk._id, status: 'PAID' } },
+      { $facet: {
+        total: [{ $group: { _id: null, ...sum } }],
+        today: [{ $match: { paidAt: { $gte: day } } }, { $group: { _id: null, ...sum } }],
+      } },
     ]),
     StorefrontCustomer.countDocuments({ merchantId: desk._id }),
   ]);
-  return { todaySales: today.sales || 0, todayVolumeNgn: today.volumeNgn || 0, todayEarnedNgn: today.earnedNgn || 0, customers };
+  const total = facets.total?.[0] || {};
+  const today = facets.today?.[0] || {};
+  return {
+    tradeVolumeNgn: total.volumeNgn || 0,
+    totalTrades: total.trades || 0,
+    earningsNgn: total.earnedNgn || 0,
+    todaySales: today.trades || 0,
+    todayVolumeNgn: today.volumeNgn || 0,
+    todayEarnedNgn: today.earnedNgn || 0,
+    customers,
+  };
 }
 
 // ── Desk ───────────────────────────────────────────────────────────────────
