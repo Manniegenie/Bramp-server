@@ -15,7 +15,8 @@
 // POST /whatsapp/ycloud is the same for YCloud (https://<server>/whatsapp/ycloud):
 // signed with YCloud-Signature (YCLOUD_WEBHOOK_SECRET), one event per request.
 // Inbound messages and delivery updates are turned into Meta's shape and go
-// through the same handlers. Flows still talk to /whatsapp/whatsapp directly.
+// through the same handlers. Flows created on YCloud call /whatsapp/ycloud-flow
+// (plain JSON); Flows on the old Meta number still call /whatsapp/whatsapp.
 
 const express = require('express');
 const router = express.Router();
@@ -282,6 +283,28 @@ router.post('/ycloud', (req, res) => {
   // event id; for messages the wamid duplicate check catches them.
   res.status(200).json({ status: 'ok' });
   processYCloudEvent(ev).catch(err => logger.error('Stella: YCloud webhook processing failed', { type: ev.type, error: err.message, stack: err.stack }));
+});
+
+// ===== YCloud Flow endpoint (POST /whatsapp/ycloud-flow) =====
+// The sign-up and sign-in Flows' endpointUri on YCloud. YCloud forwards
+// Meta's Flow requests as plain JSON and sends no signature, so the only
+// gate is the flow_token: AI/stellaFlows.js answers "expired" to any token
+// it didn't issue to that customer. Must answer within 15 seconds.
+router.post('/ycloud-flow', async (req, res) => {
+  const b = parseBody(req);
+  if (!b || typeof b !== 'object' || Array.isArray(b)) return res.status(400).json({ error: 'Expected a JSON object' });
+  const action = String(b.action || '').toLowerCase();
+  if (action === 'ping') return res.json({ data: { status: 'active' } });
+  if (b.data?.error) {
+    logger.warn('Stella: YCloud Flow error notification', { error: b.data.error, message: b.data.error_message });
+    return res.json({ data: { acknowledged: true } });
+  }
+  try {
+    return res.json(await flows.handleExchange(b));
+  } catch (e) {
+    logger.error('Flow handler error (YCloud)', { screen: b.screen, action, error: e.message, stack: e.stack });
+    return res.json({ screen: b.screen || 'NAME', data: { error_message: 'Something went wrong. Please try again.' } });
+  }
 });
 
 // ===== Unified endpoint =====
