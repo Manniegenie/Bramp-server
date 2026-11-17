@@ -68,11 +68,20 @@ async function preview(desk) {
  * The app's dashboard figures (bramp-admin's terms): Trade Volume (NGN) and
  * Total Trades all time and today, the trader's earnings, and the customer count.
  */
+const SERIES_DAYS = 7;
+const SERIES_TZ = 'Africa/Lagos';
+/** The last SERIES_DAYS dates in Lagos, oldest first, as YYYY-MM-DD. */
+const seriesDays = () => Array.from({ length: SERIES_DAYS }, (_, i) =>
+  new Date(Date.now() - (SERIES_DAYS - 1 - i) * 864e5).toLocaleDateString('en-CA', { timeZone: SERIES_TZ }));
+const byDay = (field) => ({ $dateToString: { format: '%Y-%m-%d', date: field, timezone: SERIES_TZ } });
+
 async function deskStats(desk) {
   const day = new Date(); day.setHours(0, 0, 0, 0);
   const yesterday = new Date(day); yesterday.setDate(day.getDate() - 1);
+  // A day's margin either side of the Lagos window; dates outside it are dropped below.
+  const seriesFrom = new Date(Date.now() - (SERIES_DAYS + 1) * 864e5);
   const sum = { trades: { $sum: 1 }, volumeNgn: { $sum: '$settlement.customerNgn' }, earnedNgn: { $sum: { $ifNull: ['$settlement.traderEarningNgn', 0] } } };
-  const [[facets = {}], customers] = await Promise.all([
+  const [[facets = {}], customers, newCustomers] = await Promise.all([
     StorefrontSellOrder.aggregate([
       { $match: { merchantId: desk._id, status: 'PAID' } },
       { $facet: {
@@ -80,13 +89,33 @@ async function deskStats(desk) {
         today: [{ $match: { paidAt: { $gte: day } } }, { $group: { _id: null, ...sum } }],
         // The app tints Total Trades and Earnings by how today compares with yesterday.
         yesterday: [{ $match: { paidAt: { $gte: yesterday, $lt: day } } }, { $group: { _id: null, ...sum } }],
+        // The tiles' growth lines: per day for the last week.
+        daily: [{ $match: { paidAt: { $gte: seriesFrom } } }, { $group: { _id: byDay('$paidAt'), ...sum } }],
       } },
     ]),
     StorefrontCustomer.countDocuments({ merchantId: desk._id }),
+    StorefrontCustomer.aggregate([
+      { $match: { merchantId: desk._id, firstSeenAt: { $gte: seriesFrom } } },
+      { $group: { _id: byDay('$firstSeenAt'), n: { $sum: 1 } } },
+    ]),
   ]);
   const total = facets.total?.[0] || {};
   const today = facets.today?.[0] || {};
   const prev = facets.yesterday?.[0] || {};
+
+  const days = seriesDays();
+  const daily = new Map((facets.daily || []).map((d) => [d._id, d]));
+  const joined = new Map(newCustomers.map((d) => [d._id, d.n]));
+  // Customers as a running total ending at today's count.
+  const joinedInWindow = days.reduce((n, d) => n + (joined.get(d) || 0), 0);
+  let running = customers - joinedInWindow;
+  const series = {
+    days,
+    trades: days.map((d) => daily.get(d)?.trades || 0),
+    volumeNgn: days.map((d) => Math.round(daily.get(d)?.volumeNgn || 0)),
+    earnedNgn: days.map((d) => Math.round(daily.get(d)?.earnedNgn || 0)),
+    customers: days.map((d) => (running += joined.get(d) || 0)),
+  };
   return {
     tradeVolumeNgn: total.volumeNgn || 0,
     totalTrades: total.trades || 0,
@@ -98,6 +127,7 @@ async function deskStats(desk) {
     yesterdayVolumeNgn: prev.volumeNgn || 0,
     yesterdayEarnedNgn: prev.earnedNgn || 0,
     customers,
+    series,
   };
 }
 
