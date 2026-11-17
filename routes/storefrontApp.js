@@ -70,6 +70,7 @@ async function preview(desk) {
  */
 async function deskStats(desk) {
   const day = new Date(); day.setHours(0, 0, 0, 0);
+  const yesterday = new Date(day); yesterday.setDate(day.getDate() - 1);
   const sum = { trades: { $sum: 1 }, volumeNgn: { $sum: '$settlement.customerNgn' }, earnedNgn: { $sum: { $ifNull: ['$settlement.traderEarningNgn', 0] } } };
   const [[facets = {}], customers] = await Promise.all([
     StorefrontSellOrder.aggregate([
@@ -77,12 +78,15 @@ async function deskStats(desk) {
       { $facet: {
         total: [{ $group: { _id: null, ...sum } }],
         today: [{ $match: { paidAt: { $gte: day } } }, { $group: { _id: null, ...sum } }],
+        // The app tints Total Trades and Earnings by how today compares with yesterday.
+        yesterday: [{ $match: { paidAt: { $gte: yesterday, $lt: day } } }, { $group: { _id: null, ...sum } }],
       } },
     ]),
     StorefrontCustomer.countDocuments({ merchantId: desk._id }),
   ]);
   const total = facets.total?.[0] || {};
   const today = facets.today?.[0] || {};
+  const prev = facets.yesterday?.[0] || {};
   return {
     tradeVolumeNgn: total.volumeNgn || 0,
     totalTrades: total.trades || 0,
@@ -90,6 +94,9 @@ async function deskStats(desk) {
     todaySales: today.trades || 0,
     todayVolumeNgn: today.volumeNgn || 0,
     todayEarnedNgn: today.earnedNgn || 0,
+    yesterdaySales: prev.trades || 0,
+    yesterdayVolumeNgn: prev.volumeNgn || 0,
+    yesterdayEarnedNgn: prev.earnedNgn || 0,
     customers,
   };
 }
