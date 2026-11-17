@@ -26,7 +26,7 @@ const storefrontSellOrderSchema = new mongoose.Schema({
   address: { type: String, required: true },
 
   rateMode: { type: String, enum: ['BRAMP', 'SELF'], required: true },
-  // Rate shown to the customer when the order opened, held until lockedUntil.
+  // Rate shown when the sale opened: a guide only - it settles at the live rate.
   quote: {
     ngnPerUsd: { type: Number, default: null }, // Bramp rate mode: Bramp's rate minus the markdown
     brampNgnPerUsd: { type: Number, default: null },
@@ -34,7 +34,6 @@ const storefrontSellOrderSchema = new mongoose.Schema({
     usdPerCoin: { type: Number, default: null },
     ngnPerCoin: { type: Number, required: true },
     quotedAt: { type: Date, required: true },
-    lockedUntil: { type: Date, required: true },
   },
 
   payoutAccount: {
@@ -51,10 +50,10 @@ const storefrontSellOrderSchema = new mongoose.Schema({
     confirmedAt: { type: Date, default: null },
   },
 
-  // Settled figures, at the rate that applied at confirmation.
+  // Settled figures, at the live rate when the deposit was processed.
   settlement: {
     ngnPerCoin: { type: Number, default: null },
-    rateSource: { type: String, enum: ['LOCKED', 'CURRENT', null], default: null },
+    rateAt: { type: Date, default: null }, // when the live rate was taken
     customerNgn: { type: Number, default: null },
     traderEarningNgn: { type: Number, default: null },
     feeNgn: { type: Number, default: 0 },

@@ -28,7 +28,7 @@ const SYSTEM_PROMPT = `You are Stella, the WhatsApp assistant of Bramp Storefron
 
 How a sale goes:
 1. The customer says which coin to sell. Coins and networks come from get_sell_options.
-2. Call start_sale with the coin and network (ask which network if they haven't said; USDT has more than one). Give the customer the desk's rate, the network and the address from start_sale, and how long the rate is held. Put the address alone on its own line, copied exactly from the tool, character for character. Never type an address from memory or from earlier in the chat: call start_sale again instead.
+2. Call start_sale with the coin and network (ask which network if they haven't said; USDT has more than one). Give the customer the desk's rate, the network and the address from start_sale. The rate is live: say it's the desk's rate right now and that they're paid at the desk's rate when their deposit confirms. Put the address alone on its own line, copied exactly from the tool, character for character. Never type an address from memory or from earlier in the chat: call start_sale again instead.
 3. Ask where to pay them. If start_sale returns saved accounts, offer the most recent one by bank, masked number and name ("Send to GTBank ••6789, ADA OBI?"). For a new account, call check_bank_account with the bank and the 10-digit number, then read the account name back and ask them to confirm. Only after they confirm, call use_payout_account (account_id for a saved account; bank_code and account_number for a new one).
 4. They send the coin to the address on that network. Bramp pays them automatically once the deposit confirms and messages them; you don't need to do anything. Never say a deposit arrived or a payment was sent unless get_my_sales shows it.
 
@@ -66,7 +66,7 @@ const TOOLS = [
   },
   {
     name: 'start_sale',
-    description: "Start (or refresh) a sale: returns the customer's own deposit address for this coin and network at this desk, the rate in naira per coin, when the rate hold ends, the payout account already chosen for it if any, and the customer's saved bank accounts.",
+    description: "Start (or refresh) a sale: returns the customer's own deposit address for this coin and network at this desk, the desk's live rate in naira per coin (a guide: the sale is paid at the live rate when the deposit confirms), the payout account already chosen for it if any, and the customer's saved bank accounts.",
     input_schema: {
       type: 'object',
       properties: {

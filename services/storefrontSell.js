@@ -34,7 +34,6 @@ const NETWORK_ALIASES = {
 };
 
 const cfg = () => ({
-  lockMinutes: Number(process.env.STOREFRONT_SELL_LOCK_MINUTES || 30),
   maxMarkdownNgnPerUsd: Number(process.env.STOREFRONT_MAX_MARKDOWN_NGN_PER_USD || 100),
   stuckMinutes: Number(process.env.STOREFRONT_SELL_STUCK_MINUTES || 10),
 });
@@ -158,7 +157,6 @@ function quoteFields(rate, now = new Date()) {
     usdPerCoin: rate.usdPerCoin,
     ngnPerCoin: rate.ngnPerCoin,
     quotedAt: now,
-    lockedUntil: new Date(now.getTime() + cfg().lockMinutes * 60 * 1000),
   };
 }
 
@@ -170,7 +168,8 @@ function savedAccounts(customer) {
 
 /**
  * The customer wants to sell a coin: their address, the network and the
- * desk's rate (held for the lock window). Reuses an open sale for the same
+ * desk's live rate (a guide: the sale settles at the live rate when the
+ * deposit confirms). Reuses an open sale for the same
  * coin and network rather than starting another.
  */
 async function startSale(merchant, customer, { coin: coinRaw, network: networkRaw }) {
@@ -200,7 +199,7 @@ async function startSale(merchant, customer, { coin: coinRaw, network: networkRa
     address: addr.address,
     memo: addr.memo || null,
     ngnPerCoin: rate.ngnPerCoin,
-    rateHeldUntil: quote.lockedUntil.toISOString(),
+    rateIsLive: true, // paid at the desk's live rate when the deposit confirms
     payoutAccount: order.payoutAccount?.accountNumber
       ? { bankName: order.payoutAccount.bankName, account: maskAcct(order.payoutAccount.accountNumber), accountName: order.payoutAccount.accountName }
       : null,
@@ -309,7 +308,7 @@ async function handleObiexDeposit({ address, currency, amount, status, transacti
     try {
       quote = quoteFields(await rateFor(merchant, addr.coin));
     } catch (err) {
-      quote = { ngnPerCoin: 0, quotedAt: new Date(), lockedUntil: new Date() }; // desk paused/unpriced: ops decides
+      quote = { ngnPerCoin: 0, quotedAt: new Date() }; // desk paused/unpriced: ops decides
     }
     try {
       order = await StorefrontSellOrder.create({
@@ -369,25 +368,19 @@ async function settle(orderId) {
   const merchant = await StorefrontMerchant.findById(order.merchantId);
   if (!merchant) return review(order, 'Desk not found', null);
 
-  // Rate: the held quote if the deposit confirmed in time, else the rate now.
-  let ngnPerCoin = order.quote.ngnPerCoin;
-  let usdPerCoin = order.quote.usdPerCoin;
-  let markdown = order.quote.markdownNgnPerUsd;
-  let rateSource = order.openedByDeposit ? 'CURRENT' : 'LOCKED';
-  if (!(ngnPerCoin > 0) || order.deposit.confirmedAt > order.quote.lockedUntil) {
-    try {
-      const now = await rateFor(merchant, order.coin);
-      ({ ngnPerCoin, usdPerCoin } = now);
-      markdown = now.markdownNgnPerUsd;
-      rateSource = 'CURRENT';
-    } catch (err) {
-      return review(order, `No rate at settlement: ${err.message}`, merchant);
-    }
+  // Always the live rate, at settlement (never a quote from earlier).
+  let live;
+  try {
+    live = await rateFor(merchant, order.coin);
+  } catch (err) {
+    return review(order, `No rate at settlement: ${err.message}`, merchant);
   }
+  const { ngnPerCoin, usdPerCoin, markdownNgnPerUsd: markdown } = live;
+  const rateAt = new Date();
   const amount = order.deposit.amount;
   const customerNgn = floor2(amount * ngnPerCoin);
   const traderEarningNgn = round2(amount * usdPerCoin * markdown);
-  await StorefrontSellOrder.updateOne({ _id: order._id }, { $set: { settlement: { ngnPerCoin, rateSource, customerNgn, traderEarningNgn, feeNgn: 0 } } });
+  await StorefrontSellOrder.updateOne({ _id: order._id }, { $set: { settlement: { ngnPerCoin, rateAt, customerNgn, traderEarningNgn, feeNgn: 0 } } });
 
   // Desk limits are a risk check: over them, a person decides.
   if (merchant.perTradeMaxNgn > 0 && customerNgn > merchant.perTradeMaxNgn) {
@@ -462,13 +455,11 @@ async function settle(orderId) {
   });
 
   const paid = await StorefrontSellOrder.findById(order._id);
-  logger.info('Storefront sell: paid', { reference: order.reference, customerNgn, traderEarningNgn, rateSource });
+  logger.info('Storefront sell: paid', { reference: order.reference, customerNgn, traderEarningNgn, ngnPerCoin });
   notifyTrader(merchant, 'paid', paid).catch(() => {});
   const naira = `₦${customerNgn.toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  const note = order.openedByDeposit
-    ? ` Paid at today's rate of ₦${ngnPerCoin.toLocaleString('en-NG')} per ${order.coin}.`
-    : rateSource === 'CURRENT' ? ' Your deposit arrived after the rate hold, so today\'s rate was used.' : '';
-  tellCustomer(order.waId, `Received *${amount} ${order.coin}* ✅ *${naira}* is on its way to ${order.payoutAccount.bankName} ${maskAcct(order.payoutAccount.accountNumber)}.${note} Ref ${order.reference}.`);
+  const rateText = `₦${ngnPerCoin.toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} per ${order.coin}`;
+  tellCustomer(order.waId, `Received *${amount} ${order.coin}* ✅ *${naira}* (${rateText}) is on its way to ${order.payoutAccount.bankName} ${maskAcct(order.payoutAccount.accountNumber)}. Ref ${order.reference}.`);
 }
 
 /** Every minute: a sale stuck mid-way (e.g. the server restarted) goes to people, never retried blind. */
