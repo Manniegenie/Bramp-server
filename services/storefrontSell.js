@@ -360,14 +360,18 @@ async function handleObiexDeposit({ address, currency, amount, status, transacti
     tellCustomer(order.waId, `I've received your *${amt} ${order.coin}* ✅ Where should I pay you? Send your bank and 10-digit account number.`);
     return true;
   }
+  // Deposit received - sent (and accepted by WhatsApp) before the payout
+  // starts, so it always arrives before the "sent" message.
+  await tellCustomer(order.waId, `✅ I've received your *${amt} ${order.coin}*. I'm paying you now at the live rate and will message you as soon as it's sent. Ref ${order.reference}.`);
   settleInBackground(order._id);
   return true;
 }
 
 // ── Settlement ─────────────────────────────────────────────────────────────
 
+/** A message to the customer in their Stella chat. Never throws; await it when order matters. */
 function tellCustomer(waId, text) {
-  require('../AI/stellaSender').sendText(waId, text).catch((err) =>
+  return require('../AI/stellaSender').sendText(waId, text).catch((err) =>
     logger.warn('Storefront sell: customer message failed', { error: err.message }));
 }
 
@@ -453,7 +457,7 @@ async function markPaid(order, merchant, payout, { customerNgn, ngnPerCoin, trad
   const paid = await StorefrontSellOrder.findById(order._id);
   logger.info('Storefront sell: paid', { reference: order.reference, rateMode: order.rateMode, customerNgn, traderEarningNgn, ngnPerCoin });
   notifyTrader(merchant, 'paid', paid).catch(() => {});
-  tellCustomer(order.waId, `Received *${order.deposit.amount} ${order.coin}* ✅ *${fmtNgn(customerNgn)}* (${fmtNgn(ngnPerCoin)} per ${order.coin}) is on its way to ${order.payoutAccount.bankName} ${maskAcct(order.payoutAccount.accountNumber)}. Ref ${order.reference}.`);
+  tellCustomer(order.waId, `💸 Sent! *${fmtNgn(customerNgn)}* for your ${order.deposit.amount} ${order.coin} (${fmtNgn(ngnPerCoin)} per ${order.coin}) has been sent to ${order.payoutAccount.bankName} ${maskAcct(order.payoutAccount.accountNumber)}. Ref ${order.reference}.`);
   return paidAt;
 }
 
@@ -544,7 +548,7 @@ async function settleSelfRate(order, merchant, { customerNgn, ngnPerCoin, feeNgn
     if (!wasAwaitingFunds) {
       const waiting = await StorefrontSellOrder.findById(order._id);
       notifyTrader(merchant, 'awaiting_funds', waiting, { neededNgn: debitNgn }).catch(() => {});
-      tellCustomer(order.waId, `I've received your *${order.deposit.amount} ${order.coin}* ✅ Your payment of *${fmtNgn(customerNgn)}* is being prepared and will be sent shortly. Ref ${order.reference}.`);
+      tellCustomer(order.waId, `Your payment is taking a little longer than usual. I'll message you as soon as it's sent. Ref ${order.reference}.`);
     }
     return;
   }
