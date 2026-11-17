@@ -24,7 +24,7 @@ The checklist for building Storefront. Tick items as they land and add a line to
   - Settlement (`storefrontSell.js`): payout + flat fee debited from the trader's NGNB in one guarded step; customer paid from NGNX; coin credited to the trader after payout; payout failure refunds the debit; short of funds → `AWAITING_FUNDS`, trader asked once, retried by the minute job; quoting stops below `STOREFRONT_SELF_MIN_COVER_NGN` (₦5,000), trader told (max every 6 h); monthly payout limit.
   - Trader API: `GET /storefront-app/self-rate`, `POST /self-rate/application`, `PUT /self-rate/rates`; `PUT /me` allows `rateMode: SELF` once approved.
   - Admin API: `/admin/storefront/self-rate/applications`, `merchants/:slug/self-rate` (+ `/recheck`, `/approve` super, `/reject` super), `sell-orders`.
-  - Still to do: bramp-admin screens for applications and sales under review; Brevo template for trader emails. Open: flat fee amount (`STOREFRONT_SELF_FEE_NGN`, default 0), SCUML/SEC (legal).
+  - Still to do: bramp-admin screens for applications and sales under review; Brevo template for trader emails. Open: flat fee amount (`STOREFRONT_SELF_FEE_NGN`, default 0). SCUML/SEC registration is not required for now (decided 17 Nov 2026).
 - [ ] **O3. Bramp app Storefront page** (Chatbramp-app): setup, link and QR, customers and sales, Self rate application.
 - Switched off by the new spec (code kept): customer sign-up and sign-in (M4, `stellaCustomers.js`), customer KYC (M5, `stellaKyc.js`, bramp.shop `/verify`), Flows, the buy flow M9.
 - Known: `utils/obiexAuth.js` breaks when given `params` (installed `query-string` is ESM); `services/storefrontBanks.js` builds its own query string.
