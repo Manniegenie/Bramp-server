@@ -57,13 +57,27 @@ async function preview(desk) {
   return out;
 }
 
+/** Today's paid sales, the trader's earnings today, and the customer count, for the app's dashboard. */
+async function deskStats(desk) {
+  const day = new Date(); day.setHours(0, 0, 0, 0);
+  const [[today = {}], customers] = await Promise.all([
+    StorefrontSellOrder.aggregate([
+      { $match: { merchantId: desk._id, status: 'PAID', paidAt: { $gte: day } } },
+      { $group: { _id: null, sales: { $sum: 1 }, volumeNgn: { $sum: '$settlement.customerNgn' }, earnedNgn: { $sum: { $ifNull: ['$settlement.traderEarningNgn', 0] } } } },
+    ]),
+    StorefrontCustomer.countDocuments({ merchantId: desk._id }),
+  ]);
+  return { todaySales: today.sales || 0, todayVolumeNgn: today.volumeNgn || 0, todayEarnedNgn: today.earnedNgn || 0, customers };
+}
+
 // ── Desk ───────────────────────────────────────────────────────────────────
 
 router.get('/me', async (req, res) => {
   try {
     const desk = await deskFor(req);
     if (!desk) return res.json({ success: true, data: { desk: null, agreementVersion: AGREEMENT_VERSION } });
-    return res.json({ success: true, data: { desk: serializeDesk(desk), rates: await preview(desk), agreementVersion: AGREEMENT_VERSION } });
+    const [rates, stats] = await Promise.all([preview(desk), deskStats(desk)]);
+    return res.json({ success: true, data: { desk: serializeDesk(desk), rates, stats, agreementVersion: AGREEMENT_VERSION } });
   } catch (err) {
     logger.error('Storefront app: get desk failed', { userId: req.user?.id, error: err.message });
     return fail(res, 500, 'Internal server error');
@@ -111,7 +125,8 @@ router.put('/me', express.json(), async (req, res) => {
     if (paused !== undefined && desk.status !== 'closed') desk.status = paused ? 'paused' : 'active';
     await desk.save();
 
-    return res.json({ success: true, data: { desk: serializeDesk(desk), rates: await preview(desk) } });
+    const [rates, stats] = await Promise.all([preview(desk), deskStats(desk)]);
+    return res.json({ success: true, data: { desk: serializeDesk(desk), rates, stats } });
   } catch (err) {
     if (err.code === 11000) return fail(res, 409, 'That username is already used by another storefront.');
     logger.error('Storefront app: save desk failed', { userId: req.user?.id, error: err.message });
