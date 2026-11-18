@@ -14,6 +14,7 @@ const StorefrontCustomer = require('../models/storefrontCustomer');
 const StorefrontDepositAddress = require('../models/storefrontDepositAddress');
 const StorefrontSellOrder = require('../models/storefrontSellOrder');
 const StorefrontMerchant = require('../models/storefrontMerchant');
+const StellaConversation = require('../models/stellaConversation');
 const obiexAddresses = require('./createwalletaddress');
 const { swapCryptoToNGNX } = require('./ObiexSwap');
 const { debitNaira } = require('./nairaWithdrawal');
@@ -394,26 +395,57 @@ async function handleObiexDeposit({ address, currency, amount, status, transacti
   logger.info('Storefront sell: deposit confirmed', { reference: order.reference, coin: order.coin, amount: amt });
   if (merchant) notifyTrader(merchant, 'deposit_confirmed', order).catch(() => {});
 
+  const desk = deskLabel(merchant);
   if (!order.payoutAccount?.accountNumber) {
     await StorefrontSellOrder.updateOne({ _id: order._id }, { $set: { status: 'AWAITING_ACCOUNT' } });
-    tellCustomer(order.waId, `I've received your *${amt} ${order.coin}* ✅ Where should I pay you? Send your bank and 10-digit account number.`);
+    tellCustomer(order.waId, `I've received your *${amt} ${order.coin}* ✅ Where should I pay you? Send your bank and 10-digit account number.`,
+      { env: 'STELLA_TEMPLATE_DEPOSIT_NEEDS_ACCOUNT', params: [amt, order.coin, desk, order.reference] });
     return true;
   }
   // Deposit received - sent (and accepted by WhatsApp) before the payout
   // starts, so it always arrives before the "sent" message.
-  await tellCustomer(order.waId, (await settings.payoutsHeld())
-    ? `✅ I've received your *${amt} ${order.coin}*. Payouts are delayed for a short while; you'll be paid at the live rate as soon as they resume, and I'll message you when it's sent. Ref ${order.reference}.`
-    : `✅ I've received your *${amt} ${order.coin}*. I'm paying you now at the live rate and will message you as soon as it's sent. Ref ${order.reference}.`);
+  await tellCustomer(order.waId, ...((await settings.payoutsHeld())
+    ? [`✅ I've received your *${amt} ${order.coin}*. Payouts are delayed for a short while; you'll be paid at the live rate as soon as they resume, and I'll message you when it's sent. Ref ${order.reference}.`]
+    : [`✅ I've received your *${amt} ${order.coin}*. I'm paying you now at the live rate and will message you as soon as it's sent. Ref ${order.reference}.`,
+      { env: 'STELLA_TEMPLATE_DEPOSIT_RECEIVED', params: [amt, order.coin, desk, order.reference] }]));
   settleInBackground(order._id);
   return true;
 }
 
 // ── Settlement ─────────────────────────────────────────────────────────────
 
-/** A message to the customer in their Stella chat. Never throws; await it when order matters. */
-function tellCustomer(waId, text) {
-  return require('../AI/stellaSender').sendText(waId, text).catch((err) =>
-    logger.warn('Storefront sell: customer message failed', { error: err.message }));
+// WhatsApp delivers a free-form message only within 24 hours of the customer's
+// last message; after that it must be an approved template (YCloud). A little
+// short of 24h, so a message sent at the edge isn't refused.
+const SERVICE_WINDOW_MS = 23.5 * 60 * 60 * 1000;
+const deskLabel = (merchant) => merchant?.brandName || (merchant?.slug ? `@${merchant.slug}` : 'your desk');
+
+/**
+ * A message to the customer in their Stella chat. Never throws; await it when
+ * order matters. With template ({ env, params }): outside the 24-hour window,
+ * the approved template named by that env variable is sent instead, with
+ * params as its body variables (same order as the template's {{1}}, {{2}}...).
+ */
+async function tellCustomer(waId, text, template = null) {
+  const sender = require('../AI/stellaSender');
+  try {
+    const name = template && process.env[template.env];
+    if (name) {
+      const convo = await StellaConversation.findOne({ waId }).select('lastInboundAt').lean();
+      const open = convo?.lastInboundAt && Date.now() - new Date(convo.lastInboundAt).getTime() < SERVICE_WINDOW_MS;
+      if (!open) {
+        return await sender.sendTemplate(waId, {
+          name,
+          language: process.env.STELLA_TEMPLATE_LANGUAGE || 'en',
+          bodyParams: template.params.map((p) => String(p).replace(/\s+/g, ' ').trim() || '-'),
+        }, text);
+      }
+    }
+    return await sender.sendText(waId, text);
+  } catch (err) {
+    logger.warn('Storefront sell: customer message failed', { error: err.message });
+    return null;
+  }
 }
 
 function settleInBackground(orderId) {
@@ -516,7 +548,10 @@ async function markPaid(order, merchant, payout, { customerNgn, ngnPerCoin, trad
   const paid = await StorefrontSellOrder.findById(order._id);
   logger.info('Storefront sell: paid', { reference: order.reference, rateMode: order.rateMode, customerNgn, traderEarningNgn, ngnPerCoin });
   notifyTrader(merchant, 'paid', paid).catch(() => {});
-  tellCustomer(order.waId, `💸 Sent! *${fmtNgn(customerNgn)}* for your ${order.deposit.amount} ${order.coin} (${fmtNgn(ngnPerCoin)} per ${order.coin}) has been sent to ${order.payoutAccount.bankName} ${maskAcct(order.payoutAccount.accountNumber)}. Ref ${order.reference}.`);
+  tellCustomer(order.waId, `💸 Sent! *${fmtNgn(customerNgn)}* for your ${order.deposit.amount} ${order.coin} (${fmtNgn(ngnPerCoin)} per ${order.coin}) has been sent to ${order.payoutAccount.bankName} ${maskAcct(order.payoutAccount.accountNumber)}. Ref ${order.reference}.`, {
+    env: 'STELLA_TEMPLATE_PAYOUT_SENT',
+    params: [fmtNgn(customerNgn), `${order.payoutAccount.bankName} ${maskAcct(order.payoutAccount.accountNumber)}`, `${order.deposit.amount} ${order.coin}`, `${fmtNgn(ngnPerCoin)} per ${order.coin}`, order.reference],
+  });
   return paidAt;
 }
 
