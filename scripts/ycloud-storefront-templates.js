@@ -8,7 +8,9 @@
 // Then, once YCloud shows them APPROVED, these .env lines switch them on:
 //   STELLA_TEMPLATE_DEPOSIT_RECEIVED, STELLA_TEMPLATE_DEPOSIT_NEEDS_ACCOUNT,
 //   STELLA_TEMPLATE_PAYOUT_SENT, and STELLA_TEMPLATE_LANGUAGE=en
-// Body variables are in the order tellCustomer's params send them.
+// Body variables are in the order tellCustomer's params send them. Meta refuses
+// a template that starts or ends on a variable, or has too many variables for
+// its length, so each ends in plain text.
 require('dotenv').config();
 const axios = require('axios');
 
@@ -19,19 +21,19 @@ const TEMPLATES = [
   {
     env: 'STELLA_TEMPLATE_DEPOSIT_RECEIVED',
     name: 'stella_deposit_received',
-    text: "✅ We've received your {{1}} {{2}} at {{3}}. We're paying you now at the live rate and will message you as soon as it's sent. Ref: {{4}}",
+    text: "✅ We've received your {{1}} {{2}} at {{3}}. We're paying you now at the live rate and will message you as soon as it's sent. Your reference is {{4}}, keep it for any questions about this sale.",
     example: ['100', 'USDT', 'Ada Exchange', 'SFS-1A2B3C4D5E'],
   },
   {
     env: 'STELLA_TEMPLATE_DEPOSIT_NEEDS_ACCOUNT',
     name: 'stella_deposit_needs_account',
-    text: "✅ We've received your {{1}} {{2}} at {{3}}. Reply with your bank and 10-digit account number so we can pay you. Ref: {{4}}",
+    text: "✅ We've received your {{1}} {{2}} at {{3}}. To get paid, reply to this message with your bank name and 10-digit account number. Your reference is {{4}}, keep it for any questions about this sale.",
     example: ['100', 'USDT', 'Ada Exchange', 'SFS-1A2B3C4D5E'],
   },
   {
     env: 'STELLA_TEMPLATE_PAYOUT_SENT',
     name: 'stella_payout_sent',
-    text: '💸 Sent! {{1}} has been paid to {{2}} for your {{3}} at {{4}}. Ref: {{5}}',
+    text: "💸 Your money has been sent! We paid {{1}} into your {{2}} account for the {{3}} you sold, at a rate of {{4}}. It should show in your bank shortly. Your reference is {{5}}, keep it for any questions about this payment.",
     example: ['₦144,000.00', 'GTBank ••6789', '100 USDT', '₦1,440.00 per USDT', 'SFS-1A2B3C4D5E'],
   },
 ];
