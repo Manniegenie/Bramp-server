@@ -130,9 +130,14 @@ function deskRow(m, owner, stats = {}) {
   };
 }
 
+/** A payout went to Obiex and nobody knows yet whether it paid (timeout, 5xx, or stuck). */
+const payoutUncertain = (o) => !!o.payout?.requestedAt && o.payout?.outcome !== 'FAILED' && !o.payout?.providerId && o.status !== 'PAID';
+
 function saleRow(o) {
   return {
     ...serializeSale(o),
+    payoutUncertain: payoutUncertain(o),
+    payoutKey: o.payout?.idempotencyKey || null,
     desk: o.merchantId?.slug || null,
     whatsapp: o.waId,
     rateMode: o.rateMode,
@@ -598,14 +603,21 @@ router.post('/sales/:ref/resolve', superOnly, route(async (req, res) => {
   if (!OUTCOMES.includes(outcome)) return res.status(400).json({ success: false, error: `outcome must be one of ${OUTCOMES.join(', ')}.` });
   const why = String(note || '').trim();
   if (why.length < 3) return res.status(400).json({ success: false, error: 'Add a note saying what was done.' });
+  const current = await StorefrontSellOrder.findOne({ reference: String(req.params.ref).toUpperCase() });
+  if (current && payoutUncertain(current) && req.body?.checkedProvider !== true) {
+    return res.status(409).json({
+      success: false,
+      error: `A payout for this sale was sent to Obiex (key ${current.payout.idempotencyKey}) and its result is unknown. Check Obiex first so the customer isn't paid twice, then confirm.`,
+    });
+  }
   const o = await StorefrontSellOrder.findOneAndUpdate(
     { reference: String(req.params.ref).toUpperCase(), status: { $in: ['NEEDS_REVIEW', 'AWAITING_FUNDS'] } },
-    { $set: { status: 'RESOLVED', resolution: { outcome, note: why.slice(0, 500), by: who(req), at: new Date() } } },
+    { $set: { status: 'RESOLVED', resolution: { outcome, note: why.slice(0, 500), by: who(req), at: new Date() }, ...(req.body?.checkedProvider === true ? { 'payout.checkedBy': who(req) } : {}) } },
     { new: true }
   ).populate('merchantId', 'slug');
   if (!o) return res.status(409).json({ success: false, error: 'Only a sale under review or waiting for funds can be resolved.' });
   logger.warn('Storefront sale resolved by hand', { reference: o.reference, outcome, note: why, by: who(req) });
-  await audit(req, 'sale.resolve', { merchant: await StorefrontMerchant.findById(o.merchantId?._id || o.merchantId), target: o.reference, reason: why, details: { outcome } });
+  await audit(req, 'sale.resolve', { merchant: await StorefrontMerchant.findById(o.merchantId?._id || o.merchantId), target: o.reference, reason: why, details: { outcome, checkedProvider: req.body?.checkedProvider === true } });
   res.json({ success: true, data: saleRow(o) });
 }));
 

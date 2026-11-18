@@ -338,8 +338,26 @@ async function handleObiexDeposit({ address, currency, amount, status, transacti
   if (await StorefrontSellOrder.exists({ 'deposit.transactionId': String(transactionId) })) return true; // retry
 
   const coin = String(currency || addr.coin).toUpperCase();
-  if (coin !== addr.coin) logger.warn('Storefront sell: deposit currency differs from address', { address, coin, expected: addr.coin });
   const deposit = { transactionId: String(transactionId), hash: hash || null, amount: amt, confirmedAt: new Date() };
+
+  // Another coin sent to this address (e.g. TRX to a USDT-on-Tron address) is
+  // never priced as the address's coin: a person checks it.
+  if (coin !== addr.coin) {
+    logger.warn('Storefront sell: deposit currency differs from address', { address, coin, expected: addr.coin });
+    let odd;
+    try {
+      odd = await StorefrontSellOrder.create({
+        reference: newReference(), merchantId: addr.merchantId, customerId: addr.customerId, waId: addr.waId,
+        coin: addr.coin, network: addr.network, address: addr.address, rateMode: 'BRAMP',
+        quote: { ngnPerCoin: 0, quotedAt: new Date() }, deposit, openedByDeposit: true,
+      });
+    } catch (err) {
+      if (err.code === 11000) return true;
+      throw err;
+    }
+    await review(odd, `Deposit of ${amt} ${coin} to a ${addr.coin} address`, await StorefrontMerchant.findById(addr.merchantId));
+    return true;
+  }
 
   // The customer's open sale for this address, else a new one at today's rate.
   let order = await StorefrontSellOrder.findOneAndUpdate(
@@ -438,6 +456,13 @@ async function overLimits(order, merchant, customerNgn) {
   return null;
 }
 
+/**
+ * Did Obiex refuse the payout for certain? A 4xx refusal means no money moved.
+ * A timeout, 408/409/429 or 5xx doesn't say: the customer may have been paid.
+ */
+const DEFINITE_REFUSALS = [400, 401, 402, 403, 404, 422];
+const payoutFailedForSure = (payout) => DEFINITE_REFUSALS.includes(Number(payout?.statusCode));
+
 /** Pay the customer from NGNX. Returns the provider result. */
 async function payCustomer(order, merchant, customerNgn) {
   try {
@@ -464,9 +489,20 @@ async function toPaying(order, extra = {}) {
 async function markPaid(order, merchant, payout, { customerNgn, ngnPerCoin, traderEarningNgn }) {
   const paidAt = new Date();
   // The money has gone, so PAID is the truth even if the stuck check flagged it meanwhile.
-  await StorefrontSellOrder.updateOne({ _id: order._id, status: { $in: ['PAYING', 'NEEDS_REVIEW'] } }, {
+  const marked = await StorefrontSellOrder.updateOne({ _id: order._id, status: { $in: ['PAYING', 'NEEDS_REVIEW'] } }, {
     $set: { status: 'PAID', paidAt, reviewReason: null, 'payout.providerId': payout.data?.id || payout.data?.data?.id || null },
   });
+  if (!marked.modifiedCount) {
+    // Resolved by hand while this payout was in flight: the customer may have been
+    // paid twice. No totals, earnings or messages - flag it for ops instead.
+    await StorefrontSellOrder.updateOne({ _id: order._id }, { $set: { 'payout.providerId': payout.data?.id || payout.data?.data?.id || null } });
+    logger.error('Storefront sell: payout went through after the sale was resolved by hand', { reference: order.reference });
+    await require('../models/storefrontAlert').create({
+      type: 'LATE_PAYOUT', merchantId: order.merchantId, waId: order.waId, orderReference: order.reference, amountNgn: customerNgn,
+      detail: 'Obiex paid this sale after it was resolved by hand: check for a double payment',
+    }).catch(() => {});
+    return null;
+  }
   await StorefrontCustomer.updateOne({ _id: order.customerId }, {
     $inc: {
       'stats.completed': 1,
@@ -522,6 +558,9 @@ async function settle(orderId) {
   });
   order.rateMode = live.rateMode;
 
+  // Too small to pay out (each payout has a provider cost): a person decides.
+  const { minPayoutNgn } = (await settings.get()).values;
+  if (minPayoutNgn > 0 && customerNgn < minPayoutNgn) return review(order, `Below the minimum payout (${fmtNgn(customerNgn)} < ${fmtNgn(minPayoutNgn)})`, merchant);
   // Alerts for bramp-admin (large or rapid trades); they don't stop the sale.
   await compliance.screen(order, merchant, customerNgn);
   // A blocked number or account, or the desk's limits: a person decides.
@@ -552,13 +591,14 @@ async function settle(orderId) {
   // 2. Pay the customer from NGNX.
   const payout = await payCustomer(order, merchant, customerNgn);
   if (!payout?.success) {
-    await StorefrontSellOrder.updateOne({ _id: order._id }, { $set: { 'payout.error': String(payout?.message || 'payout failed').slice(0, 300) } });
-    return review(order, 'Payout to the customer failed', merchant);
+    const sure = payoutFailedForSure(payout);
+    await StorefrontSellOrder.updateOne({ _id: order._id }, { $set: { 'payout.error': String(payout?.message || 'payout failed').slice(0, 300), 'payout.outcome': sure ? 'FAILED' : 'UNKNOWN' } });
+    return review(order, sure ? 'Payout to the customer failed' : `Payout result unknown - check Obiex for sf-sell-${order.reference} before paying again`, merchant);
   }
 
   // 3. Paid: the desk's earning, the customer's totals, everyone told.
   const paidAt = await markPaid(order, merchant, payout, { customerNgn, ngnPerCoin, traderEarningNgn });
-  if (traderEarningNgn > 0) {
+  if (paidAt && traderEarningNgn > 0) {
     await User.updateOne({ _id: merchant.userId }, { $inc: { ngnbBalance: traderEarningNgn }, $set: { lastBalanceUpdate: paidAt } });
   }
 }
@@ -593,15 +633,21 @@ async function settleSelfRate(order, merchant, { customerNgn, ngnPerCoin, feeNgn
 
   const payout = await payCustomer(order, merchant, customerNgn);
   if (!payout?.success) {
+    const error = String(payout?.message || 'payout failed').slice(0, 300);
+    if (!payoutFailedForSure(payout)) {
+      // The customer may have been paid: keep the trader's debit until someone checks Obiex.
+      await StorefrontSellOrder.updateOne({ _id: order._id }, { $set: { 'payout.error': error, 'payout.outcome': 'UNKNOWN' } });
+      return review(order, `Payout result unknown - check Obiex for sf-sell-${order.reference} (trader not refunded yet)`, merchant);
+    }
     await User.updateOne({ _id: merchant.userId }, { $inc: { ngnbBalance: debitNgn }, $set: { lastBalanceUpdate: new Date() } });
-    await StorefrontSellOrder.updateOne({ _id: order._id }, { $set: { 'payout.error': String(payout?.message || 'payout failed').slice(0, 300), 'selfRateFunds.refundedAt': new Date() } });
+    await StorefrontSellOrder.updateOne({ _id: order._id }, { $set: { 'payout.error': error, 'payout.outcome': 'FAILED', 'selfRateFunds.refundedAt': new Date() } });
     return review(order, 'Payout to the customer failed (trader refunded)', merchant);
   }
 
-  await markPaid(order, merchant, payout, { customerNgn, ngnPerCoin, traderEarningNgn: null });
+  const paidAt = await markPaid(order, merchant, payout, { customerNgn, ngnPerCoin, traderEarningNgn: null });
   // The coin stays with the trader, in their Bramp wallet.
   const field = COIN_BALANCE[order.coin];
-  if (field) {
+  if (paidAt && field) {
     await User.updateOne({ _id: merchant.userId }, { $inc: { [field]: order.deposit.amount }, $set: { lastBalanceUpdate: new Date() } });
     await StorefrontSellOrder.updateOne({ _id: order._id }, { $set: { 'selfRateFunds.coinCreditedAt': new Date() } });
   }
@@ -671,4 +717,5 @@ module.exports = {
   touchCustomer, brampRate, rateFor, addressFor, startSale, checkAccount, useAccount,
   handleObiexDeposit, settle, flagStuck, retryAwaitingFunds, releaseHeld, customerSales, serializeSale,
   StorefrontSellError,
+  _markPaid: markPaid, // tests
 };

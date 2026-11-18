@@ -1,10 +1,12 @@
 // models/storefrontAlert.js
-// Something in a storefront sale an admin should look at: a large trade, or
-// one WhatsApp number selling many times in a short window (across desks).
+// Something in a storefront sale an admin should look at: a large trade, one
+// WhatsApp number selling many times in a short window (across desks), or a
+// payout that went through after the sale had already been resolved by hand
+// (the customer may have been paid twice).
 // Raised at settlement (services/storefrontCompliance.js); never blocks a sale.
 const mongoose = require('mongoose');
 
-const TYPES = ['LARGE_TRADE', 'VELOCITY'];
+const TYPES = ['LARGE_TRADE', 'VELOCITY', 'LATE_PAYOUT'];
 
 const storefrontAlertSchema = new mongoose.Schema({
   type: { type: String, enum: TYPES, required: true },

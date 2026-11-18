@@ -20,7 +20,9 @@ module.exports = function (req, res, next) {
     .update(rawBody)
     .digest('hex');
 
-  if (computedSignature !== signature) {
+  const a = Buffer.from(computedSignature, 'utf8');
+  const b = Buffer.from(String(signature), 'utf8');
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
     return res.status(401).json({ error: 'Invalid webhook signature' });
   }
 

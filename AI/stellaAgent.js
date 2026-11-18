@@ -19,7 +19,19 @@ const MODEL = process.env.STELLA_MODEL || 'claude-opus-5-5';
 const MAX_TOOL_ROUNDS = 5;
 const HISTORY_MESSAGES = 20;
 const MAX_MESSAGES_PER_HOUR = 40; // per customer, before Claude is called at all
+const MAX_MESSAGES_PER_DAY = 150; // per customer
+// Across all customers: past this, Stella answers with a canned message instead of calling Claude.
+const GLOBAL_MAX_PER_HOUR = Number(process.env.STELLA_GLOBAL_MAX_PER_HOUR || 3000);
+const MAX_INBOUND_CHARS = 1000; // of each customer message, for Claude
+const HISTORY_MAX_CHARS = 6000; // of earlier messages, in total
+const MAX_TOKENS = 4000;
 const WHATSAPP_MAX_CHARS = 4000;
+
+// Deposit addresses (EVM, Bitcoin, Tron, Solana). Stella never writes one: the
+// server sends the address from start_sale in its own message, character for
+// character, and strips anything address-like from what the model wrote.
+const ADDRESS_RE = /\b(?:0x[a-fA-F0-9]{40}|bc1[a-z0-9]{25,62}|[13][a-km-zA-HJ-NP-Z1-9]{25,34}|T[1-9A-HJ-NP-Za-km-z]{33}|[1-9A-HJ-NP-Za-km-z]{32,44})\b/g;
+const clip = (s, n) => (s.length > n ? `${s.slice(0, n)} …(shortened)` : s);
 
 let client = null;
 const getClient = () => client || (client = new Anthropic());
@@ -28,7 +40,7 @@ const SYSTEM_PROMPT = `You are Stella, the WhatsApp assistant of Bramp Storefron
 
 How a sale goes:
 1. The customer says which coin to sell. Coins and networks come from get_sell_options.
-2. Call start_sale with the coin and network. Ask which network only when the coin has more than one (USDT, USDC); BTC, ETH, SOL and BNB have one, so leave network out. Give the customer the desk's rate, the network and the address from start_sale. The rate is live: say it's the desk's rate right now and that they're paid at the desk's rate when their deposit confirms. Put the address alone on its own line, copied exactly from the tool, character for character. Never type an address from memory or from earlier in the chat: call start_sale again instead.
+2. Call start_sale with the coin and network. Ask which network only when the coin has more than one (USDT, USDC); BTC, ETH, SOL and BNB have one, so leave network out. Give the customer the desk's rate and the network from start_sale. The rate is live: say it's the desk's rate right now and that they're paid at the desk's rate when their deposit confirms. Never write a deposit address yourself: the address from start_sale is sent to the customer automatically, in its own message right after yours, so they can copy it. Say it's in the next message. If they ask for it again, call start_sale again.
 3. Ask where to pay them. If start_sale returns saved accounts, offer the most recent one by bank, masked number and name ("Send to GTBank ••6789, ADA OBI?"). For a new account, call check_bank_account with the bank and the 10-digit number, then read the account name back and ask them to confirm. Only after they confirm, call use_payout_account (account_id for a saved account; bank_code and account_number for a new one).
 4. They send the coin to the address on that network. Bramp pays them automatically once the deposit confirms and messages them; you don't need to do anything. Never say a deposit arrived or a payment was sent unless get_my_sales shows it.
 
@@ -156,9 +168,29 @@ async function runTool(name, input, ctx) {
 async function history(waId, excludeMessageId) {
   const rows = await StellaMessage.find({ waId, text: { $ne: null }, waMessageId: { $ne: excludeMessageId } })
     .sort({ createdAt: -1 }).limit(HISTORY_MESSAGES).select('direction text');
-  const turns = rows.reverse().map((m) => ({ role: m.direction === 'IN' ? 'user' : 'assistant', content: m.text }));
+  // Newest first: keep messages until the total length cap, each one clipped.
+  const kept = [];
+  let chars = 0;
+  for (const m of rows) {
+    const text = clip(String(m.text), MAX_INBOUND_CHARS);
+    if (chars + text.length > HISTORY_MAX_CHARS) break;
+    chars += text.length;
+    kept.push({ role: m.direction === 'IN' ? 'user' : 'assistant', content: text });
+  }
+  const turns = kept.reverse();
   while (turns.length && turns[0].role !== 'user') turns.shift();
   return turns;
+}
+
+/**
+ * Strip any address Stella wrote: the ones issued this turn exactly, and
+ * anything address-like. The real address goes in its own message (reply's out).
+ */
+function stripAddresses(text, issued) {
+  const note = issued.length ? '(in the next message)' : '(ask me again for your address)';
+  let out = text;
+  for (const a of issued) out = out.split(a.address).join(note);
+  return out.replace(ADDRESS_RE, note);
 }
 
 function contextNote(desk, customerName) {
@@ -173,15 +205,26 @@ const textOf = (content) => content.filter((b) => b.type === 'text').map((b) => 
  * Stella's reply to one customer message. Never throws: on any failure it
  * returns a short apology so the customer isn't left without an answer.
  */
-async function reply({ waId, messageId, text, desk, customer }) {
+async function reply({ waId, messageId, text, desk, customer, out = {} }) {
+  out.addresses = []; // deposit addresses for the caller to send, each in its own message
   const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
-  if (await StellaMessage.countDocuments({ waId, direction: 'IN', createdAt: { $gt: hourAgo } }) > MAX_MESSAGES_PER_HOUR) {
-    return "You've sent a lot of messages in the last hour. Please give me a little while, then try again.";
+  const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const [lastHour, lastDay, everyoneLastHour] = await Promise.all([
+    StellaMessage.countDocuments({ waId, direction: 'IN', createdAt: { $gt: hourAgo } }),
+    StellaMessage.countDocuments({ waId, direction: 'IN', createdAt: { $gt: dayAgo } }),
+    StellaMessage.countDocuments({ direction: 'IN', createdAt: { $gt: hourAgo } }),
+  ]);
+  if (lastHour > MAX_MESSAGES_PER_HOUR || lastDay > MAX_MESSAGES_PER_DAY) {
+    return "You've sent a lot of messages. Please give me a little while, then try again.";
+  }
+  if (everyoneLastHour > GLOBAL_MAX_PER_HOUR) {
+    logger.warn('Stella agent: global hourly budget reached', { everyoneLastHour });
+    return "I'm very busy right now. Please try again in a few minutes.";
   }
 
   const messages = [
     ...(await history(waId, messageId)),
-    { role: 'user', content: text },
+    { role: 'user', content: clip(String(text), MAX_INBOUND_CHARS) },
     { role: 'system', content: contextNote(desk, customer.displayName) },
   ];
   const ctx = { desk, customer };
@@ -190,7 +233,7 @@ async function reply({ waId, messageId, text, desk, customer }) {
     for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
       const response = await getClient().messages.create({
         model: MODEL,
-        max_tokens: 16000,
+        max_tokens: MAX_TOKENS,
         output_config: { effort: 'medium' },
         // A safety decline is re-run on a fallback model chosen by the API.
         fallbacks: 'default',
@@ -209,15 +252,18 @@ async function reply({ waId, messageId, text, desk, customer }) {
 
       if (response.stop_reason === 'pause_turn') continue;
       if (response.stop_reason !== 'tool_use') {
-        const answer = textOf(response.content);
+        const answer = stripAddresses(textOf(response.content), out.addresses);
         return answer ? answer.slice(0, WHATSAPP_MAX_CHARS) : 'Sorry, I lost my train of thought. Could you ask that again?';
       }
 
       const calls = response.content.filter((b) => b.type === 'tool_use');
       const results = await Promise.all(calls.map(async (call) => {
         try {
-          const out = await runTool(call.name, call.input || {}, ctx);
-          return { type: 'tool_result', tool_use_id: call.id, content: JSON.stringify(out) };
+          const result = await runTool(call.name, call.input || {}, ctx);
+          if (call.name === 'start_sale' && result?.address && !out.addresses.some((a) => a.address === result.address)) {
+            out.addresses.push({ address: result.address, memo: result.memo || null });
+          }
+          return { type: 'tool_result', tool_use_id: call.id, content: JSON.stringify(result) };
         } catch (err) {
           logger.warn('Stella agent: tool failed', { tool: call.name, error: err.message });
           return { type: 'tool_result', tool_use_id: call.id, content: `Error: ${err.message}`, is_error: true };

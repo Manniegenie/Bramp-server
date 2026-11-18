@@ -79,6 +79,11 @@ const storefrontSellOrderSchema = new mongoose.Schema({
     providerId: { type: String, default: null },
     error: { type: String, default: null },
     requestedAt: { type: Date, default: null },
+    // Failed for certain (Obiex refused it) vs. unknown (timeout, 5xx): an
+    // unknown result may still have paid the customer, so it's never refunded
+    // or paid again by hand without checking Obiex with the idempotency key.
+    outcome: { type: String, enum: ['FAILED', 'UNKNOWN', null], default: null },
+    checkedBy: { type: String, default: null }, // the admin who checked Obiex before resolving an unknown payout
   },
 
   status: { type: String, enum: STATUSES, default: 'AWAITING_DEPOSIT', index: true },

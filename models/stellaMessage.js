@@ -21,5 +21,6 @@ const stellaMessageSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 stellaMessageSchema.index({ waId: 1, createdAt: -1 });
+stellaMessageSchema.index({ direction: 1, createdAt: -1 }); // Stella's global hourly budget
 
 module.exports = mongoose.models.StellaMessage || mongoose.model('StellaMessage', stellaMessageSchema);

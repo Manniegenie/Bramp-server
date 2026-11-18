@@ -200,8 +200,14 @@ async function handleMessage(msg, contact) {
   // Free text goes to the Claude agent, scoped to this desk (AI/stellaAgent.js).
   // Taps on buttons that aren't routing's have nothing to answer yet.
   if (!text) return;
-  const answer = await agent.reply({ waId, messageId: msg.id, text, desk, customer });
+  const out = {};
+  const answer = await agent.reply({ waId, messageId: msg.id, text, desk, customer, out });
   await sender.sendText(waId, answer);
+  // Each deposit address alone in its own message, straight from start_sale, so it's copied exactly.
+  for (const a of out.addresses || []) {
+    await sender.sendText(waId, a.address);
+    if (a.memo) await sender.sendText(waId, `Memo / tag (include it, or the deposit can be lost): ${a.memo}`);
+  }
 }
 
 async function handleStatus(st) {
