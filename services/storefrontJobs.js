@@ -8,7 +8,7 @@
 const cron = require('node-cron');
 const { releaseDelayed } = require('./storefrontBuy');
 const { releaseMatured } = require('./storefrontLedger');
-const { flagStuck, retryAwaitingFunds } = require('./storefrontSell');
+const { flagStuck, retryAwaitingFunds, releaseHeld } = require('./storefrontSell');
 const logger = require('../utils/logger');
 
 let running = false;
@@ -21,6 +21,7 @@ async function tick() {
     await releaseMatured();
     await flagStuck();
     await retryAwaitingFunds();
+    await releaseHeld();
   } catch (err) {
     logger.error('Storefront job failed', { error: err.message, stack: err.stack });
   } finally {

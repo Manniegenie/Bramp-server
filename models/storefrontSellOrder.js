@@ -90,6 +90,8 @@ const storefrontSellOrderSchema = new mongoose.Schema({
     at: { type: Date, default: null },
   },
   paidAt: { type: Date, default: null },
+  // Payouts paused platform-wide when this sale was ready: paid once they resume (storefrontSell.releaseHeld).
+  heldAt: { type: Date, default: null },
   customerNotifiedAt: { type: Date, default: null },
 }, {
   timestamps: true,

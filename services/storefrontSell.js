@@ -20,6 +20,8 @@ const { debitNaira } = require('./nairaWithdrawal');
 const banks = require('./storefrontBanks');
 const { notifyTrader } = require('./storefrontTraderNotify');
 const logger = require('../utils/logger');
+const settings = require('./storefrontSettings');
+const compliance = require('./storefrontCompliance');
 
 // Coins and networks a customer can sell, by Obiex network code.
 // The same coin/network pairs Bramp users have wallets for (utils/generatewallets.js).
@@ -44,7 +46,7 @@ const NETWORK_ALIASES = {
 };
 
 const cfg = () => ({
-  maxMarkdownNgnPerUsd: Number(process.env.STOREFRONT_MAX_MARKDOWN_NGN_PER_USD || 100),
+  maxMarkdownNgnPerUsd: settings.peek().values.maxMarkdownNgnPerUsd,
   stuckMinutes: Number(process.env.STOREFRONT_SELL_STUCK_MINUTES || 10),
 });
 
@@ -75,9 +77,12 @@ function normalizeNetwork(coin, network) {
   return n;
 }
 
-/** Coins and networks on sale, for Stella. */
+/** Coins and networks on sale, for Stella (without any Bramp has switched off). */
 function sellable() {
-  return Object.entries(PAIRS).map(([coin, nets]) => ({ coin, networks: nets.map((code) => ({ code, name: networkName(coin, code) })) }));
+  const off = settings.peek().disabledPairs;
+  return Object.entries(PAIRS)
+    .map(([coin, nets]) => ({ coin, networks: nets.filter((n) => !off.includes(settings.pairCode(coin, n))).map((code) => ({ code, name: networkName(coin, code) })) }))
+    .filter((c) => c.networks.length);
 }
 
 // ── Customer records ───────────────────────────────────────────────────────
@@ -113,6 +118,10 @@ async function brampRate(coin) {
 
 async function rateFor(merchant, coin, { forSettlement = false } = {}) {
   if (merchant.status !== 'active') throw new StorefrontSellError('This desk is not taking trades right now.', 409);
+  if (!forSettlement) {
+    const paused = await settings.sellingPaused(); // Bramp's kill switch
+    if (paused) throw new StorefrontSellError(paused, 503);
+  }
 
   if (merchant.rateMode === 'SELF') {
     const selfRate = require('./storefrontSelfRate');
@@ -208,6 +217,11 @@ function savedAccounts(customer) {
 async function startSale(merchant, customer, { coin: coinRaw, network: networkRaw }) {
   const coin = normalizeCoin(coinRaw);
   const network = normalizeNetwork(coin, networkRaw);
+  if (await compliance.numberBlocked(customer.waId)) throw new StorefrontSellError('We can\'t take trades from this number.', 403);
+  if (await settings.pairDisabled(coin, network)) {
+    const others = PAIRS[coin].filter((n) => n !== network && !settings.peek().disabledPairs.includes(settings.pairCode(coin, n)));
+    throw new StorefrontSellError(`${coin} on ${networkName(coin, network)} is paused right now.${others.length ? ` You can send it on ${others.map((n) => networkName(coin, n)).join(' or ')}.` : ''}`, 409);
+  }
   const rate = await rateFor(merchant, coin);
   const addr = await addressFor(merchant, customer, coin, network);
   const quote = quoteFields(rate);
@@ -252,6 +266,7 @@ async function checkAccount({ bank, accountNumber }) {
     const exact = matches.filter((m) => m.name.toLowerCase() === String(bank).trim().toLowerCase());
     if (exact.length !== 1) return { needsBankChoice: true, banks: matches.map((m) => ({ bankName: m.name, bankCode: m.code })) };
   }
+  if (await compliance.accountBlocked(number)) throw new StorefrontSellError('That account can\'t receive payouts from Bramp. Please use a different account.', 403);
   const chosen = matches[0];
   const accountName = await banks.resolveAccount(chosen.code, number);
   if (!accountName) throw new StorefrontSellError(`No account ${number} at ${chosen.name}. Please check the number and bank.`);
@@ -273,6 +288,7 @@ async function useAccount(merchant, customer, { accountId, bankCode, accountNumb
     if (!account) throw new StorefrontSellError('That saved account was not found.');
   } else {
     const number = String(accountNumber || '').replace(/\D/g, '');
+    if (await compliance.accountBlocked(number)) throw new StorefrontSellError('That account can\'t receive payouts from Bramp. Please use a different account.', 403);
     const accountName = await banks.resolveAccount(bankCode, number);
     if (!accountName) throw new StorefrontSellError('That account could not be verified.');
     const bank = (await banks.listBanks()).find((b) => b.code === String(bankCode));
@@ -367,7 +383,9 @@ async function handleObiexDeposit({ address, currency, amount, status, transacti
   }
   // Deposit received - sent (and accepted by WhatsApp) before the payout
   // starts, so it always arrives before the "sent" message.
-  await tellCustomer(order.waId, `✅ I've received your *${amt} ${order.coin}*. I'm paying you now at the live rate and will message you as soon as it's sent. Ref ${order.reference}.`);
+  await tellCustomer(order.waId, (await settings.payoutsHeld())
+    ? `✅ I've received your *${amt} ${order.coin}*. Payouts are delayed for a short while; you'll be paid at the live rate as soon as they resume, and I'll message you when it's sent. Ref ${order.reference}.`
+    : `✅ I've received your *${amt} ${order.coin}*. I'm paying you now at the live rate and will message you as soon as it's sent. Ref ${order.reference}.`);
   settleInBackground(order._id);
   return true;
 }
@@ -468,10 +486,16 @@ async function markPaid(order, merchant, payout, { customerNgn, ngnPerCoin, trad
 
 /** Work out the naira at the live rate, then pay the customer (Bramp rate: after selling the coin; Self rate: from the trader's NGNB). */
 async function settle(orderId) {
+  const ready = { _id: orderId, status: { $in: ['AWAITING_DEPOSIT', 'AWAITING_ACCOUNT', 'AWAITING_FUNDS'] }, 'deposit.transactionId': { $type: 'string' }, 'payoutAccount.accountNumber': { $type: 'string' } };
+  // Bramp's kill switch holds payouts: mark it, and releaseHeld() pays it once they resume.
+  if (await settings.payoutsHeld()) {
+    await StorefrontSellOrder.updateOne({ ...ready, heldAt: null }, { $set: { heldAt: new Date() } });
+    return;
+  }
   // Claim: only one settle per order, and only once it has a deposit and an account.
   const order = await StorefrontSellOrder.findOneAndUpdate(
-    { _id: orderId, status: { $in: ['AWAITING_DEPOSIT', 'AWAITING_ACCOUNT', 'AWAITING_FUNDS'] }, 'deposit.transactionId': { $type: 'string' }, 'payoutAccount.accountNumber': { $type: 'string' } },
-    { $set: { status: 'SELLING' } },
+    ready,
+    { $set: { status: 'SELLING', heldAt: null } },
     { new: false } // the status before the claim (was it already waiting for funds?)
   );
   if (!order) return;
@@ -498,7 +522,11 @@ async function settle(orderId) {
   });
   order.rateMode = live.rateMode;
 
-  // Desk limits are a risk check: over them, a person decides.
+  // Alerts for bramp-admin (large or rapid trades); they don't stop the sale.
+  await compliance.screen(order, merchant, customerNgn);
+  // A blocked number or account, or the desk's limits: a person decides.
+  const blocked = await compliance.payoutBlock(order);
+  if (blocked) return review(order, blocked, merchant);
   const limit = await overLimits(order, merchant, customerNgn);
   if (limit) return review(order, limit, merchant);
 
@@ -597,6 +625,14 @@ async function retryAwaitingFunds() {
 }
 
 /** Every minute: a sale stuck mid-way (e.g. the server restarted) goes to people, never retried blind. */
+/** Sales held while payouts were paused: pay them once Bramp resumes payouts (minute job). */
+async function releaseHeld() {
+  if (await settings.payoutsHeld()) return;
+  const held = await StorefrontSellOrder.find({ heldAt: { $ne: null }, status: { $in: ['AWAITING_DEPOSIT', 'AWAITING_ACCOUNT', 'AWAITING_FUNDS'] } })
+    .sort({ heldAt: 1 }).limit(50).select('_id');
+  for (const o of held) await settle(o._id);
+}
+
 async function flagStuck() {
   const before = new Date(Date.now() - cfg().stuckMinutes * 60 * 1000);
   const stuck = await StorefrontSellOrder.find({ status: { $in: ['SELLING', 'PAYING'] }, updatedAt: { $lt: before } }).limit(50);
@@ -633,6 +669,6 @@ async function customerSales(customer, { reference } = {}) {
 module.exports = {
   PAIRS, COINS: Object.keys(PAIRS), NETWORK_NAMES, networkName, sellable, normalizeCoin, normalizeNetwork,
   touchCustomer, brampRate, rateFor, addressFor, startSale, checkAccount, useAccount,
-  handleObiexDeposit, settle, flagStuck, retryAwaitingFunds, customerSales, serializeSale,
+  handleObiexDeposit, settle, flagStuck, retryAwaitingFunds, releaseHeld, customerSales, serializeSale,
   StorefrontSellError,
 };

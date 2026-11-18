@@ -17,6 +17,20 @@ const storefrontMerchantSchema = new mongoose.Schema({
   // Who paused it: only a desk the trader paused can be switched back on from
   // the app. ADMIN is bramp-admin; SYSTEM is a recall the trader still owes for.
   pausedBy: { type: String, enum: ['TRADER', 'ADMIN', 'SYSTEM', null], default: null },
+  // Bramp's own view of the desk (bramp-admin), never shown to the trader.
+  statusNote: { // why an admin last changed its status
+    reason: { type: String, default: null, maxlength: 500 },
+    by: { type: String, default: null },
+    at: { type: Date, default: null },
+  },
+  riskFlags: {
+    type: [{ type: String, enum: ['WATCH', 'HIGH_RISK', 'VIP', 'KYC_REVIEW', 'FRAUD_SUSPECTED'] }],
+    default: [],
+  },
+  adminNotes: {
+    type: [{ text: { type: String, required: true, maxlength: 1000 }, by: { type: String, required: true }, at: { type: Date, default: Date.now } }],
+    default: [],
+  },
 
   // Hosted stores have no key: bramp.shop acts for them with its own
   // platform key (auth/storefrontAuth.js). A key is issued only when a trader

@@ -35,6 +35,12 @@ function message(event, order, merchant, extra = {}) {
       return { title: 'Self rate not approved', body: `Your Self rate application wasn't approved: ${extra.reason}. You can keep trading with Bramp rate.` };
     case 'needs_review':
       return { title: 'Storefront trade under review', body: `A payout to ${who} for ${coins} needs a check by Bramp. We'll update you. Ref ${order.reference}.` };
+    case 'desk_status': { // Bramp changed the desk's status (bramp-admin)
+      const title = { active: 'Your storefront is live again', paused: 'Bramp paused your storefront', closed: 'Bramp closed your storefront' }[extra.status] || 'Your storefront was updated';
+      return { title, body: extra.reason ? `Reason: ${extra.reason}` : 'Open the Storefront tab in the Bramp app for details.' };
+    }
+    case 'admin_message': // a message from Bramp ops (bramp-admin)
+      return { title: extra.title || 'A message from Bramp', body: extra.body || '' };
     default:
       return { title: `${merchant.brandName || 'Storefront'} update`, body: order ? `Trade ${order.reference}: ${event}.` : event };
   }

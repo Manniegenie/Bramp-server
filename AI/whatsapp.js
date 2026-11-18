@@ -168,6 +168,11 @@ async function handleMessage(msg, contact) {
 
   const reply = replyOf(msg);
   logger.info('Stella: message in', { id: msg.id, from: sender.mask(waId), type: msg.type });
+  // A number Bramp has blocked gets no reply (bramp-admin Storefront blocklist).
+  if (await require('../services/storefrontCompliance').numberBlocked(waId)) {
+    logger.warn('Stella: message from a blocked number ignored', { from: sender.mask(waId) });
+    return;
+  }
 
   await sender.markReadWithTyping(msg.id);
   // Flows aren't used for storefront customers (spec, 17 Nov 2026).

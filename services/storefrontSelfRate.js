@@ -24,13 +24,14 @@ class SelfRateError extends Error {
   }
 }
 
+// Fee and cover defaults come from bramp-admin's Storefront settings, else env (services/storefrontSettings.js).
 const cfg = () => ({
   // Fee per payout: feePct of the payout, at least feeMinNgn, at most feeMaxNgn.
-  feePct: Number(process.env.STOREFRONT_SELF_FEE_PCT ?? 0.2),
-  feeMinNgn: Number(process.env.STOREFRONT_SELF_FEE_MIN_NGN ?? 100),
-  feeMaxNgn: Number(process.env.STOREFRONT_SELF_FEE_MAX_NGN ?? 50000),
+  feePct: require('./storefrontSettings').peek().values.selfFeePct,
+  feeMinNgn: require('./storefrontSettings').peek().values.selfFeeMinNgn,
+  feeMaxNgn: require('./storefrontSettings').peek().values.selfFeeMaxNgn,
   // Quoting stops when the trader's NGNB is below this (a payout couldn't be covered).
-  minCoverNgn: Number(process.env.STOREFRONT_SELF_MIN_COVER_NGN || 5000),
+  minCoverNgn: require('./storefrontSettings').peek().values.selfMinCoverNgn,
   // A rate further than this from Bramp's is refused as a likely typo.
   maxRateDeviation: Number(process.env.STOREFRONT_SELF_MAX_RATE_DEVIATION || 0.5),
 });

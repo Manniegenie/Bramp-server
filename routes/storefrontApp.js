@@ -190,7 +190,8 @@ router.put('/me', express.json(), async (req, res) => {
     if (rateMode === 'SELF' && desk?.selfRate?.status !== 'APPROVED') {
       return fail(res, 409, 'Self rate needs Bramp approval first.');
     }
-    const maxMarkdown = Number(process.env.STOREFRONT_MAX_MARKDOWN_NGN_PER_USD || 100);
+    const { values: limits } = await require('../services/storefrontSettings').get();
+    const maxMarkdown = limits.maxMarkdownNgnPerUsd;
     if (markdownNgnPerUsd !== undefined) {
       const m = Number(markdownNgnPerUsd);
       if (!Number.isFinite(m) || m < 0 || m > maxMarkdown) return fail(res, 400, `Markdown must be between ₦0 and ₦${maxMarkdown} per $1.`);
@@ -203,7 +204,10 @@ router.put('/me', express.json(), async (req, res) => {
       const slug = String(user?.username || '').trim().toLowerCase();
       if (!SLUG.test(slug)) return fail(res, 409, 'Set a Bramp username (letters, numbers and dashes) before opening a storefront.');
       if (await StorefrontMerchant.exists({ slug })) return fail(res, 409, 'That username is already used by another storefront.');
-      desk = new StorefrontMerchant({ userId: req.user.id, slug, status: 'active', rateMode: 'BRAMP' });
+      desk = new StorefrontMerchant({
+        userId: req.user.id, slug, status: 'active', rateMode: 'BRAMP',
+        perTradeMaxNgn: limits.newDeskPerTradeMaxNgn, dailyMaxNgn: limits.newDeskDailyMaxNgn,
+      });
     }
 
     if (businessName !== undefined) desk.brandName = String(businessName).trim();
