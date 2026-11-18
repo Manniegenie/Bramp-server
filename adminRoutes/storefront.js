@@ -117,6 +117,11 @@ router.patch('/merchants/:slug', superOnly, route(async (req, res) => {
     return res.status(409).json({ success: false, error: `The trader still owes ₦${m.owedNgn} from a recall.` });
   }
   Object.assign(m, update);
+  if (update.status) {
+    m.closedBy = update.status === 'closed' ? 'ADMIN' : null;
+    m.closedAt = update.status === 'closed' ? new Date() : null;
+    m.pausedBy = update.status === 'paused' ? 'ADMIN' : update.status === 'active' ? null : m.pausedBy;
+  }
   // A smaller deposit can't leave an AUTO limit above it.
   if (m.mismatchPolicy === 'AUTO' && m.autoLimitNgn > m.depositNgn) m.autoLimitNgn = m.depositNgn;
   await m.save();

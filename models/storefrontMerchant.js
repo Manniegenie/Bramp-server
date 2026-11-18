@@ -14,6 +14,9 @@ const storefrontMerchantSchema = new mongoose.Schema({
   // Who closed it: a trader can reopen a desk they closed, not one Bramp closed.
   closedBy: { type: String, enum: ['TRADER', 'ADMIN', null], default: null },
   closedAt: { type: Date, default: null },
+  // Who paused it: only a desk the trader paused can be switched back on from
+  // the app. ADMIN is bramp-admin; SYSTEM is a recall the trader still owes for.
+  pausedBy: { type: String, enum: ['TRADER', 'ADMIN', 'SYSTEM', null], default: null },
 
   // Hosted stores have no key: bramp.shop acts for them with its own
   // platform key (auth/storefrontAuth.js). A key is issued only when a trader

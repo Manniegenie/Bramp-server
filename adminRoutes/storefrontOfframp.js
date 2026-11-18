@@ -166,9 +166,13 @@ router.patch('/desks/:slug', superOnly, route(async (req, res) => {
   const changes = {};
   if (b.status !== undefined) {
     if (!['active', 'paused', 'closed'].includes(b.status)) return res.status(400).json({ success: false, error: 'status must be active, paused or closed.' });
+    if (b.status === 'active' && m.owedNgn > 0) {
+      return res.status(409).json({ success: false, error: `The trader still owes ₦${m.owedNgn} from a recall.` });
+    }
     m.status = b.status; changes.status = b.status;
     m.closedBy = b.status === 'closed' ? 'ADMIN' : null;
     m.closedAt = b.status === 'closed' ? new Date() : null;
+    m.pausedBy = b.status === 'paused' ? 'ADMIN' : b.status === 'active' ? null : m.pausedBy;
   }
   for (const k of ['perTradeMaxNgn', 'dailyMaxNgn']) {
     const v = num(k);

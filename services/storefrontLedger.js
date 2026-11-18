@@ -119,7 +119,7 @@ async function recall(merchant, orderReference, amountNgn) {
   }
 
   if (remaining > 0) {
-    await StorefrontMerchant.updateOne({ _id: merchant._id }, { $inc: { owedNgn: remaining }, status: 'paused' });
+    await StorefrontMerchant.updateOne({ _id: merchant._id }, { $inc: { owedNgn: remaining }, status: 'paused', pausedBy: 'SYSTEM' });
     logger.warn('Storefront: recall exceeded held proceeds and deposit, merchant paused', { merchant: merchant.slug, orderReference, owedNgn: remaining });
   }
   return { coveredNgn: round2(amountNgn - remaining), fromDepositNgn, owedNgn: remaining };

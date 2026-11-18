@@ -26,12 +26,23 @@ function linkFor(desk) {
   return { url, qrText: url }; // the app draws the QR code from qrText
 }
 
+/**
+ * Why the trader can't put the desk back live from the app, or null. A recall
+ * they still owe for, or a pause by Bramp, needs Bramp to lift it.
+ */
+function liveLock(desk) {
+  if (desk.owedNgn > 0) return `You owe ₦${Number(desk.owedNgn).toLocaleString('en-NG')} from a payment recall. Bramp switches your desk back on once it’s settled.`;
+  if (desk.pausedBy === 'ADMIN' || desk.pausedBy === 'SYSTEM') return 'Bramp paused your storefront. Contact support to switch it back on.';
+  return null;
+}
+
 function serializeDesk(desk) {
   return {
     username: desk.slug,
     businessName: desk.brandName,
     status: desk.status,
-    canReopen: desk.status === 'closed' && desk.closedBy === 'TRADER',
+    canReopen: desk.status === 'closed' && desk.closedBy === 'TRADER' && !liveLock(desk),
+    liveLock: desk.status === 'active' ? null : liveLock(desk),
     rateMode: desk.rateMode,
     markdownNgnPerUsd: desk.markdownNgnPerUsd,
     selfRate: { status: desk.selfRate?.status || 'NONE' },
@@ -163,7 +174,8 @@ router.put('/me', express.json(), async (req, res) => {
       } else {
         if (desk.status !== 'closed') return fail(res, 409, 'Your storefront is already open.');
         if (desk.closedBy !== 'TRADER') return fail(res, 409, 'Bramp closed this storefront. Contact support to reopen it.');
-        Object.assign(desk, { status: 'active', closedBy: null, closedAt: null });
+        if (liveLock(desk)) return fail(res, 409, liveLock(desk));
+        Object.assign(desk, { status: 'active', closedBy: null, closedAt: null, pausedBy: null });
       }
       await desk.save();
       const [rates, stats] = await Promise.all([preview(desk), deskStats(desk)]);
@@ -198,7 +210,14 @@ router.put('/me', express.json(), async (req, res) => {
     if (rateMode !== undefined) desk.rateMode = rateMode;
     if (markdownNgnPerUsd !== undefined) desk.markdownNgnPerUsd = Number(markdownNgnPerUsd);
     if (acceptAgreement === true) desk.agreement = { version: AGREEMENT_VERSION, acceptedAt: new Date(), ip: req.ip || null };
-    if (paused !== undefined && desk.status !== 'closed') desk.status = paused ? 'paused' : 'active';
+    if (paused !== undefined && desk.status !== 'closed') {
+      if (paused) {
+        if (desk.status === 'active') Object.assign(desk, { status: 'paused', pausedBy: 'TRADER' });
+      } else if (desk.status === 'paused') {
+        if (liveLock(desk)) return fail(res, 409, liveLock(desk));
+        Object.assign(desk, { status: 'active', pausedBy: null });
+      }
+    }
     await desk.save();
 
     const [rates, stats] = await Promise.all([preview(desk), deskStats(desk)]);
