@@ -4,6 +4,7 @@
 // mode, markdown, agreement), get the Stella link, and see the desk's
 // customers and sales. Mounted at /storefront-app.
 const express = require('express');
+const bcrypt = require('bcryptjs');
 const User = require('../models/user');
 const StorefrontMerchant = require('../models/storefrontMerchant');
 const StorefrontCustomer = require('../models/storefrontCustomer');
@@ -11,6 +12,7 @@ const StorefrontSellOrder = require('../models/storefrontSellOrder');
 const sell = require('../services/storefrontSell');
 const selfRate = require('../services/storefrontSelfRate');
 const logger = require('../utils/logger');
+const { validateTwoFactorAuth } = require('../services/twofactorAuth');
 
 const router = express.Router();
 
@@ -18,7 +20,32 @@ const AGREEMENT_VERSION = process.env.STOREFRONT_AGREEMENT_VERSION || '2026-11-1
 const SLUG = /^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/;
 const stellaNumber = () => String(process.env.STELLA_WA_NUMBER || '2347034027590').replace(/\D/g, '');
 
-const fail = (res, status, message) => res.status(status).json({ success: false, message });
+// Words a desk name can't use: customers could take it for Bramp itself.
+const RESERVED_NAME = /\b(bramp|stella|support|official|admin|helpdesk|help\s*desk|customer\s*care|customer\s*service)\b/i;
+
+const fail = (res, status, message, code) => res.status(status).json({ success: false, message, ...(code ? { code } : {}) });
+
+/**
+ * Changes that decide where the trader's NGNB goes (Self rate rates, switching
+ * Self rate on) need the Password PIN, and the 2FA code when 2FA is on - like
+ * an NGNB withdrawal (routes/nairawithdrawal.js). Returns null when the body
+ * carries them, else the response to send. 403 rather than 401: the app reads
+ * 401 as an expired login. The app asks for 2FA only when told TWO_FA_REQUIRED.
+ */
+async function securityCheck(req, res) {
+  const user = await User.findById(req.user.id).select('passwordpin twoFASecret is2FAEnabled');
+  const pin = String(req.body?.passwordpin || '').trim();
+  if (!pin) return fail(res, 403, 'Enter your Password PIN to continue.', 'PIN_REQUIRED');
+  if (!/^\d{6}$/.test(pin) || !user?.passwordpin || !(await bcrypt.compare(pin, user.passwordpin))) {
+    return fail(res, 403, 'That Password PIN is incorrect.', 'PIN_INVALID');
+  }
+  if (user.is2FAEnabled && user.twoFASecret) {
+    const code = String(req.body?.twoFactorCode || '').trim();
+    if (!code) return fail(res, 403, 'Enter the code from your authenticator app.', 'TWO_FA_REQUIRED');
+    if (!validateTwoFactorAuth(user, code)) return fail(res, 403, 'That 2FA code is incorrect.', 'TWO_FA_INVALID');
+  }
+  return null;
+}
 const deskFor = (req) => StorefrontMerchant.findOne({ userId: req.user.id });
 
 function linkFor(desk) {
@@ -185,10 +212,15 @@ router.put('/me', express.json(), async (req, res) => {
     if (businessName !== undefined) {
       const name = String(businessName || '').trim();
       if (name.length < 2 || name.length > 60) return fail(res, 400, 'Business name must be 2 to 60 characters.');
+      if (RESERVED_NAME.test(name)) return fail(res, 400, 'Business names can’t include Bramp, Stella, support, official or admin, so customers aren’t misled.');
     }
     if (rateMode !== undefined && !['BRAMP', 'SELF'].includes(rateMode)) return fail(res, 400, 'rateMode must be BRAMP or SELF.');
     if (rateMode === 'SELF' && desk?.selfRate?.status !== 'APPROVED') {
       return fail(res, 409, 'Self rate needs Bramp approval first.');
+    }
+    if (rateMode === 'SELF' && desk?.rateMode !== 'SELF') {
+      const blocked = await securityCheck(req, res);
+      if (blocked) return blocked;
     }
     const { values: limits } = await require('../services/storefrontSettings').get();
     const maxMarkdown = limits.maxMarkdownNgnPerUsd;
@@ -430,6 +462,8 @@ router.put('/self-rate/rates', express.json(), async (req, res) => {
   try {
     const desk = await deskFor(req);
     if (!desk) return fail(res, 404, 'Open a storefront first.');
+    const blocked = await securityCheck(req, res);
+    if (blocked) return blocked;
     return res.json({ success: true, data: await selfRate.setRates(desk, req.body || {}) });
   } catch (err) {
     return selfRateFail(res, err);

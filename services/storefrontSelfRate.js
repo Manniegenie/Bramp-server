@@ -33,7 +33,7 @@ const cfg = () => ({
   // Quoting stops when the trader's NGNB is below this (a payout couldn't be covered).
   minCoverNgn: require('./storefrontSettings').peek().values.selfMinCoverNgn,
   // A rate further than this from Bramp's is refused as a likely typo.
-  maxRateDeviation: Number(process.env.STOREFRONT_SELF_MAX_RATE_DEVIATION || 0.5),
+  maxRateDeviation: Number(process.env.STOREFRONT_SELF_MAX_RATE_DEVIATION || 0.1),
 });
 
 /** The desk's fee schedule: its own override where set, else the default. */

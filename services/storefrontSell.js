@@ -647,6 +647,24 @@ async function settle(orderId) {
 async function settleSelfRate(order, merchant, { customerNgn, ngnPerCoin, feeNgn, wasAwaitingFunds }) {
   const selfRate = require('./storefrontSelfRate');
   const debitNgn = round2(customerNgn + feeNgn);
+
+  // A Self rate payout moves the trader's NGNB to a bank account, so it's held
+  // to the same rules as an NGNB withdrawal: a person checks a payout to the
+  // trader's own name (they'd be paying themselves), and payouts count toward
+  // the rolling 7-day withdrawal limit (utils/withdrawalLimits.js).
+  const owner = await User.findById(merchant.userId).select('firstname middlename lastname').lean();
+  const ownName = [owner?.firstname, owner?.middlename, owner?.lastname].filter(Boolean).join(' ');
+  const { namesMatch } = require('../utils/kycHelpers');
+  // Two words at least: a first name alone would match strangers who share it.
+  if (ownName.split(/\s+/).length >= 2 && order.payoutAccount?.accountName && namesMatch(ownName, order.payoutAccount.accountName)) {
+    return review(order, 'Self rate payout to an account in the trader\'s own name', merchant);
+  }
+  const { checkWithdrawalLimit } = require('../utils/withdrawalLimits');
+  const limit = await checkWithdrawalLimit(merchant.userId, debitNgn);
+  if (!limit.allowed) {
+    return review(order, `Over the trader's 7-day withdrawal limit (₦${Math.round(limit.used).toLocaleString('en-NG')} used of ₦${limit.limit.toLocaleString('en-NG')})`, merchant);
+  }
+
   const debited = await User.updateOne(
     { _id: merchant.userId, ngnbBalance: { $gte: debitNgn } },
     { $inc: { ngnbBalance: -debitNgn }, $set: { lastBalanceUpdate: new Date() } }

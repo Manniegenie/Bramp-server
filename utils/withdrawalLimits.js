@@ -40,7 +40,20 @@ async function getRolling7DayWithdrawn(userId) {
     },
   ]);
 
-  return result?.total ?? 0;
+  // Self rate payouts move NGNB to a bank account too: they count toward the limit.
+  const StorefrontMerchant = require('../models/storefrontMerchant');
+  const StorefrontSellOrder = require('../models/storefrontSellOrder');
+  const desk = await StorefrontMerchant.findOne({ userId: uid }).select('_id').lean();
+  let selfRateTotal = 0;
+  if (desk) {
+    const [sr] = await StorefrontSellOrder.aggregate([
+      { $match: { merchantId: desk._id, 'selfRateFunds.debitedAt': { $gte: since }, 'selfRateFunds.refundedAt': null } },
+      { $group: { _id: null, total: { $sum: '$selfRateFunds.debitNgn' } } },
+    ]);
+    selfRateTotal = sr?.total ?? 0;
+  }
+
+  return (result?.total ?? 0) + selfRateTotal;
 }
 
 /**
