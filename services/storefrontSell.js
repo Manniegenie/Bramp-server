@@ -707,15 +707,18 @@ async function markPaid(order, merchant, payout, { customerNgn, ngnPerCoin, trad
 }
 
 /**
- * The rate a sale settles at: the desk's live rate, except within the honour
- * window after the quote (Platform controls, quoteHonourMinutes): at least
- * what the desk's settings at quote time give
- *    at today's market - the markdown it had (Bramp rate) or its own rate
- *    (Self rate) - so a trader can't lower the rate once the customer has
- *    sent. Market moves still settle live; a better live rate wins.
+ * The rate a sale settles at. The customer gets the desk's settings from when
+ * they committed, whichever way the trader has moved them since:
+ *  1. the quote, if the deposit is seen within quoteHonourMinutes of it
+ *     (Platform controls), else
+ *  2. the settings locked when Obiex first reported the deposit (rateLock),
+ *     else
+ *  3. the desk's live settings.
+ * "Settings" are the markdown (Bramp rate, applied to today's Bramp rate) or
+ * the trader's own rate (Self rate). A coin a Self rate desk hasn't priced
+ * has no rate: the sale goes to review.
  */
 async function settlementRate(order, merchant) {
-  // A coin a Self rate desk hasn't priced has no live rate: the sale goes to review.
   let live = null;
   let liveErr = null;
   try {
@@ -724,34 +727,33 @@ async function settlementRate(order, merchant) {
     liveErr = err;
   }
 
+  // The desk's settings at a point in time, at today's market (null if they no longer apply, e.g. Self rate revoked).
+  const at = async (rateMode, { markdownNgnPerUsd, ngnPerCoin }) => {
+    try {
+      return rateMode === 'SELF'
+        ? await rateFor(merchant, order.coin, { forSettlement: true, mode: 'SELF', selfNgnPerCoin: ngnPerCoin })
+        : await rateFor(merchant, order.coin, { forSettlement: true, mode: 'BRAMP', markdownNgnPerUsd: markdownNgnPerUsd ?? merchant.markdownNgnPerUsd });
+    } catch (err) {
+      return null;
+    }
+  };
+  const fixed = (r, basis) => ({ ...r, basis: live && r.ngnPerCoin === live.ngnPerCoin ? 'LIVE' : basis });
+
   const minutes = (await settings.get()).values.quoteHonourMinutes;
   const q = order.quote || {};
-  const fresh = minutes > 0 && q.quotedAt && q.ngnPerCoin > 0 && Date.now() - new Date(q.quotedAt).getTime() <= minutes * 60 * 1000;
-  // The desk's settings when the deposit was first seen (no time limit).
-  const lock = order.rateLock;
-  if (lock?.at) {
-    let asLocked = null;
-    try {
-      asLocked = lock.rateMode === 'SELF'
-        ? await rateFor(merchant, order.coin, { forSettlement: true, mode: 'SELF', selfNgnPerCoin: lock.ngnPerCoin })
-        : await rateFor(merchant, order.coin, { forSettlement: true, mode: 'BRAMP', markdownNgnPerUsd: lock.markdownNgnPerUsd });
-    } catch (err) {
-      asLocked = null; // e.g. Self rate since revoked
-    }
-    if (asLocked && (!live || asLocked.ngnPerCoin > live.ngnPerCoin)) live = { ...asLocked, basis: 'LOCKED_AT_DETECTION' };
+  const seenAt = order.deposit?.detectedAt || order.deposit?.confirmedAt || new Date();
+  const quoteFresh = minutes > 0 && q.quotedAt && q.ngnPerCoin > 0 && new Date(seenAt).getTime() - new Date(q.quotedAt).getTime() <= minutes * 60 * 1000;
+  if (quoteFresh && !order.openedByDeposit) {
+    const asQuoted = await at(order.rateMode, { markdownNgnPerUsd: q.markdownNgnPerUsd, ngnPerCoin: q.ngnPerCoin });
+    if (asQuoted) return fixed(asQuoted, 'QUOTE_HONOURED');
   }
 
-  if (fresh) {
-    let asQuoted = null;
-    try {
-      asQuoted = order.rateMode === 'SELF'
-        ? await rateFor(merchant, order.coin, { forSettlement: true, mode: 'SELF', selfNgnPerCoin: q.ngnPerCoin })
-        : await rateFor(merchant, order.coin, { forSettlement: true, mode: 'BRAMP', markdownNgnPerUsd: q.markdownNgnPerUsd ?? merchant.markdownNgnPerUsd });
-    } catch (err) {
-      asQuoted = null; // e.g. Self rate since revoked: the live rate stands
-    }
-    if (asQuoted && (!live || asQuoted.ngnPerCoin > live.ngnPerCoin)) live = { ...asQuoted, basis: 'QUOTE_HONOURED' };
+  const lock = order.rateLock;
+  if (lock?.at) {
+    const asLocked = await at(lock.rateMode, { markdownNgnPerUsd: lock.markdownNgnPerUsd, ngnPerCoin: lock.ngnPerCoin });
+    if (asLocked) return fixed(asLocked, 'LOCKED_AT_DETECTION');
   }
+
   if (!live) throw liveErr;
   return live;
 }
