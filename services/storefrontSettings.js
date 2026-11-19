@@ -18,6 +18,7 @@ const DEFAULTS = () => ({
   newDeskDailyMaxNgn: Number(process.env.STOREFRONT_NEW_DESK_DAILY_MAX_NGN || 2000000),
   minPayoutNgn: Number(process.env.STOREFRONT_MIN_PAYOUT_NGN || 1000),
   quoteHonourMinutes: Number(process.env.STOREFRONT_QUOTE_HONOUR_MINUTES ?? 10),
+  earlySellMaxNgn: Number(process.env.STOREFRONT_EARLY_SELL_MAX_NGN ?? 2000000),
   largeTradeNgn: Number(process.env.STOREFRONT_ALERT_LARGE_TRADE_NGN || 5000000),
   velocityCount: Number(process.env.STOREFRONT_ALERT_VELOCITY_COUNT || 5),
   velocityWindowMinutes: Number(process.env.STOREFRONT_ALERT_VELOCITY_MINUTES || 60),

@@ -32,6 +32,7 @@ const storefrontSettingsSchema = new mongoose.Schema({
     newDeskDailyMaxNgn: { type: Number, default: null, min: 0 },
     minPayoutNgn: { type: Number, default: null, min: 0 },
     quoteHonourMinutes: { type: Number, default: null, min: 0 },
+    earlySellMaxNgn: { type: Number, default: null, min: 0 },
     largeTradeNgn: { type: Number, default: null, min: 0 },
     velocityCount: { type: Number, default: null, min: 0 },
     velocityWindowMinutes: { type: Number, default: null, min: 1 },

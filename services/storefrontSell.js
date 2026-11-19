@@ -332,17 +332,38 @@ async function useAccount(merchant, customer, { accountId, bankCode, accountNumb
 async function handleObiexDeposit({ address, currency, amount, status, transactionId, hash }) {
   const addr = await StorefrontDepositAddress.findOne({ address });
   if (!addr) return false;
-  if (String(status).toUpperCase() !== 'CONFIRMED') return true;
-
+  const s = String(status || '').toUpperCase();
+  const confirmed = CONFIRMED_STATUSES.includes(s);
+  const failed = FAILED_STATUSES.includes(s);
   const amt = Number(amount);
-  if (!transactionId || !(amt > 0)) {
-    logger.warn('Storefront sell: deposit without id or amount', { address, transactionId, amount });
+  if (!transactionId || (!failed && !(amt > 0))) {
+    logger.warn('Storefront sell: deposit without id or amount', { address, transactionId, amount, status: s });
     return true;
   }
-  if (await StorefrontSellOrder.exists({ 'deposit.transactionId': String(transactionId) })) return true; // retry
+
+  // Seen before while pending (now confirmed or failed), or a retry.
+  const seen = await StorefrontSellOrder.findOne({ 'deposit.transactionId': String(transactionId) });
+  if (seen) {
+    if (failed) return depositFailed(seen);
+    if (!confirmed || seen.deposit.confirmedAt) return true;
+    const now = await StorefrontSellOrder.findOneAndUpdate(
+      { _id: seen._id, 'deposit.confirmedAt': null },
+      { $set: { 'deposit.confirmedAt': new Date(), 'deposit.amount': amt, ...(hash ? { 'deposit.hash': hash } : {}) } },
+      { new: true }
+    );
+    if (!now || ['NEEDS_REVIEW', 'RESOLVED'].includes(now.status)) return true;
+    const merchant = await StorefrontMerchant.findById(now.merchantId);
+    if (now.sale?.early && now.sale?.ok && Number(now.sale.amount) !== amt) {
+      await review(now, `Confirmed ${amt} ${now.coin}, but ${now.sale.amount} ${now.coin} was sold when it was first seen`, merchant);
+      return true;
+    }
+    return depositConfirmed(now, merchant, amt);
+  }
+  if (failed) return true; // never seen while pending: nothing to undo
 
   const coin = String(currency || addr.coin).toUpperCase();
-  const deposit = { transactionId: String(transactionId), hash: hash || null, amount: amt, confirmedAt: new Date() };
+  // Pending: recorded and (Bramp rate, stablecoins) sold at once; paid only once confirmed.
+  const deposit = { transactionId: String(transactionId), hash: hash || null, amount: amt, detectedAt: new Date(), confirmedAt: confirmed ? new Date() : null };
 
   // Another coin sent to this address (e.g. TRX to a USDT-on-Tron address) is
   // never priced as the address's coin: a person checks it.
@@ -395,6 +416,16 @@ async function handleObiexDeposit({ address, currency, amount, status, transacti
     await StorefrontCustomer.updateOne({ _id: addr.customerId }, { $inc: { 'stats.trades': 1 } });
   }
 
+  if (!confirmed) {
+    logger.info('Storefront sell: deposit seen, waiting for confirmation', { reference: order.reference, coin: order.coin, amount: amt });
+    earlySellInBackground(order._id);
+    return true;
+  }
+  return depositConfirmed(order, merchant, amt);
+}
+
+/** A deposit has confirmed: tell the trader and the customer, then pay (or ask where to). */
+async function depositConfirmed(order, merchant, amt) {
   logger.info('Storefront sell: deposit confirmed', { reference: order.reference, coin: order.coin, amount: amt });
   if (merchant) notifyTrader(merchant, 'deposit_confirmed', order).catch(() => {});
 
@@ -412,6 +443,99 @@ async function handleObiexDeposit({ address, currency, amount, status, transacti
     : [`✅ I've received your *${amt} ${order.coin}*. I'm paying you now at the live rate and will message you as soon as it's sent. Ref ${order.reference}.`,
       { env: 'STELLA_TEMPLATE_DEPOSIT_RECEIVED', params: [amt, order.coin, desk, order.reference] }]));
   settleInBackground(order._id);
+  return true;
+}
+
+// ── Selling at detection (Bramp rate) ──────────────────────────────────────
+
+// Obiex reports a deposit while it's still pending, then again once confirmed.
+const CONFIRMED_STATUSES = ['CONFIRMED', 'SUCCESSFUL', 'COMPLETED'];
+const FAILED_STATUSES = ['FAILED', 'REJECTED', 'CANCELLED', 'REVERSED'];
+// Sold as soon as the deposit is seen: stablecoins only, where a pending
+// transfer that never confirms is very unlikely. Everything else (and Self
+// rate, which has no sale) waits for confirmation. Paid only once confirmed.
+const EARLY_SELL_COINS = ['USDT', 'USDC'];
+
+function earlySellInBackground(orderId) {
+  setImmediate(() => earlySell(orderId).catch((err) =>
+    logger.error('Storefront sell: early sale failed', { orderId: String(orderId), error: err.message })));
+}
+
+/**
+ * A Bramp rate deposit just seen (not yet confirmed): sell the coin on Obiex
+ * now, so the rate is the one when the customer sent, and lock the figures.
+ * Skipped (it sells on confirmation instead) above the cap or when the sale
+ * would only go to review: below the minimum payout, a blocked number or
+ * account, or over the desk's limits.
+ */
+async function earlySell(orderId) {
+  const order = await StorefrontSellOrder.findById(orderId);
+  if (!order || order.deposit?.confirmedAt || order.sale?.at || order.status !== 'AWAITING_DEPOSIT') return;
+  if (!EARLY_SELL_COINS.includes(order.coin)) return;
+  const merchant = await StorefrontMerchant.findById(order.merchantId);
+  if (!merchant || merchant.rateMode !== 'BRAMP') return;
+  const { values } = await settings.get();
+  if (!(values.earlySellMaxNgn > 0)) return;
+
+  let rate;
+  try {
+    rate = await settlementRate(order, merchant);
+  } catch (err) {
+    return; // no rate now: it's priced on confirmation (or goes to review then)
+  }
+  if (rate.rateMode !== 'BRAMP') return;
+  const amount = order.deposit.amount;
+  const customerNgn = floor2(amount * rate.ngnPerCoin);
+  if (customerNgn > values.earlySellMaxNgn) return;
+  if (values.minPayoutNgn > 0 && customerNgn < values.minPayoutNgn) return;
+  if (await compliance.payoutBlock(order)) return;
+  if (await overLimits(order, merchant, customerNgn)) return;
+
+  // Claim the early sale: once, and only while still unconfirmed and unsold.
+  const claimed = await StorefrontSellOrder.findOneAndUpdate(
+    { _id: order._id, status: 'AWAITING_DEPOSIT', 'deposit.confirmedAt': null, 'sale.at': null },
+    { $set: { 'sale.at': new Date(), 'sale.early': true } }
+  );
+  if (!claimed) return;
+
+  let sold;
+  try {
+    sold = await swapCryptoToNGNX({ sourceCode: order.coin, amount });
+  } catch (err) {
+    sold = { success: false, error: err.message };
+  }
+  if (!sold || sold.success === false) {
+    // Not sold: back to selling on confirmation.
+    await StorefrontSellOrder.updateOne({ _id: order._id }, { $set: { 'sale.at': null, 'sale.early': false, 'sale.error': String(sold?.error || sold?.message || 'swap failed').slice(0, 300) } });
+    logger.warn('Storefront sell: early sale failed, will sell on confirmation', { reference: order.reference });
+  } else {
+    const traderEarningNgn = round2(amount * rate.usdPerCoin * rate.markdownNgnPerUsd);
+    await StorefrontSellOrder.updateOne({ _id: order._id }, {
+      $set: {
+        rateMode: 'BRAMP', 'sale.ok': true, 'sale.amount': amount, 'sale.error': null,
+        settlement: { ngnPerCoin: rate.ngnPerCoin, rateAt: new Date(), customerNgn, traderEarningNgn, feeNgn: 0, basis: rate.basis || 'LIVE' },
+      },
+    });
+    logger.info('Storefront sell: sold at detection', { reference: order.reference, coin: order.coin, amount, ngnPerCoin: rate.ngnPerCoin });
+  }
+  // Confirmed while selling: settle now (settle waits for an early sale in flight).
+  const fresh = await StorefrontSellOrder.findById(order._id).select('deposit.confirmedAt payoutAccount status');
+  if (fresh?.deposit?.confirmedAt) settleInBackground(order._id);
+}
+
+/** A pending deposit Obiex then reported failed. If it was sold early, Bramp sold coins it won't get. */
+async function depositFailed(order) {
+  if (order.deposit?.confirmedAt || ['NEEDS_REVIEW', 'RESOLVED', 'PAID'].includes(order.status)) return true;
+  const merchant = await StorefrontMerchant.findById(order.merchantId);
+  if (order.sale?.early && order.sale?.ok) {
+    await require('../models/storefrontAlert').create({
+      type: 'LATE_PAYOUT', merchantId: order.merchantId, waId: order.waId, orderReference: order.reference, amountNgn: order.settlement?.customerNgn || null,
+      detail: `Deposit failed after ${order.sale.amount} ${order.coin} was sold at detection: Bramp sold coins it won't receive (nothing was paid out)`,
+    }).catch(() => {});
+    await review(order, `Deposit failed on chain after the coin was sold early (nothing paid out)`, merchant);
+  } else {
+    await review(order, 'Deposit failed on chain before confirming (nothing sold or paid)', merchant);
+  }
   return true;
 }
 
@@ -596,7 +720,12 @@ async function settlementRate(order, merchant) {
 
 /** Work out the naira at the live rate, then pay the customer (Bramp rate: after selling the coin; Self rate: from the trader's NGNB). */
 async function settle(orderId) {
-  const ready = { _id: orderId, status: { $in: ['AWAITING_DEPOSIT', 'AWAITING_ACCOUNT', 'AWAITING_FUNDS'] }, 'deposit.transactionId': { $type: 'string' }, 'payoutAccount.accountNumber': { $type: 'string' } };
+  // Only a confirmed deposit is ever paid; an early sale still in flight is waited for.
+  const ready = {
+    _id: orderId, status: { $in: ['AWAITING_DEPOSIT', 'AWAITING_ACCOUNT', 'AWAITING_FUNDS'] },
+    'deposit.transactionId': { $type: 'string' }, 'deposit.confirmedAt': { $type: 'date' }, 'payoutAccount.accountNumber': { $type: 'string' },
+    $or: [{ 'sale.early': { $ne: true } }, { 'sale.ok': true }],
+  };
   // Bramp's kill switch holds payouts: mark it, and releaseHeld() pays it once they resume.
   if (await settings.payoutsHeld()) {
     await StorefrontSellOrder.updateOne({ ...ready, heldAt: null }, { $set: { heldAt: new Date() } });
@@ -613,6 +742,16 @@ async function settle(orderId) {
   order.status = 'SELLING';
   const merchant = await StorefrontMerchant.findById(order.merchantId);
   if (!merchant) return review(order, 'Desk not found', null);
+
+  // Sold when the deposit was first seen: pay the locked figures, no second sale.
+  if (order.sale?.early && order.sale?.ok) {
+    const { ngnPerCoin, customerNgn, traderEarningNgn } = order.settlement;
+    await compliance.screen(order, merchant, customerNgn);
+    const blocked = await compliance.payoutBlock(order);
+    if (blocked) return review(order, `${blocked} (the coin was already sold)`, merchant);
+    if (!(await toPaying(order))) return;
+    return payBrampSale(order, merchant, { customerNgn, ngnPerCoin, traderEarningNgn });
+  }
 
   // The live rate at settlement (settlementRate: with the quote honoured, or
   // Bramp rate for a coin a Self rate desk hasn't priced).
@@ -663,6 +802,11 @@ async function settle(orderId) {
     return;
   }
 
+  return payBrampSale(order, merchant, { customerNgn, ngnPerCoin, traderEarningNgn });
+}
+
+/** Bramp rate, coin sold: pay the customer from NGNX, then credit the desk's earning. */
+async function payBrampSale(order, merchant, { customerNgn, ngnPerCoin, traderEarningNgn }) {
   // 2. Pay the customer from NGNX.
   const payout = await payCustomer(order, merchant, customerNgn);
   if (!payout?.success) {
@@ -811,4 +955,5 @@ module.exports = {
   handleObiexDeposit, settle, flagStuck, retryAwaitingFunds, releaseHeld, customerSales, serializeSale,
   StorefrontSellError,
   _markPaid: markPaid, // tests
+  earlySell,
 };

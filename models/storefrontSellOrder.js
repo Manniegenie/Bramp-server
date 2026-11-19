@@ -49,7 +49,8 @@ const storefrontSellOrderSchema = new mongoose.Schema({
     transactionId: { type: String, default: null }, // Obiex's; unique when set
     hash: { type: String, default: null },
     amount: { type: Number, default: null },
-    confirmedAt: { type: Date, default: null },
+    detectedAt: { type: Date, default: null }, // first reported by Obiex (pending)
+    confirmedAt: { type: Date, default: null }, // only a confirmed deposit is paid
   },
 
   // Settled figures, at the live rate when the deposit was processed.
@@ -73,6 +74,8 @@ const storefrontSellOrderSchema = new mongoose.Schema({
 
   sale: { // Bramp rate: the coin sold for NGNX
     ok: { type: Boolean, default: null },
+    early: { type: Boolean, default: false }, // sold when the deposit was first seen (stablecoins), before confirming
+    amount: { type: Number, default: null }, // coins sold
     error: { type: String, default: null },
     at: { type: Date, default: null },
   },
