@@ -117,17 +117,20 @@ async function brampRate(coin) {
   return { brampNgnPerUsd, usdPerCoin, brampNgnPerCoin: floor2(usdPerCoin * brampNgnPerUsd) };
 }
 
-async function rateFor(merchant, coin, { forSettlement = false } = {}) {
+// mode / markdownNgnPerUsd / selfNgnPerCoin override the desk's current settings
+// (settlementRate: a quote honoured, or Bramp rate for an unpriced Self rate coin).
+async function rateFor(merchant, coin, { forSettlement = false, mode = null, markdownNgnPerUsd: markdownOverride = null, selfNgnPerCoin = null } = {}) {
+  const rateMode = mode || merchant.rateMode;
   if (merchant.status !== 'active') throw new StorefrontSellError('This desk is not taking trades right now.', 409);
   if (!forSettlement) {
     const paused = await settings.sellingPaused(); // Bramp's kill switch
     if (paused) throw new StorefrontSellError(paused, 503);
   }
 
-  if (merchant.rateMode === 'SELF') {
+  if (rateMode === 'SELF') {
     const selfRate = require('./storefrontSelfRate');
     if (merchant.selfRate?.status !== 'APPROVED') throw new StorefrontSellError('This desk is not taking trades right now.', 409);
-    const ngnPerCoin = Number(merchant.selfRate?.rates?.[coin]);
+    const ngnPerCoin = Number(selfNgnPerCoin ?? merchant.selfRate?.rates?.[coin]);
     if (!(ngnPerCoin > 0)) throw new StorefrontSellError(`This desk has not set a ${coin} rate yet.`, 409);
     if (!forSettlement) {
       const trader = await User.findById(merchant.userId).select('ngnbBalance');
@@ -135,11 +138,11 @@ async function rateFor(merchant, coin, { forSettlement = false } = {}) {
     }
     return { rateMode: 'SELF', ngnPerCoin: floor2(ngnPerCoin), usdPerCoin: null, markdownNgnPerUsd: 0, brampNgnPerUsd: null, ngnPerUsd: null };
   }
-  if (merchant.rateMode !== 'BRAMP') throw new StorefrontSellError('This desk has not set its rate yet.', 409);
+  if (rateMode !== 'BRAMP') throw new StorefrontSellError('This desk has not set its rate yet.', 409);
 
   const { brampNgnPerUsd, usdPerCoin } = await brampRate(coin);
 
-  const markdownNgnPerUsd = Math.max(0, Number(merchant.markdownNgnPerUsd) || 0);
+  const markdownNgnPerUsd = Math.max(0, Number(markdownOverride ?? merchant.markdownNgnPerUsd) || 0);
   const ngnPerUsd = brampNgnPerUsd - markdownNgnPerUsd;
   if (!(ngnPerUsd > 0)) throw new StorefrontSellError('This desk is not taking trades right now.', 409);
   return {
@@ -555,6 +558,50 @@ async function markPaid(order, merchant, payout, { customerNgn, ngnPerCoin, trad
   return paidAt;
 }
 
+/**
+ * The rate a sale settles at. The desk's live rate, except:
+ *  - A Self rate desk paid in a coin it hasn't priced (an address issued while
+ *    it was on Bramp rate): Bramp's live rate minus the desk's markdown.
+ *  - Within the honour window after the quote (Platform controls,
+ *    quoteHonourMinutes): at least what the desk's settings at quote time give
+ *    at today's market - the markdown it had (Bramp rate) or its own rate
+ *    (Self rate) - so a trader can't lower the rate once the customer has
+ *    sent. Market moves still settle live; a better live rate wins.
+ */
+async function settlementRate(order, merchant) {
+  let live = null;
+  let liveErr = null;
+  try {
+    live = { ...(await rateFor(merchant, order.coin, { forSettlement: true })), basis: 'LIVE' };
+  } catch (err) {
+    liveErr = err;
+    if (merchant.rateMode === 'SELF' && /has not set a/.test(err.message)) {
+      try {
+        live = { ...(await rateFor(merchant, order.coin, { forSettlement: true, mode: 'BRAMP' })), basis: 'BRAMP_FALLBACK' };
+      } catch (fallbackErr) {
+        liveErr = fallbackErr;
+      }
+    }
+  }
+
+  const minutes = (await settings.get()).values.quoteHonourMinutes;
+  const q = order.quote || {};
+  const fresh = minutes > 0 && q.quotedAt && q.ngnPerCoin > 0 && Date.now() - new Date(q.quotedAt).getTime() <= minutes * 60 * 1000;
+  if (fresh) {
+    let asQuoted = null;
+    try {
+      asQuoted = order.rateMode === 'SELF'
+        ? await rateFor(merchant, order.coin, { forSettlement: true, mode: 'SELF', selfNgnPerCoin: q.ngnPerCoin })
+        : await rateFor(merchant, order.coin, { forSettlement: true, mode: 'BRAMP', markdownNgnPerUsd: q.markdownNgnPerUsd ?? merchant.markdownNgnPerUsd });
+    } catch (err) {
+      asQuoted = null; // e.g. Self rate since revoked: the live rate stands
+    }
+    if (asQuoted && (!live || asQuoted.ngnPerCoin > live.ngnPerCoin)) live = { ...asQuoted, basis: 'QUOTE_HONOURED' };
+  }
+  if (!live) throw liveErr;
+  return live;
+}
+
 /** Work out the naira at the live rate, then pay the customer (Bramp rate: after selling the coin; Self rate: from the trader's NGNB). */
 async function settle(orderId) {
   const ready = { _id: orderId, status: { $in: ['AWAITING_DEPOSIT', 'AWAITING_ACCOUNT', 'AWAITING_FUNDS'] }, 'deposit.transactionId': { $type: 'string' }, 'payoutAccount.accountNumber': { $type: 'string' } };
@@ -575,10 +622,11 @@ async function settle(orderId) {
   const merchant = await StorefrontMerchant.findById(order.merchantId);
   if (!merchant) return review(order, 'Desk not found', null);
 
-  // Always the live rate, at settlement (never a quote from earlier), in the desk's current mode.
+  // The live rate at settlement (settlementRate: with the quote honoured, or
+  // Bramp rate for a coin a Self rate desk hasn't priced).
   let live;
   try {
-    live = await rateFor(merchant, order.coin, { forSettlement: true });
+    live = await settlementRate(order, merchant);
   } catch (err) {
     return review(order, `No rate at settlement: ${err.message}`, merchant);
   }
@@ -589,7 +637,7 @@ async function settle(orderId) {
   const feeNgn = self ? require('./storefrontSelfRate').feeFor(merchant, customerNgn) : 0;
   const traderEarningNgn = self ? null : round2(amount * live.usdPerCoin * live.markdownNgnPerUsd);
   await StorefrontSellOrder.updateOne({ _id: order._id }, {
-    $set: { rateMode: live.rateMode, settlement: { ngnPerCoin, rateAt: new Date(), customerNgn, traderEarningNgn, feeNgn } },
+    $set: { rateMode: live.rateMode, settlement: { ngnPerCoin, rateAt: new Date(), customerNgn, traderEarningNgn, feeNgn, basis: live.basis || 'LIVE' } },
   });
   order.rateMode = live.rateMode;
 
