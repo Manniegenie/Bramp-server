@@ -14,7 +14,18 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const Anthropic = (() => { try { return require('@anthropic-ai/sdk'); } catch (e) { return null; } })();
-const { AVAILABLE_TOOLS, executeTool } = require('./tools');
+const { AVAILABLE_TOOLS: ALL_TOOLS, executeTool: runTool } = require('./tools');
+
+// Utilities (airtime, data, electricity, cable TV) are off for now: Stella
+// doesn't get those tools and says they aren't available. STELLA_UTILITIES=on
+// brings them back (the app hides its entry points too: constants/features.ts).
+const UTILITY_TOOLS = ['prepare_airtime_purchase', 'prepare_data_purchase', 'prepare_electricity_purchase', 'prepare_cable_purchase'];
+const UTILITIES_ON = process.env.STELLA_UTILITIES === 'on';
+const toolName = (t) => t?.function?.name || t?.name;
+const AVAILABLE_TOOLS = UTILITIES_ON ? ALL_TOOLS : ALL_TOOLS.filter((t) => !UTILITY_TOOLS.includes(toolName(t)));
+const executeTool = (name, args, authCtx) => (!UTILITIES_ON && UTILITY_TOOLS.includes(name)
+  ? Promise.resolve({ success: false, error: 'Utilities (airtime, data, electricity and cable TV) are not available right now.' })
+  : runTool(name, args, authCtx));
 const { quickIntentCheck, analyzeConversationContext } = require('./aiIntents');
 // Session management removed - no longer using 2-minute session windows
 const cache = require('./cache');
@@ -252,8 +263,8 @@ WHAT YOU CAN DO:
 - Show current NGN rates and token prices
 - Validate a bank account's details (resolve the account name before a withdrawal)
 - Show and manage notifications (view, mark read)
-- Prepare a withdrawal, airtime purchase, data purchase, electricity payment, or cable TV payment
-- Answer finance and crypto questions conversationally — how crypto works, market concepts, NGN economics, personal finance as it relates to using Bramp
+- Prepare a withdrawal${UTILITIES_ON ? ', airtime purchase, data purchase, electricity payment, or cable TV payment' : ''}
+${UTILITIES_ON ? '' : '- Utilities (airtime, data, electricity, cable TV) are NOT available right now. If the user asks for one, say briefly that they are not available at the moment and offer what you can do instead. Never say you have prepared one.\n'}- Answer finance and crypto questions conversationally — how crypto works, market concepts, NGN economics, personal finance as it relates to using Bramp
 
 SECURITY — NON-NEGOTIABLE: You NEVER ask for, accept, or process a PIN, password, or 2FA code in chat. For anything that moves money (withdrawal, airtime, data, electricity, cable), your "prepare_*" tools only validate details and hand off to the app's own secure confirmation screen — that screen is where the user enters their PIN. After calling one of these tools, tell the user what you've prepared and that they should confirm it on the screen that just opened. Do not imply the action is complete until they've confirmed it there.
 
