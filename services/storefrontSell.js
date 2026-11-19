@@ -118,7 +118,7 @@ async function brampRate(coin) {
 }
 
 // mode / markdownNgnPerUsd / selfNgnPerCoin override the desk's current settings
-// (settlementRate: a quote honoured, or Bramp rate for an unpriced Self rate coin).
+// (settlementRate: the desk's settings at quote time, honoured).
 async function rateFor(merchant, coin, { forSettlement = false, mode = null, markdownNgnPerUsd: markdownOverride = null, selfNgnPerCoin = null } = {}) {
   const rateMode = mode || merchant.rateMode;
   if (merchant.status !== 'active') throw new StorefrontSellError('This desk is not taking trades right now.', 409);
@@ -131,7 +131,7 @@ async function rateFor(merchant, coin, { forSettlement = false, mode = null, mar
     const selfRate = require('./storefrontSelfRate');
     if (merchant.selfRate?.status !== 'APPROVED') throw new StorefrontSellError('This desk is not taking trades right now.', 409);
     const ngnPerCoin = Number(selfNgnPerCoin ?? merchant.selfRate?.rates?.[coin]);
-    if (!(ngnPerCoin > 0)) throw new StorefrontSellError(`This desk has not set a ${coin} rate yet.`, 409);
+    if (!(ngnPerCoin > 0)) throw new StorefrontSellError(`This trader hasn't priced ${coin} yet.`, 409);
     if (!forSettlement) {
       const trader = await User.findById(merchant.userId).select('ngnbBalance');
       if ((trader?.ngnbBalance || 0) < selfRate.cfg().minCoverNgn) throw new StorefrontSellError('This desk is not taking trades right now.', 409);
@@ -559,29 +559,21 @@ async function markPaid(order, merchant, payout, { customerNgn, ngnPerCoin, trad
 }
 
 /**
- * The rate a sale settles at. The desk's live rate, except:
- *  - A Self rate desk paid in a coin it hasn't priced (an address issued while
- *    it was on Bramp rate): Bramp's live rate minus the desk's markdown.
- *  - Within the honour window after the quote (Platform controls,
- *    quoteHonourMinutes): at least what the desk's settings at quote time give
+ * The rate a sale settles at: the desk's live rate, except within the honour
+ * window after the quote (Platform controls, quoteHonourMinutes): at least
+ * what the desk's settings at quote time give
  *    at today's market - the markdown it had (Bramp rate) or its own rate
  *    (Self rate) - so a trader can't lower the rate once the customer has
  *    sent. Market moves still settle live; a better live rate wins.
  */
 async function settlementRate(order, merchant) {
+  // A coin a Self rate desk hasn't priced has no live rate: the sale goes to review.
   let live = null;
   let liveErr = null;
   try {
     live = { ...(await rateFor(merchant, order.coin, { forSettlement: true })), basis: 'LIVE' };
   } catch (err) {
     liveErr = err;
-    if (merchant.rateMode === 'SELF' && /has not set a/.test(err.message)) {
-      try {
-        live = { ...(await rateFor(merchant, order.coin, { forSettlement: true, mode: 'BRAMP' })), basis: 'BRAMP_FALLBACK' };
-      } catch (fallbackErr) {
-        liveErr = fallbackErr;
-      }
-    }
   }
 
   const minutes = (await settings.get()).values.quoteHonourMinutes;

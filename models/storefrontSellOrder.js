@@ -59,9 +59,8 @@ const storefrontSellOrderSchema = new mongoose.Schema({
     customerNgn: { type: Number, default: null },
     traderEarningNgn: { type: Number, default: null },
     feeNgn: { type: Number, default: 0 },
-    // LIVE, QUOTE_HONOURED (the desk's settings at quote time beat its current
-    // ones) or BRAMP_FALLBACK (a Self rate desk paid in a coin it hasn't priced).
-    basis: { type: String, enum: ['LIVE', 'QUOTE_HONOURED', 'BRAMP_FALLBACK', null], default: null },
+    // LIVE, or QUOTE_HONOURED (the desk's settings at quote time beat its current ones).
+    basis: { type: String, enum: ['LIVE', 'QUOTE_HONOURED', null], default: null },
   },
 
   // Self rate: the trader's NGNB debited (payout + fee), the coin credited to them.
