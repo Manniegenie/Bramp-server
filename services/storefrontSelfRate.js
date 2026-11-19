@@ -134,10 +134,12 @@ const MIN_KYC_LEVEL = 2;
 async function apply(merchant, body = {}) {
   if (merchant.selfRate?.status === 'APPROVED') throw new SelfRateError('Self rate is already approved for this storefront.', 409);
   if (merchant.selfRate?.status === 'PENDING') throw new SelfRateError('Your application is being reviewed.', 409);
-  const owner = await User.findById(merchant.userId).select('kycLevel');
-  if ((owner?.kycLevel || 0) < MIN_KYC_LEVEL) {
-    throw new SelfRateError(`Complete KYC Level ${MIN_KYC_LEVEL} in the Bramp app before applying for Self rate.`, 403);
-  }
+  // KYC Level 2 before applying - OFF for now; uncomment to require it again
+  // (the app's gate in app/storefront/self-rate.tsx is off too).
+  // const owner = await User.findById(merchant.userId).select('kycLevel');
+  // if ((owner?.kycLevel || 0) < MIN_KYC_LEVEL) {
+  //   throw new SelfRateError(`Complete KYC Level ${MIN_KYC_LEVEL} in the Bramp app before applying for Self rate.`, 403);
+  // }
 
   if (!DETAIL_FIELDS.some((k) => body[k] !== undefined && body[k] !== null && body[k] !== '')) {
     merchant.selfRate.application = { submittedAt: new Date() };
