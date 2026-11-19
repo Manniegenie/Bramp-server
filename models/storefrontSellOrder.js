@@ -60,8 +60,18 @@ const storefrontSellOrderSchema = new mongoose.Schema({
     customerNgn: { type: Number, default: null },
     traderEarningNgn: { type: Number, default: null },
     feeNgn: { type: Number, default: 0 },
-    // LIVE, or QUOTE_HONOURED (the desk's settings at quote time beat its current ones).
-    basis: { type: String, enum: ['LIVE', 'QUOTE_HONOURED', null], default: null },
+    // LIVE, QUOTE_HONOURED (the desk's settings at quote time beat its current
+    // ones) or LOCKED_AT_DETECTION (its settings when the deposit was first seen did).
+    basis: { type: String, enum: ['LIVE', 'QUOTE_HONOURED', 'LOCKED_AT_DETECTION', null], default: null },
+  },
+
+  // The desk's own settings when the deposit was first seen (Obiex, pending):
+  // the trader can't make the rate worse after the customer has sent.
+  rateLock: {
+    rateMode: { type: String, enum: ['BRAMP', 'SELF', null], default: null },
+    markdownNgnPerUsd: { type: Number, default: null }, // Bramp rate
+    ngnPerCoin: { type: Number, default: null }, // Self rate: the trader's own rate
+    at: { type: Date, default: null },
   },
 
   // Self rate: the trader's NGNB debited (payout + fee), the coin credited to them.

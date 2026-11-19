@@ -231,7 +231,8 @@ async function startSale(merchant, customer, { coin: coinRaw, network: networkRa
   const quote = quoteFields(rate);
 
   let order = await StorefrontSellOrder.findOneAndUpdate(
-    { customerId: customer._id, coin, network, status: 'AWAITING_DEPOSIT' },
+    // Not one whose deposit is already on its way (seen, not yet confirmed): that one settles as it is.
+    { customerId: customer._id, coin, network, status: 'AWAITING_DEPOSIT', 'deposit.transactionId': null },
     { $set: { quote } },
     { new: true, sort: { createdAt: -1 } }
   );
@@ -418,6 +419,7 @@ async function handleObiexDeposit({ address, currency, amount, status, transacti
 
   if (!confirmed) {
     logger.info('Storefront sell: deposit seen, waiting for confirmation', { reference: order.reference, coin: order.coin, amount: amt });
+    await lockRate(order, merchant);
     earlySellInBackground(order._id);
     return true;
   }
@@ -455,6 +457,28 @@ const FAILED_STATUSES = ['FAILED', 'REJECTED', 'CANCELLED', 'REVERSED'];
 // transfer that never confirms is very unlikely. Everything else (and Self
 // rate, which has no sale) waits for confirmation. Paid only once confirmed.
 const EARLY_SELL_COINS = ['USDT', 'USDC'];
+
+/**
+ * Lock the desk's own settings as the deposit is first seen: its markdown
+ * (Bramp rate) or its rate for this coin (Self rate). settlementRate pays at
+ * least that at today's market, however long confirmation takes.
+ */
+async function lockRate(order, merchant) {
+  if (!merchant || order.rateLock?.at) return;
+  const self = merchant.rateMode === 'SELF';
+  const ngnPerCoin = self ? Number(merchant.selfRate?.rates?.[order.coin]) : null;
+  if (self && !(ngnPerCoin > 0)) return; // unpriced: nothing to lock (it goes to review)
+  await StorefrontSellOrder.updateOne({ _id: order._id, 'rateLock.at': null }, {
+    $set: {
+      rateLock: {
+        rateMode: self ? 'SELF' : 'BRAMP',
+        markdownNgnPerUsd: self ? null : Math.max(0, Number(merchant.markdownNgnPerUsd) || 0),
+        ngnPerCoin: self ? ngnPerCoin : null,
+        at: new Date(),
+      },
+    },
+  });
+}
 
 function earlySellInBackground(orderId) {
   setImmediate(() => earlySell(orderId).catch((err) =>
@@ -703,6 +727,20 @@ async function settlementRate(order, merchant) {
   const minutes = (await settings.get()).values.quoteHonourMinutes;
   const q = order.quote || {};
   const fresh = minutes > 0 && q.quotedAt && q.ngnPerCoin > 0 && Date.now() - new Date(q.quotedAt).getTime() <= minutes * 60 * 1000;
+  // The desk's settings when the deposit was first seen (no time limit).
+  const lock = order.rateLock;
+  if (lock?.at) {
+    let asLocked = null;
+    try {
+      asLocked = lock.rateMode === 'SELF'
+        ? await rateFor(merchant, order.coin, { forSettlement: true, mode: 'SELF', selfNgnPerCoin: lock.ngnPerCoin })
+        : await rateFor(merchant, order.coin, { forSettlement: true, mode: 'BRAMP', markdownNgnPerUsd: lock.markdownNgnPerUsd });
+    } catch (err) {
+      asLocked = null; // e.g. Self rate since revoked
+    }
+    if (asLocked && (!live || asLocked.ngnPerCoin > live.ngnPerCoin)) live = { ...asLocked, basis: 'LOCKED_AT_DETECTION' };
+  }
+
   if (fresh) {
     let asQuoted = null;
     try {
