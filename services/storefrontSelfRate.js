@@ -91,6 +91,8 @@ async function runChecks(merchant) {
   const checks = { ranAt: new Date() };
 
   checks.kyc = { ok: (user?.kycLevel || 0) >= 2, level: user?.kycLevel || 0 };
+  // A plain application (no business details yet): only the KYC check applies.
+  if (!app.cacNumber) return checks;
 
   let entity = null;
   try {
@@ -118,13 +120,27 @@ async function runChecks(merchant) {
 // ── Trader: apply, rates ───────────────────────────────────────────────────
 
 /**
- * The trader's Self rate application: CAC number and type, business bank
- * account, expected monthly volume and source of funds. Runs the automatic
- * checks and puts the application in front of Bramp (PENDING).
+ * The trader's Self rate application, put in front of Bramp (PENDING). For
+ * now the app sends no business details: a trader just applies and Bramp
+ * decides (and sets the payout limit) in bramp-admin. If details are sent -
+ * CAC number and type, business bank account, expected monthly volume and
+ * source of funds - they're validated and checked as before.
  */
+const DETAIL_FIELDS = ['cacNumber', 'companyType', 'bankCode', 'accountNumber', 'expectedMonthlyVolumeNgn', 'sourceOfFunds'];
+
 async function apply(merchant, body = {}) {
   if (merchant.selfRate?.status === 'APPROVED') throw new SelfRateError('Self rate is already approved for this storefront.', 409);
   if (merchant.selfRate?.status === 'PENDING') throw new SelfRateError('Your application is being reviewed.', 409);
+
+  if (!DETAIL_FIELDS.some((k) => body[k] !== undefined && body[k] !== null && body[k] !== '')) {
+    merchant.selfRate.application = { submittedAt: new Date() };
+    merchant.selfRate.application.checks = await runChecks(merchant);
+    merchant.selfRate.status = 'PENDING';
+    merchant.selfRate.decision = { by: null, at: null, reason: null };
+    await merchant.save();
+    logger.info('Storefront self rate: application submitted (no business details)', { merchant: merchant.slug, kyc: !!merchant.selfRate.application.checks?.kyc?.ok });
+    return view(merchant);
+  }
 
   const cacNumber = String(body.cacNumber || '').trim().toUpperCase().replace(/^(RC|BN)\s*/, '');
   if (!/^\d{4,10}$/.test(cacNumber)) throw new SelfRateError('Enter the CAC registration number (RC or BN), digits only.');
@@ -173,7 +189,10 @@ async function setRates(merchant, rates = {}) {
   return view(merchant);
 }
 
-const summarize = (c = {}) => ({ kyc: !!c.kyc?.ok, cac: !!c.cac?.ok, director: !!c.director?.ok, bankName: !!c.bankName?.ok });
+/** Each check that ran, pass or fail (a plain application runs only kyc). */
+const summarize = (c = {}) => Object.fromEntries(['kyc', 'cac', 'director', 'bankName']
+  .filter((k) => c?.[k] && c[k].ok !== undefined && c[k].ok !== null)
+  .map((k) => [k, !!c[k].ok]));
 
 /** What the trader sees. */
 function view(merchant) {
