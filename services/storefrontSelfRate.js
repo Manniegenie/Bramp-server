@@ -128,9 +128,16 @@ async function runChecks(merchant) {
  */
 const DETAIL_FIELDS = ['cacNumber', 'companyType', 'bankCode', 'accountNumber', 'expectedMonthlyVolumeNgn', 'sourceOfFunds'];
 
+// Self rate pays customers from the trader's own NGNB, so they must be KYC level 2 first.
+const MIN_KYC_LEVEL = 2;
+
 async function apply(merchant, body = {}) {
   if (merchant.selfRate?.status === 'APPROVED') throw new SelfRateError('Self rate is already approved for this storefront.', 409);
   if (merchant.selfRate?.status === 'PENDING') throw new SelfRateError('Your application is being reviewed.', 409);
+  const owner = await User.findById(merchant.userId).select('kycLevel');
+  if ((owner?.kycLevel || 0) < MIN_KYC_LEVEL) {
+    throw new SelfRateError(`Complete KYC Level ${MIN_KYC_LEVEL} in the Bramp app before applying for Self rate.`, 403);
+  }
 
   if (!DETAIL_FIELDS.some((k) => body[k] !== undefined && body[k] !== null && body[k] !== '')) {
     merchant.selfRate.application = { submittedAt: new Date() };
@@ -256,6 +263,6 @@ async function reject(merchant, { reason } = {}, by) {
 }
 
 module.exports = {
-  COMPANY_TYPES, apply, setRates, view, recheck, approve, reject, runChecks, businessNamesMatch, feeFor, feeSchedule, cfg, SelfRateError,
+  COMPANY_TYPES, MIN_KYC_LEVEL, apply, setRates, view, recheck, approve, reject, runChecks, businessNamesMatch, feeFor, feeSchedule, cfg, SelfRateError,
   _lookupCac: lookupCac,
 };

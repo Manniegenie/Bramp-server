@@ -404,8 +404,14 @@ const selfRateFail = (res, err) => {
 router.get('/self-rate', async (req, res) => {
   const desk = await deskFor(req).catch(() => null);
   if (!desk) return fail(res, 404, 'Open a storefront first.');
-  const trader = await User.findById(req.user.id).select('ngnbBalance');
-  return res.json({ success: true, data: { ...selfRate.view(desk), ngnBalance: trader?.ngnbBalance || 0, companyTypes: selfRate.COMPANY_TYPES } });
+  const trader = await User.findById(req.user.id).select('ngnbBalance kycLevel');
+  return res.json({
+    success: true,
+    data: {
+      ...selfRate.view(desk), ngnBalance: trader?.ngnbBalance || 0, companyTypes: selfRate.COMPANY_TYPES,
+      kycLevel: trader?.kycLevel || 0, kycRequired: selfRate.MIN_KYC_LEVEL,
+    },
+  });
 });
 
 /** body: { cacNumber, companyType, bankCode, accountNumber, expectedMonthlyVolumeNgn, sourceOfFunds } */
